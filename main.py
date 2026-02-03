@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import matplotlib.pyplot as plt
+import numpy as np
 
 from slam import DataFolder
 
@@ -34,6 +35,28 @@ def main():
             good_matches.append(m)
 
     print(f"Good matches: {len(good_matches)}")
+
+    # Get first match and compute normalized coordinates
+    first_match = good_matches[0]
+    pt0 = kp0[first_match.queryIdx].pt  # (u, v) in image 0
+    pt1 = kp1[first_match.trainIdx].pt  # (u, v) in image 1
+
+    print(f"\nFirst match:")
+    print(f"  Image 0 pixel: ({pt0[0]:.2f}, {pt0[1]:.2f})")
+    print(f"  Image 1 pixel: ({pt1[0]:.2f}, {pt1[1]:.2f})")
+
+    # Apply inverse intrinsic matrix to get normalized coordinates
+    K = data.cam0_intrinsics.to_matrix()
+    K_inv = np.linalg.inv(K)
+
+    pt0_homog = np.array([pt0[0], pt0[1], 1.0])
+    pt1_homog = np.array([pt1[0], pt1[1], 1.0])
+
+    pt0_norm = K_inv @ pt0_homog
+    pt1_norm = K_inv @ pt1_homog
+
+    print(f"  Image 0 normalized: ({pt0_norm[0]:.4f}, {pt0_norm[1]:.4f})")
+    print(f"  Image 1 normalized: ({pt1_norm[0]:.4f}, {pt1_norm[1]:.4f})")
 
     # Draw matches
     img_matches = cv2.drawMatches(
