@@ -18,15 +18,15 @@ def main():
     img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
     img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
 
-    kp0, desc0 = sift.detectAndCompute(img0, None)
-    kp1, desc1 = sift.detectAndCompute(img1, None)
+    keypoints0, descriptors0 = sift.detectAndCompute(img0, None)
+    keypoints1, descriptors1 = sift.detectAndCompute(img1, None)
 
-    print(f"Image 0: {len(kp0)} keypoints")
-    print(f"Image 1: {len(kp1)} keypoints")
+    print(f"Image 0: {len(keypoints0)} keypoints")
+    print(f"Image 1: {len(keypoints1)} keypoints")
 
     # Match descriptors using BFMatcher with ratio test
     bf = cv2.BFMatcher()
-    matches = bf.knnMatch(desc0, desc1, k=2)
+    matches = bf.knnMatch(descriptors0, descriptors1, k=2)
 
     # Apply ratio test (Lowe's ratio test)
     good_matches = []
@@ -38,19 +38,34 @@ def main():
 
     # Get first match and compute normalized coordinates
     first_match = good_matches[0]
-    pt0 = kp0[first_match.queryIdx].pt  # (u, v) in image 0
-    pt1 = kp1[first_match.trainIdx].pt  # (u, v) in image 1
+    keypoint0 = keypoints0[first_match.queryIdx]
+    keypoint1 = keypoints1[first_match.trainIdx]
 
-    print(f"\nFirst match:")
-    print(f"  Image 0 pixel: ({pt0[0]:.2f}, {pt0[1]:.2f})")
-    print(f"  Image 1 pixel: ({pt1[0]:.2f}, {pt1[1]:.2f})")
+    print(f"\nFirst match (DMatch):")
+    print(f"  queryIdx: {first_match.queryIdx}")
+    print(f"  trainIdx: {first_match.trainIdx}")
+    print(f"  distance: {first_match.distance:.2f}")
+
+    print(f"\nKeypoint 0:")
+    print(f"  pt: ({keypoint0.pt[0]:.2f}, {keypoint0.pt[1]:.2f})")
+    print(f"  size: {keypoint0.size:.2f}")
+    print(f"  angle: {keypoint0.angle:.2f}")
+    print(f"  response: {keypoint0.response:.4f}")
+    print(f"  octave: {keypoint0.octave}")
+
+    print(f"\nKeypoint 1:")
+    print(f"  pt: ({keypoint1.pt[0]:.2f}, {keypoint1.pt[1]:.2f})")
+    print(f"  size: {keypoint1.size:.2f}")
+    print(f"  angle: {keypoint1.angle:.2f}")
+    print(f"  response: {keypoint1.response:.4f}")
+    print(f"  octave: {keypoint1.octave}")
 
     # Apply inverse intrinsic matrix to get normalized coordinates
     K = data.cam0_intrinsics.to_matrix()
     K_inv = np.linalg.inv(K)
 
-    pt0_homog = np.array([pt0[0], pt0[1], 1.0])
-    pt1_homog = np.array([pt1[0], pt1[1], 1.0])
+    pt0_homog = np.array([keypoint0.pt[0], keypoint0.pt[1], 1.0])
+    pt1_homog = np.array([keypoint1.pt[0], keypoint1.pt[1], 1.0])
 
     pt0_norm = K_inv @ pt0_homog
     pt1_norm = K_inv @ pt1_homog
@@ -60,7 +75,7 @@ def main():
 
     # Draw matches
     img_matches = cv2.drawMatches(
-        img0, kp0, img1, kp1, good_matches, None,
+        img0, keypoints0, img1, keypoints1, good_matches, None,
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
     )
 
