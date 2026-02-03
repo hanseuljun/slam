@@ -1,4 +1,5 @@
 import csv
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -17,31 +18,40 @@ def read_timestamps(data_csv_path: Path) -> list[int]:
     return timestamps
 
 
+@dataclass
+class DataFolder:
+    path: Path
+    cam0_timestamps: list[int]
+    cam1_timestamps: list[int]
+
+    @classmethod
+    def load(cls, path: Path) -> "DataFolder":
+        cam0_timestamps = read_timestamps(path / "cam0" / "data.csv")
+        cam1_timestamps = read_timestamps(path / "cam1" / "data.csv")
+        return cls(path, cam0_timestamps, cam1_timestamps)
+
+    def get_cam0_image_path(self, timestamp: int) -> Path:
+        return self.path / "cam0" / "data" / f"{timestamp}.png"
+
+    def get_cam1_image_path(self, timestamp: int) -> Path:
+        return self.path / "cam1" / "data" / f"{timestamp}.png"
+
+
 def main():
-    data_dir = Path("data/machine_hall/MH_01_easy/mav0")
-
-    # Read cam0 timestamps
-    cam0_csv = data_dir / "cam0" / "data.csv"
-    cam0_timestamps = read_timestamps(cam0_csv)
-    print(f"Found {len(cam0_timestamps)} frames in cam0")
-
-    # Read cam1 timestamps
-    cam1_csv = data_dir / "cam1" / "data.csv"
-    cam1_timestamps = read_timestamps(cam1_csv)
-    print(f"Found {len(cam1_timestamps)} frames in cam1")
+    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    print(f"Found {len(data.cam0_timestamps)} frames in cam0")
+    print(f"Found {len(data.cam1_timestamps)} frames in cam1")
 
     # Show first images from cam0 and cam1 side by side
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
 
-    cam0_image_path = data_dir / "cam0" / "data" / f"{cam0_timestamps[0]}.png"
-    cam0_img = mpimg.imread(cam0_image_path)
+    cam0_img = mpimg.imread(data.get_cam0_image_path(data.cam0_timestamps[0]))
     ax0.imshow(cam0_img, cmap="gray")
-    ax0.set_title(f"cam0 - {cam0_timestamps[0]}")
+    ax0.set_title(f"cam0 - {data.cam0_timestamps[0]}")
 
-    cam1_image_path = data_dir / "cam1" / "data" / f"{cam1_timestamps[0]}.png"
-    cam1_img = mpimg.imread(cam1_image_path)
+    cam1_img = mpimg.imread(data.get_cam1_image_path(data.cam1_timestamps[0]))
     ax1.imshow(cam1_img, cmap="gray")
-    ax1.set_title(f"cam1 - {cam1_timestamps[0]}")
+    ax1.set_title(f"cam1 - {data.cam1_timestamps[0]}")
 
     plt.tight_layout()
     plt.show()
