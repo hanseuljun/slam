@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib",
     "opencv-python",
+    "pyyaml",
 ]
 
 [build-system]

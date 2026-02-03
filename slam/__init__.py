@@ -1,1 +1,1 @@
-from slam.data import DataFolder, ImuSample
+from slam.data import CameraIntrinsics, DataFolder, ImuSample

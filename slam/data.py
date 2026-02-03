@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
+import numpy as np
+import yaml
+
 
 def read_timestamps(data_csv_path: Path) -> list[int]:
     """Read timestamps from a data.csv file."""
@@ -14,6 +17,28 @@ def read_timestamps(data_csv_path: Path) -> list[int]:
             timestamp_ns = int(row[0])
             timestamps.append(timestamp_ns)
     return timestamps
+
+
+@dataclass
+class CameraIntrinsics:
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+
+    @classmethod
+    def from_sensor_yaml(cls, path: Path) -> Self:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        intrinsics = data["intrinsics"]
+        return cls(fx=intrinsics[0], fy=intrinsics[1], cx=intrinsics[2], cy=intrinsics[3])
+
+    def to_matrix(self) -> np.ndarray:
+        return np.array([
+            [self.fx, 0, self.cx],
+            [0, self.fy, self.cy],
+            [0, 0, 1],
+        ])
 
 
 @dataclass
@@ -42,6 +67,8 @@ class DataFolder:
     path: Path
     cam_timestamps: list[int]
     imu_samples: list[ImuSample]
+    cam0_intrinsics: CameraIntrinsics
+    cam1_intrinsics: CameraIntrinsics
 
     @classmethod
     def load(cls, path: Path) -> Self:
@@ -50,7 +77,9 @@ class DataFolder:
         if cam0_timestamps != cam1_timestamps:
             raise ValueError("cam0 and cam1 timestamps do not match")
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
-        return cls(path, cam0_timestamps, imu_samples)
+        cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
+        cam1_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
+        return cls(path, cam0_timestamps, imu_samples, cam0_intrinsics, cam1_intrinsics)
 
     def get_cam0_image_path(self, timestamp: int) -> Path:
         return self.path / "cam0" / "data" / f"{timestamp}.png"
