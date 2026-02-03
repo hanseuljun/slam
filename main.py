@@ -1,6 +1,7 @@
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Self
 
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
@@ -24,7 +25,7 @@ class DataFolder:
     cam_timestamps: list[int]
 
     @classmethod
-    def load(cls, path: Path) -> "DataFolder":
+    def load(cls, path: Path) -> Self:
         cam0_timestamps = read_timestamps(path / "cam0" / "data.csv")
         cam1_timestamps = read_timestamps(path / "cam1" / "data.csv")
         if cam0_timestamps != cam1_timestamps:
