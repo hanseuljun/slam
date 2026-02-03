@@ -1,6 +1,9 @@
 import csv
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
 
 def read_timestamps(data_csv_path: Path) -> list[int]:
     """Read timestamps from a data.csv file."""
@@ -24,9 +27,13 @@ def main():
     print(f"Found {len(timestamps)} frames in cam0")
     print(f"First timestamp: {timestamps[0]} ns")
     print(f"Last timestamp: {timestamps[-1]} ns")
-    print(f"\nFirst 10 timestamps:")
-    for ts in timestamps[:10]:
-        print(f"  {ts}")
+
+    # Show first cam0 image
+    first_image_path = data_dir / "cam0" / "data" / f"{timestamps[0]}.png"
+    img = mpimg.imread(first_image_path)
+    plt.imshow(img, cmap="gray")
+    plt.title(f"cam0 - {timestamps[0]}")
+    plt.show()
 
 
 if __name__ == "__main__":
