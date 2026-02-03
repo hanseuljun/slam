@@ -1,0 +1,12 @@
+[project]
+name = "slam"
+version = "0.1.0"
+description = "SLAM implementation"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
