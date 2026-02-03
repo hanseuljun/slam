@@ -13,25 +13,38 @@ def main():
 
     sift = cv2.SIFT_create()
 
-    # Show first 2 images from cam0
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # Load first two images and detect SIFT features
+    img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+    img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
 
-    for i, ax in enumerate(axes):
-        img = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[i])), cv2.IMREAD_GRAYSCALE)
-        keypoints, descriptors = sift.detectAndCompute(img, None)
+    kp0, desc0 = sift.detectAndCompute(img0, None)
+    kp1, desc1 = sift.detectAndCompute(img1, None)
 
-        print(f"Image {i}:")
-        print(f"  Keypoints: {len(keypoints)}")
-        print(f"  Descriptors shape: {descriptors.shape}")
-        print(f"  Descriptors dtype: {descriptors.dtype}")
-        print(f"  Descriptors range: [{descriptors.min():.1f}, {descriptors.max():.1f}]")
+    print(f"Image 0: {len(kp0)} keypoints")
+    print(f"Image 1: {len(kp1)} keypoints")
 
-        img_with_kp = cv2.drawKeypoints(img, keypoints, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    # Match descriptors using BFMatcher with ratio test
+    bf = cv2.BFMatcher()
+    matches = bf.knnMatch(desc0, desc1, k=2)
 
-        ax.imshow(img_with_kp)
-        ax.set_title(f"{len(keypoints)} kp")
-        ax.axis("off")
+    # Apply ratio test (Lowe's ratio test)
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good_matches.append(m)
 
+    print(f"Good matches: {len(good_matches)}")
+
+    # Draw matches
+    img_matches = cv2.drawMatches(
+        img0, kp0, img1, kp1, good_matches, None,
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+    )
+
+    plt.figure(figsize=(16, 8))
+    plt.imshow(img_matches)
+    plt.title(f"{len(good_matches)} matches")
+    plt.axis("off")
     plt.tight_layout()
     plt.show()
 
