@@ -21,14 +21,15 @@ def read_timestamps(data_csv_path: Path) -> list[int]:
 @dataclass
 class DataFolder:
     path: Path
-    cam0_timestamps: list[int]
-    cam1_timestamps: list[int]
+    cam_timestamps: list[int]
 
     @classmethod
     def load(cls, path: Path) -> "DataFolder":
         cam0_timestamps = read_timestamps(path / "cam0" / "data.csv")
         cam1_timestamps = read_timestamps(path / "cam1" / "data.csv")
-        return cls(path, cam0_timestamps, cam1_timestamps)
+        if cam0_timestamps != cam1_timestamps:
+            raise ValueError("cam0 and cam1 timestamps do not match")
+        return cls(path, cam0_timestamps)
 
     def get_cam0_image_path(self, timestamp: int) -> Path:
         return self.path / "cam0" / "data" / f"{timestamp}.png"
@@ -39,19 +40,18 @@ class DataFolder:
 
 def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    print(f"Found {len(data.cam0_timestamps)} frames in cam0")
-    print(f"Found {len(data.cam1_timestamps)} frames in cam1")
+    print(f"Found {len(data.cam_timestamps)} frames")
 
     # Show first images from cam0 and cam1 side by side
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
 
-    cam0_img = mpimg.imread(data.get_cam0_image_path(data.cam0_timestamps[0]))
+    cam0_img = mpimg.imread(data.get_cam0_image_path(data.cam_timestamps[0]))
     ax0.imshow(cam0_img, cmap="gray")
-    ax0.set_title(f"cam0 - {data.cam0_timestamps[0]}")
+    ax0.set_title(f"cam0 - {data.cam_timestamps[0]}")
 
-    cam1_img = mpimg.imread(data.get_cam1_image_path(data.cam1_timestamps[0]))
+    cam1_img = mpimg.imread(data.get_cam1_image_path(data.cam_timestamps[0]))
     ax1.imshow(cam1_img, cmap="gray")
-    ax1.set_title(f"cam1 - {data.cam1_timestamps[0]}")
+    ax1.set_title(f"cam1 - {data.cam_timestamps[0]}")
 
     plt.tight_layout()
     plt.show()
