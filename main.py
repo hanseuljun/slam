@@ -22,17 +22,28 @@ def main():
 
     # Read cam0 timestamps
     cam0_csv = data_dir / "cam0" / "data.csv"
-    timestamps = read_timestamps(cam0_csv)
+    cam0_timestamps = read_timestamps(cam0_csv)
+    print(f"Found {len(cam0_timestamps)} frames in cam0")
 
-    print(f"Found {len(timestamps)} frames in cam0")
-    print(f"First timestamp: {timestamps[0]} ns")
-    print(f"Last timestamp: {timestamps[-1]} ns")
+    # Read cam1 timestamps
+    cam1_csv = data_dir / "cam1" / "data.csv"
+    cam1_timestamps = read_timestamps(cam1_csv)
+    print(f"Found {len(cam1_timestamps)} frames in cam1")
 
-    # Show first cam0 image
-    first_image_path = data_dir / "cam0" / "data" / f"{timestamps[0]}.png"
-    img = mpimg.imread(first_image_path)
-    plt.imshow(img, cmap="gray")
-    plt.title(f"cam0 - {timestamps[0]}")
+    # Show first images from cam0 and cam1 side by side
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
+
+    cam0_image_path = data_dir / "cam0" / "data" / f"{cam0_timestamps[0]}.png"
+    cam0_img = mpimg.imread(cam0_image_path)
+    ax0.imshow(cam0_img, cmap="gray")
+    ax0.set_title(f"cam0 - {cam0_timestamps[0]}")
+
+    cam1_image_path = data_dir / "cam1" / "data" / f"{cam1_timestamps[0]}.png"
+    cam1_img = mpimg.imread(cam1_image_path)
+    ax1.imshow(cam1_img, cmap="gray")
+    ax1.set_title(f"cam1 - {cam1_timestamps[0]}")
+
+    plt.tight_layout()
     plt.show()
 
 
