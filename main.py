@@ -73,6 +73,18 @@ def main():
     print(f"  Image 0 normalized: ({pt0_norm[0]:.4f}, {pt0_norm[1]:.4f})")
     print(f"  Image 1 normalized: ({pt1_norm[0]:.4f}, {pt1_norm[1]:.4f})")
 
+    # Extract all matched points
+    points0 = np.array([keypoints0[m.queryIdx].pt for m in good_matches])
+    points1 = np.array([keypoints1[m.trainIdx].pt for m in good_matches])
+
+    # Find essential matrix
+    E, mask = cv2.findEssentialMat(points0, points1, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+
+    inliers = mask.ravel().sum()
+    print(f"\nEssential Matrix:")
+    print(f"  Inliers: {inliers} / {len(good_matches)}")
+    print(f"  E:\n{E}")
+
     # Draw matches
     img_matches = cv2.drawMatches(
         img0, keypoints0, img1, keypoints1, good_matches, None,
