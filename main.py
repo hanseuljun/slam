@@ -85,6 +85,14 @@ def main():
     print(f"  Inliers: {inliers} / {len(good_matches)}")
     print(f"  E:\n{E}")
 
+    # Decompose essential matrix to get R and t
+    _, R, t, pose_mask = cv2.recoverPose(E, points0, points1, K, mask=mask)
+
+    print(f"\nDecomposed Pose:")
+    print(f"  Points in front of both cameras: {pose_mask.ravel().sum()}")
+    print(f"  Rotation R:\n{R}")
+    print(f"  Translation t:\n{t.T}")
+
     # Draw matches
     img_matches = cv2.drawMatches(
         img0, keypoints0, img1, keypoints1, good_matches, None,
