@@ -99,6 +99,9 @@ def main():
     T_cam0_to_cam1 = np.linalg.inv(cam1_extrinsics) @ cam0_extrinsics
     P1 = K1 @ T_cam0_to_cam1[:3, :]
 
+    print(f"\nCam0 Projection Matrix (P0):\n{P0}")
+    print(f"\nCam1 Projection Matrix (P1):\n{P1}")
+
     # Triangulate points (cv2.triangulatePoints expects 2xN arrays)
     points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
     # Convert from homogeneous to 3D coordinates
@@ -108,6 +111,10 @@ def main():
     print(f"First 5 3D points (in cam0 frame):")
     for i in range(min(5, points_3d.shape[1])):
         print(f"  Point {i}: ({points_3d[0, i]:.4f}, {points_3d[1, i]:.4f}, {points_3d[2, i]:.4f})")
+
+    # Compute and print average of all 3D points
+    avg_point = np.mean(points_3d, axis=1)
+    print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
 
     # Draw keypoints on both images
     img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
