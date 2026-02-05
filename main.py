@@ -98,8 +98,13 @@ def main():
     cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
     cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
 
-    print(f"Image 0: {len(cam0_keypoints0)} keypoints")
-    print(f"Image 1: {len(cam1_keypoints0)} keypoints")
+    # Load second frame from left camera
+    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
+    cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
+
+    print(f"cam0_img0: {len(cam0_keypoints0)} keypoints")
+    print(f"cam1_img0: {len(cam1_keypoints0)} keypoints")
+    print(f"cam0_img1: {len(cam0_keypoints1)} keypoints")
 
     points_3d = triangulate_stereo_matches(
         data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
