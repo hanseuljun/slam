@@ -36,30 +36,6 @@ def main():
 
     print(f"Good matches: {len(good_matches)}")
 
-    # Get first match and compute normalized coordinates
-    first_match = good_matches[0]
-    keypoint0 = keypoints0[first_match.queryIdx]
-    keypoint1 = keypoints1[first_match.trainIdx]
-
-    print(f"\nFirst match (DMatch):")
-    print(f"  queryIdx: {first_match.queryIdx}")
-    print(f"  trainIdx: {first_match.trainIdx}")
-    print(f"  distance: {first_match.distance:.2f}")
-
-    print(f"\nKeypoint 0:")
-    print(f"  pt: ({keypoint0.pt[0]:.2f}, {keypoint0.pt[1]:.2f})")
-    print(f"  size: {keypoint0.size:.2f}")
-    print(f"  angle: {keypoint0.angle:.2f}")
-    print(f"  response: {keypoint0.response:.4f}")
-    print(f"  octave: {keypoint0.octave}")
-
-    print(f"\nKeypoint 1:")
-    print(f"  pt: ({keypoint1.pt[0]:.2f}, {keypoint1.pt[1]:.2f})")
-    print(f"  size: {keypoint1.size:.2f}")
-    print(f"  angle: {keypoint1.angle:.2f}")
-    print(f"  response: {keypoint1.response:.4f}")
-    print(f"  octave: {keypoint1.octave}")
-
     # Apply inverse intrinsic matrix to get normalized coordinates
     K0 = data.cam0_intrinsics.to_matrix()
     K0_inv = np.linalg.inv(K0)
@@ -78,15 +54,6 @@ def main():
     print(f"\nCam0 to Cam1:\n{cam0_to_cam1}")
     print(f"\nCam0 Translation: {cam0_translation}")
     print(f"Cam1 Translation: {cam1_translation}")
-
-    pt0_homog = np.array([keypoint0.pt[0], keypoint0.pt[1], 1.0])
-    pt1_homog = np.array([keypoint1.pt[0], keypoint1.pt[1], 1.0])
-
-    pt0_norm = K0_inv @ pt0_homog
-    pt1_norm = K1_inv @ pt1_homog
-
-    print(f"  Image 0 normalized: ({pt0_norm[0]:.4f}, {pt0_norm[1]:.4f})")
-    print(f"  Image 1 normalized: ({pt1_norm[0]:.4f}, {pt1_norm[1]:.4f})")
 
     # Extract all matched points
     points0 = np.array([keypoints0[m.queryIdx].pt for m in good_matches])
