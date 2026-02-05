@@ -33,26 +33,16 @@ def visualize_keypoints(img0: np.ndarray, keypoints0, img1: np.ndarray, keypoint
     plt.show()
 
 
-def main():
-    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    print(f"Found {len(data.cam_timestamps)} camera frames")
-    print(f"Found {len(data.imu_samples)} IMU samples")
-
-    sift = cv2.SIFT_create()
-
-    # Load first frame from left and right cameras
-    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-
-    cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
-    cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
-
-    print(f"Image 0: {len(cam0_keypoints0)} keypoints")
-    print(f"Image 1: {len(cam1_keypoints0)} keypoints")
-
+def triangulate_stereo_matches(
+    data: DataFolder,
+    cam0_keypoints,
+    cam0_descriptors: np.ndarray,
+    cam1_keypoints,
+    cam1_descriptors: np.ndarray,
+) -> np.ndarray:
     # Match descriptors using BFMatcher with ratio test
     bf = cv2.BFMatcher()
-    matches = bf.knnMatch(cam0_descriptors0, cam1_descriptors0, k=2)
+    matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2)
 
     # Apply ratio test (Lowe's ratio test)
     good_matches = []
@@ -70,8 +60,8 @@ def main():
     print(f"\nCam1 Extrinsics:\n{data.cam1_extrinsics}")
 
     # Extract all matched points
-    points0 = np.array([cam0_keypoints0[m.queryIdx].pt for m in good_matches])
-    points1 = np.array([cam1_keypoints0[m.trainIdx].pt for m in good_matches])
+    points0 = np.array([cam0_keypoints[m.queryIdx].pt for m in good_matches])
+    points1 = np.array([cam1_keypoints[m.trainIdx].pt for m in good_matches])
 
     # Build projection matrices for triangulation
     # cam0 is the reference frame, so P0 = K0 @ [I | 0]
@@ -88,6 +78,30 @@ def main():
     points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
     # Convert from homogeneous to 3D coordinates
     points_3d = points_4d[:3, :] / points_4d[3, :]
+
+    return points_3d
+
+
+def main():
+    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    print(f"Found {len(data.cam_timestamps)} camera frames")
+    print(f"Found {len(data.imu_samples)} IMU samples")
+
+    sift = cv2.SIFT_create()
+
+    # Load first frame from left and right cameras
+    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+
+    cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
+    cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
+
+    print(f"Image 0: {len(cam0_keypoints0)} keypoints")
+    print(f"Image 1: {len(cam1_keypoints0)} keypoints")
+
+    points_3d = triangulate_stereo_matches(
+        data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
+    )
 
     print(f"\nTriangulated {points_3d.shape[1]} points")
     print(f"First 5 3D points (in cam0 frame):")
