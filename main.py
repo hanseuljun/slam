@@ -15,11 +15,11 @@ def main():
     sift = cv2.SIFT_create()
 
     # Load first frame from left and right cameras
-    img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-    img1 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
 
-    keypoints0, descriptors0 = sift.detectAndCompute(img0, None)
-    keypoints1, descriptors1 = sift.detectAndCompute(img1, None)
+    keypoints0, descriptors0 = sift.detectAndCompute(cam0_img0, None)
+    keypoints1, descriptors1 = sift.detectAndCompute(cam1_img0, None)
 
     print(f"Image 0: {len(keypoints0)} keypoints")
     print(f"Image 1: {len(keypoints1)} keypoints")
@@ -127,14 +127,14 @@ def main():
     plt.show()
 
     # Draw keypoints on both images
-    img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-    img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    cam0_img0_with_kp = cv2.drawKeypoints(cam0_img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    cam1_img0_with_kp = cv2.drawKeypoints(cam1_img0, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
     fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
-    ax0.imshow(img0_with_kp)
+    ax0.imshow(cam0_img0_with_kp)
     ax0.set_title(f"Image 0: {len(keypoints0)} keypoints")
     ax0.axis("off")
-    ax1.imshow(img1_with_kp)
+    ax1.imshow(cam1_img0_with_kp)
     ax1.set_title(f"Image 1: {len(keypoints1)} keypoints")
     ax1.axis("off")
     plt.tight_layout()
