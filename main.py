@@ -92,6 +92,23 @@ def main():
     points0 = np.array([keypoints0[m.queryIdx].pt for m in good_matches])
     points1 = np.array([keypoints1[m.trainIdx].pt for m in good_matches])
 
+    # Build projection matrices for triangulation
+    # cam0 is the reference frame, so P0 = K0 @ [I | 0]
+    P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
+    # P1 = K1 @ [R | t] where transformation is from cam0 to cam1
+    T_cam0_to_cam1 = np.linalg.inv(cam1_extrinsics) @ cam0_extrinsics
+    P1 = K1 @ T_cam0_to_cam1[:3, :]
+
+    # Triangulate points (cv2.triangulatePoints expects 2xN arrays)
+    points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
+    # Convert from homogeneous to 3D coordinates
+    points_3d = points_4d[:3, :] / points_4d[3, :]
+
+    print(f"\nTriangulated {points_3d.shape[1]} points")
+    print(f"First 5 3D points (in cam0 frame):")
+    for i in range(min(5, points_3d.shape[1])):
+        print(f"  Point {i}: ({points_3d[0, i]:.4f}, {points_3d[1, i]:.4f}, {points_3d[2, i]:.4f})")
+
     # Draw keypoints on both images
     img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
     img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
