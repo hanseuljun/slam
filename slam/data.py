@@ -42,6 +42,19 @@ class CameraIntrinsics:
 
 
 @dataclass
+class CameraExtrinsics:
+    T_BS: np.ndarray  # 4x4 transformation matrix from sensor to body frame
+
+    @classmethod
+    def from_sensor_yaml(cls, path: Path) -> Self:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        t_bs = data["T_BS"]
+        matrix = np.array(t_bs["data"]).reshape(t_bs["rows"], t_bs["cols"])
+        return cls(T_BS=matrix)
+
+
+@dataclass
 class ImuSample:
     timestamp: int
     angular_velocity: tuple[float, float, float]  # w_x, w_y, w_z [rad/s]
@@ -67,6 +80,8 @@ class DataFolder:
     path: Path
     cam_timestamps: list[int]
     imu_samples: list[ImuSample]
+    cam0_extrinsics: CameraExtrinsics
+    cam1_extrinsics: CameraExtrinsics
     cam0_intrinsics: CameraIntrinsics
     cam1_intrinsics: CameraIntrinsics
 
@@ -77,9 +92,19 @@ class DataFolder:
         if cam0_timestamps != cam1_timestamps:
             raise ValueError("cam0 and cam1 timestamps do not match")
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
+        cam0_extrinsics = CameraExtrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
+        cam1_extrinsics = CameraExtrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
         cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
         cam1_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
-        return cls(path, cam0_timestamps, imu_samples, cam0_intrinsics, cam1_intrinsics)
+        return cls(
+            path,
+            cam0_timestamps,
+            imu_samples,
+            cam0_extrinsics,
+            cam1_extrinsics,
+            cam0_intrinsics,
+            cam1_intrinsics,
+        )
 
     def get_cam0_image_path(self, timestamp: int) -> Path:
         return self.path / "cam0" / "data" / f"{timestamp}.png"
