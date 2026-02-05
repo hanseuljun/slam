@@ -116,6 +116,16 @@ def main():
     avg_point = np.mean(points_3d, axis=1)
     print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
 
+    # Visualize 3D points
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(points_3d[0, :], points_3d[1, :], points_3d[2, :], c='b', marker='o', s=1)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Triangulated 3D Points')
+    plt.show()
+
     # Draw keypoints on both images
     img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
     img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
