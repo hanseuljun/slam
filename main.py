@@ -7,6 +7,32 @@ import numpy as np
 from slam import DataFolder
 
 
+def visualize_3d_points(points_3d: np.ndarray) -> None:
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(points_3d[0, :], points_3d[1, :], points_3d[2, :], c='b', marker='o', s=1)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Triangulated 3D Points')
+    plt.show()
+
+
+def visualize_keypoints(img0: np.ndarray, keypoints0, img1: np.ndarray, keypoints1) -> None:
+    img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
+    ax0.imshow(img0_with_kp)
+    ax0.set_title(f"Image 0: {len(keypoints0)} keypoints")
+    ax0.axis("off")
+    ax1.imshow(img1_with_kp)
+    ax1.set_title(f"Image 1: {len(keypoints1)} keypoints")
+    ax1.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+
 def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
     print(f"Found {len(data.cam_timestamps)} camera frames")
@@ -18,15 +44,15 @@ def main():
     cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
     cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
 
-    keypoints0, descriptors0 = sift.detectAndCompute(cam0_img0, None)
-    keypoints1, descriptors1 = sift.detectAndCompute(cam1_img0, None)
+    cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
+    cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
 
-    print(f"Image 0: {len(keypoints0)} keypoints")
-    print(f"Image 1: {len(keypoints1)} keypoints")
+    print(f"Image 0: {len(cam0_keypoints0)} keypoints")
+    print(f"Image 1: {len(cam1_keypoints0)} keypoints")
 
     # Match descriptors using BFMatcher with ratio test
     bf = cv2.BFMatcher()
-    matches = bf.knnMatch(descriptors0, descriptors1, k=2)
+    matches = bf.knnMatch(cam0_descriptors0, cam1_descriptors0, k=2)
 
     # Apply ratio test (Lowe's ratio test)
     good_matches = []
@@ -38,26 +64,22 @@ def main():
 
     # Apply inverse intrinsic matrix to get normalized coordinates
     K0 = data.cam0_intrinsics.to_matrix()
-    K0_inv = np.linalg.inv(K0)
     K1 = data.cam1_intrinsics.to_matrix()
-    K1_inv = np.linalg.inv(K1)
 
     cam0_extrinsics = data.cam0_extrinsics
     cam1_extrinsics = data.cam1_extrinsics
-    cam0_to_cam1 = np.linalg.inv(cam0_extrinsics) @ cam1_extrinsics
 
     cam0_translation = cam0_extrinsics[:3, 3]
     cam1_translation = cam1_extrinsics[:3, 3]
 
     print(f"\nCam0 Extrinsics:\n{cam0_extrinsics}")
     print(f"\nCam1 Extrinsics:\n{cam1_extrinsics}")
-    print(f"\nCam0 to Cam1:\n{cam0_to_cam1}")
     print(f"\nCam0 Translation: {cam0_translation}")
     print(f"Cam1 Translation: {cam1_translation}")
 
     # Extract all matched points
-    points0 = np.array([keypoints0[m.queryIdx].pt for m in good_matches])
-    points1 = np.array([keypoints1[m.trainIdx].pt for m in good_matches])
+    points0 = np.array([cam0_keypoints0[m.queryIdx].pt for m in good_matches])
+    points1 = np.array([cam1_keypoints0[m.trainIdx].pt for m in good_matches])
 
     # Build projection matrices for triangulation
     # cam0 is the reference frame, so P0 = K0 @ [I | 0]
@@ -66,6 +88,7 @@ def main():
     T_cam0_to_cam1 = np.linalg.inv(cam1_extrinsics) @ cam0_extrinsics
     P1 = K1 @ T_cam0_to_cam1[:3, :]
 
+    print(f"\nT_cam0_to_cam1:\n{T_cam0_to_cam1}")
     print(f"\nCam0 Projection Matrix (P0):\n{P0}")
     print(f"\nCam1 Projection Matrix (P1):\n{P1}")
 
@@ -83,29 +106,8 @@ def main():
     avg_point = np.mean(points_3d, axis=1)
     print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
 
-    # Visualize 3D points
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(points_3d[0, :], points_3d[1, :], points_3d[2, :], c='b', marker='o', s=1)
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title('Triangulated 3D Points')
-    plt.show()
-
-    # Draw keypoints on both images
-    cam0_img0_with_kp = cv2.drawKeypoints(cam0_img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-    cam1_img0_with_kp = cv2.drawKeypoints(cam1_img0, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-
-    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
-    ax0.imshow(cam0_img0_with_kp)
-    ax0.set_title(f"Image 0: {len(keypoints0)} keypoints")
-    ax0.axis("off")
-    ax1.imshow(cam1_img0_with_kp)
-    ax1.set_title(f"Image 1: {len(keypoints1)} keypoints")
-    ax1.axis("off")
-    plt.tight_layout()
-    plt.show()
+    visualize_3d_points(points_3d)
+    visualize_keypoints(cam0_img0, cam0_keypoints0, cam1_img0, cam1_keypoints0)
 
 
 if __name__ == "__main__":
