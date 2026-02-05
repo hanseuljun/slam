@@ -86,6 +86,8 @@ def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
     print(f"Found {len(data.cam_timestamps)} camera frames")
     print(f"Found {len(data.imu_samples)} IMU samples")
+    print(f"Cam0 distortion coefficients: {data.cam0_intrinsics.distortion_coefficients}")
+    print(f"Cam1 distortion coefficients: {data.cam1_intrinsics.distortion_coefficients}")
 
     sift = cv2.SIFT_create()
 

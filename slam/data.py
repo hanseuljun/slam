@@ -25,13 +25,21 @@ class CameraIntrinsics:
     fy: float
     cx: float
     cy: float
+    distortion_coefficients: np.ndarray  # [k1, k2, p1, p2] for radial-tangential model
 
     @classmethod
     def from_sensor_yaml(cls, path: Path) -> Self:
         with open(path, "r") as f:
             data = yaml.safe_load(f)
         intrinsics = data["intrinsics"]
-        return cls(fx=intrinsics[0], fy=intrinsics[1], cx=intrinsics[2], cy=intrinsics[3])
+        distortion = np.array(data["distortion_coefficients"])
+        return cls(
+            fx=intrinsics[0],
+            fy=intrinsics[1],
+            cx=intrinsics[2],
+            cy=intrinsics[3],
+            distortion_coefficients=distortion,
+        )
 
     def to_matrix(self) -> np.ndarray:
         return np.array([
@@ -92,13 +100,13 @@ class DataFolder:
         cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
         cam1_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
         return cls(
-            path,
-            cam0_timestamps,
-            imu_samples,
-            cam0_extrinsics,
-            cam1_extrinsics,
-            cam0_intrinsics,
-            cam1_intrinsics,
+            path=path,
+            cam_timestamps=cam0_timestamps,
+            imu_samples=imu_samples,
+            cam0_extrinsics=cam0_extrinsics,
+            cam1_extrinsics=cam1_extrinsics,
+            cam0_intrinsics=cam0_intrinsics,
+            cam1_intrinsics=cam1_intrinsics,
         )
 
     def get_cam0_image_path(self, timestamp: int) -> Path:
