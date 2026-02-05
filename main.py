@@ -64,14 +64,16 @@ def main():
     print(f"  octave: {keypoint1.octave}")
 
     # Apply inverse intrinsic matrix to get normalized coordinates
-    K = data.cam0_intrinsics.to_matrix()
-    K_inv = np.linalg.inv(K)
+    K0 = data.cam0_intrinsics.to_matrix()
+    K0_inv = np.linalg.inv(K0)
+    K1 = data.cam1_intrinsics.to_matrix()
+    K1_inv = np.linalg.inv(K1)
 
     pt0_homog = np.array([keypoint0.pt[0], keypoint0.pt[1], 1.0])
     pt1_homog = np.array([keypoint1.pt[0], keypoint1.pt[1], 1.0])
 
-    pt0_norm = K_inv @ pt0_homog
-    pt1_norm = K_inv @ pt1_homog
+    pt0_norm = K0_inv @ pt0_homog
+    pt1_norm = K1_inv @ pt1_homog
 
     print(f"  Image 0 normalized: ({pt0_norm[0]:.4f}, {pt0_norm[1]:.4f})")
     print(f"  Image 1 normalized: ({pt1_norm[0]:.4f}, {pt1_norm[1]:.4f})")
@@ -81,7 +83,7 @@ def main():
     points1 = np.array([keypoints1[m.trainIdx].pt for m in good_matches])
 
     # Find essential matrix
-    E, mask = cv2.findEssentialMat(points0, points1, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+    E, mask = cv2.findEssentialMat(points0, points1, K0, method=cv2.RANSAC, prob=0.999, threshold=1.0)
 
     inliers = mask.ravel().sum()
     print(f"\nEssential Matrix:")
@@ -89,7 +91,7 @@ def main():
     print(f"  E:\n{E}")
 
     # Decompose essential matrix to get R and t
-    _, R, t, pose_mask = cv2.recoverPose(E, points0, points1, K, mask=mask)
+    _, R, t, pose_mask = cv2.recoverPose(E, points0, points1, K0, mask=mask)
 
     print(f"\nDecomposed Pose:")
     print(f"  Points in front of both cameras: {pose_mask.ravel().sum()}")
