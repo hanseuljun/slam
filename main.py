@@ -92,22 +92,6 @@ def main():
     points0 = np.array([keypoints0[m.queryIdx].pt for m in good_matches])
     points1 = np.array([keypoints1[m.trainIdx].pt for m in good_matches])
 
-    # Find essential matrix
-    E, mask = cv2.findEssentialMat(points0, points1, K0, method=cv2.RANSAC, prob=0.999, threshold=1.0)
-
-    inliers = mask.ravel().sum()
-    print(f"\nEssential Matrix:")
-    print(f"  Inliers: {inliers} / {len(good_matches)}")
-    print(f"  E:\n{E}")
-
-    # Decompose essential matrix to get R and t
-    _, R, t, pose_mask = cv2.recoverPose(E, points0, points1, K0, mask=mask)
-
-    print(f"\nDecomposed Pose:")
-    print(f"  Points in front of both cameras: {pose_mask.ravel().sum()}")
-    print(f"  Rotation R:\n{R}")
-    print(f"  Translation t:\n{t.T}")
-
     # Draw keypoints on both images
     img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
     img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
