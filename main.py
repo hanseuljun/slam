@@ -12,8 +12,8 @@ def main():
     print(f"Found {len(data.cam_timestamps)} camera frames")
     print(f"Found {len(data.imu_samples)} IMU samples")
 
-    print(f"\nCam0 Extrinsics (T_BS):\n{data.cam0_extrinsics.T_BS}")
-    print(f"\nCam1 Extrinsics (T_BS):\n{data.cam1_extrinsics.T_BS}")
+    print(f"\nCam0 Extrinsics (T_BS):\n{data.cam0_extrinsics}")
+    print(f"\nCam1 Extrinsics (T_BS):\n{data.cam1_extrinsics}")
 
     sift = cv2.SIFT_create()
 
