@@ -12,9 +12,6 @@ def main():
     print(f"Found {len(data.cam_timestamps)} camera frames")
     print(f"Found {len(data.imu_samples)} IMU samples")
 
-    print(f"\nCam0 Extrinsics (T_BS):\n{data.cam0_extrinsics}")
-    print(f"\nCam1 Extrinsics (T_BS):\n{data.cam1_extrinsics}")
-
     sift = cv2.SIFT_create()
 
     # Load first frame from left and right cameras
@@ -68,6 +65,19 @@ def main():
     K0_inv = np.linalg.inv(K0)
     K1 = data.cam1_intrinsics.to_matrix()
     K1_inv = np.linalg.inv(K1)
+
+    cam0_extrinsics = data.cam0_extrinsics
+    cam1_extrinsics = data.cam1_extrinsics
+    cam0_to_cam1 = np.linalg.inv(cam0_extrinsics) @ cam1_extrinsics
+
+    cam0_translation = cam0_extrinsics[:3, 3]
+    cam1_translation = cam1_extrinsics[:3, 3]
+
+    print(f"\nCam0 Extrinsics:\n{cam0_extrinsics}")
+    print(f"\nCam1 Extrinsics:\n{cam1_extrinsics}")
+    print(f"\nCam0 to Cam1:\n{cam0_to_cam1}")
+    print(f"\nCam0 Translation: {cam0_translation}")
+    print(f"Cam1 Translation: {cam1_translation}")
 
     pt0_homog = np.array([keypoint0.pt[0], keypoint0.pt[1], 1.0])
     pt1_homog = np.array([keypoint1.pt[0], keypoint1.pt[1], 1.0])
