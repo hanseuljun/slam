@@ -66,16 +66,8 @@ def main():
     K0 = data.cam0_intrinsics.to_matrix()
     K1 = data.cam1_intrinsics.to_matrix()
 
-    cam0_extrinsics = data.cam0_extrinsics
-    cam1_extrinsics = data.cam1_extrinsics
-
-    cam0_translation = cam0_extrinsics[:3, 3]
-    cam1_translation = cam1_extrinsics[:3, 3]
-
-    print(f"\nCam0 Extrinsics:\n{cam0_extrinsics}")
-    print(f"\nCam1 Extrinsics:\n{cam1_extrinsics}")
-    print(f"\nCam0 Translation: {cam0_translation}")
-    print(f"Cam1 Translation: {cam1_translation}")
+    print(f"\nCam0 Extrinsics:\n{data.cam0_extrinsics}")
+    print(f"\nCam1 Extrinsics:\n{data.cam1_extrinsics}")
 
     # Extract all matched points
     points0 = np.array([cam0_keypoints0[m.queryIdx].pt for m in good_matches])
@@ -85,7 +77,7 @@ def main():
     # cam0 is the reference frame, so P0 = K0 @ [I | 0]
     P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
     # P1 = K1 @ [R | t] where transformation is from cam0 to cam1
-    T_cam0_to_cam1 = np.linalg.inv(cam1_extrinsics) @ cam0_extrinsics
+    T_cam0_to_cam1 = np.linalg.inv(data.cam1_extrinsics) @ data.cam0_extrinsics
     P1 = K1 @ T_cam0_to_cam1[:3, :]
 
     print(f"\nT_cam0_to_cam1:\n{T_cam0_to_cam1}")
