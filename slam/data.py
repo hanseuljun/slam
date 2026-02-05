@@ -25,20 +25,26 @@ class CameraIntrinsics:
     fy: float
     cx: float
     cy: float
-    distortion_coefficients: np.ndarray  # [k1, k2, p1, p2] for radial-tangential model
+    k1: float  # radial distortion coefficient
+    k2: float  # radial distortion coefficient
+    p1: float  # tangential distortion coefficient
+    p2: float  # tangential distortion coefficient
 
     @classmethod
     def from_sensor_yaml(cls, path: Path) -> Self:
         with open(path, "r") as f:
             data = yaml.safe_load(f)
         intrinsics = data["intrinsics"]
-        distortion = np.array(data["distortion_coefficients"])
+        distortion = data["distortion_coefficients"]
         return cls(
             fx=intrinsics[0],
             fy=intrinsics[1],
             cx=intrinsics[2],
             cy=intrinsics[3],
-            distortion_coefficients=distortion,
+            k1=distortion[0],
+            k2=distortion[1],
+            p1=distortion[2],
+            p2=distortion[3],
         )
 
     def to_matrix(self) -> np.ndarray:
