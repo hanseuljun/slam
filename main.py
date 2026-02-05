@@ -14,9 +14,9 @@ def main():
 
     sift = cv2.SIFT_create()
 
-    # Load first two images and detect SIFT features
+    # Load first frame from left and right cameras
     img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-    img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
+    img1 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
 
     keypoints0, descriptors0 = sift.detectAndCompute(img0, None)
     keypoints1, descriptors1 = sift.detectAndCompute(img1, None)
@@ -93,16 +93,17 @@ def main():
     print(f"  Rotation R:\n{R}")
     print(f"  Translation t:\n{t.T}")
 
-    # Draw matches
-    img_matches = cv2.drawMatches(
-        img0, keypoints0, img1, keypoints1, good_matches, None,
-        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-    )
+    # Draw keypoints on both images
+    img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
-    plt.figure(figsize=(16, 8))
-    plt.imshow(img_matches)
-    plt.title(f"{len(good_matches)} matches")
-    plt.axis("off")
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
+    ax0.imshow(img0_with_kp)
+    ax0.set_title(f"Image 0: {len(keypoints0)} keypoints")
+    ax0.axis("off")
+    ax1.imshow(img1_with_kp)
+    ax1.set_title(f"Image 1: {len(keypoints1)} keypoints")
+    ax1.axis("off")
     plt.tight_layout()
     plt.show()
 
