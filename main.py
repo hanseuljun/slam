@@ -119,6 +119,54 @@ def main():
     avg_point = np.mean(points_3d, axis=1)
     print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
 
+    # Get stereo matches again to know which cam0_keypoints0 indices have 3D points
+    bf = cv2.BFMatcher()
+    stereo_matches = bf.knnMatch(cam0_descriptors0, cam1_descriptors0, k=2)
+    stereo_good_matches = []
+    for m, n in stereo_matches:
+        if m.distance < 0.75 * n.distance:
+            stereo_good_matches.append(m)
+
+    # Map from cam0_keypoints0 index to 3D point index
+    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_good_matches)}
+
+    # Match cam0_img0 with cam0_img1 (temporal matching)
+    temporal_matches = bf.knnMatch(cam0_descriptors0, cam0_descriptors1, k=2)
+    temporal_good_matches = []
+    for m, n in temporal_matches:
+        if m.distance < 0.75 * n.distance:
+            temporal_good_matches.append(m)
+
+    print(f"\nTemporal matches (cam0_img0 -> cam0_img1): {len(temporal_good_matches)}")
+
+    # Find correspondences: cam0_keypoints0 that have both 3D points AND matches in cam0_img1
+    object_points = []
+    image_points = []
+    for m in temporal_good_matches:
+        if m.queryIdx in cam0_idx_to_3d_idx:
+            idx_3d = cam0_idx_to_3d_idx[m.queryIdx]
+            object_points.append(points_3d[:, idx_3d])
+            image_points.append(cam0_keypoints1[m.trainIdx].pt)
+
+    object_points = np.array(object_points, dtype=np.float64)
+    image_points = np.array(image_points, dtype=np.float64)
+
+    print(f"Points for PnP: {len(object_points)}")
+
+    # Run solvePnP
+    K0 = data.cam0_intrinsics.to_matrix()
+    dist_coeffs = np.array([
+        data.cam0_intrinsics.k1,
+        data.cam0_intrinsics.k2,
+        data.cam0_intrinsics.p1,
+        data.cam0_intrinsics.p2,
+    ])
+
+    success, rvec, tvec = cv2.solvePnP(object_points, image_points, K0, dist_coeffs)
+    print(f"\nsolvePnP success: {success}")
+    print(f"Rotation vector:\n{rvec}")
+    print(f"Translation vector:\n{tvec}")
+
     visualize_3d_points(points_3d)
     visualize_keypoints(cam0_img0, cam0_keypoints0, cam1_img0, cam1_keypoints0)
 
