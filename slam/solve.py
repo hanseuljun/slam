@@ -110,9 +110,9 @@ def solve_pnp(
         data.cam0_intrinsics.p2,
     ])
 
-    success, rvec, tvec = cv2.solvePnP(object_points, image_points, K0, dist_coeffs)
+    success, rvec, tvec, _ = cv2.solvePnPRansac(object_points, image_points, K0, dist_coeffs)
     if not success:
-        raise RuntimeError("cv2.solvePnP failed")
+        raise RuntimeError("cv2.solvePnPRansac failed")
 
     # Convert rvec and tvec to 4x4 transformation matrix
     R, _ = cv2.Rodrigues(rvec)
