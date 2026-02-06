@@ -14,7 +14,9 @@ def main():
     min_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = min_timestamp_ns + int(5e9)  # 5 seconds
 
-    first_leica_pos = data.leica_samples[0].position
+    # pick the last leica sample before the first camera sample
+    first_leica_sample = [s for s in data.leica_samples if s.timestamp_ns < min_timestamp_ns][-1]
+    first_leica_pos = first_leica_sample.position
     T_world_to_leica = np.eye(4)
     T_world_to_leica[:3, 3] = first_leica_pos
     initial_cam0_transform = T_world_to_leica @ np.linalg.inv(data.leica_extrinsics) @ data.cam0_extrinsics
