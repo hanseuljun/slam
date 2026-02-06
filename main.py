@@ -13,8 +13,14 @@ def main():
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = min_timestamp_ns + int(5e9)  # 5 seconds
+
+    first_leica_pos = data.leica_samples[0].position
+    T_world_to_leica = np.eye(4)
+    T_world_to_leica[:3, 3] = first_leica_pos
+    initial_cam0_transform = T_world_to_leica @ np.linalg.inv(data.leica_extrinsics) @ data.cam0_extrinsics
+
     keyframe_index = 0
-    cam0_transforms = [data.cam0_extrinsics]
+    cam0_transforms = [initial_cam0_transform]
     viz_points_3d = None
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
