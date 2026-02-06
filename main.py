@@ -95,9 +95,8 @@ def solve_pnp(
     ])
 
     success, rvec, tvec = cv2.solvePnP(object_points, image_points, K0, dist_coeffs)
-    print(f"\nsolvePnP success: {success}")
-    print(f"Rotation vector:\n{rvec}")
-    print(f"Translation vector:\n{tvec}")
+    if not success:
+        raise RuntimeError("cv2.solvePnP failed")
 
     # Convert rvec and tvec to 4x4 transformation matrix
     R, _ = cv2.Rodrigues(rvec)
@@ -125,22 +124,9 @@ def solve_step(
     cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1_ns)), cv2.IMREAD_GRAYSCALE)
     cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
 
-    print(f"cam0_img0: {len(cam0_keypoints0)} keypoints")
-    print(f"cam1_img0: {len(cam1_keypoints0)} keypoints")
-    print(f"cam0_img1: {len(cam0_keypoints1)} keypoints")
-
     points_3d = triangulate_stereo_matches(
         data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
     )
-
-    print(f"\nTriangulated {points_3d.shape[1]} points")
-    print(f"First 5 3D points (in cam0 frame):")
-    for i in range(min(5, points_3d.shape[1])):
-        print(f"  Point {i}: ({points_3d[0, i]:.4f}, {points_3d[1, i]:.4f}, {points_3d[2, i]:.4f})")
-
-    # Compute and print average of all 3D points
-    avg_point = np.mean(points_3d, axis=1)
-    print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
 
     T = solve_pnp(
         data, points_3d, cam0_descriptors0,
@@ -161,7 +147,7 @@ def main():
 
     keyframe_index = 0
     cam0_transforms = [data.cam0_extrinsics]
-    for i in range(10):
+    for i in range(50):
         T = solve_step(data,
                        sift,
                        data.cam_timestamps_ns[keyframe_index],
@@ -180,31 +166,35 @@ def main():
 
     # Extract translations from cam0_transforms
     cam0_positions = np.array([T[:3, 3] for T in cam0_transforms])
+    cam0_times = np.array([(data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
+                           for i in range(len(cam0_transforms))])
 
     # Extract ground truth positions
-    gt_positions = np.array([sample.position for sample in data.ground_truth_samples[:len(cam0_transforms)]])
+    gt_positions = np.array([sample.position for sample in data.ground_truth_samples[:200]])
+    gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9
+                         for s in data.ground_truth_samples[:len(gt_positions)]])
 
     # Plot cam0_transforms vs ground truth
     fig = plt.figure(figsize=(12, 4))
 
     ax1 = fig.add_subplot(131)
-    ax1.plot(cam0_positions[:, 0], label='cam0 x')
-    ax1.plot(gt_positions[:, 0], label='gt x')
-    ax1.set_xlabel('Frame')
+    ax1.plot(cam0_times, cam0_positions[:, 0], label='cam0 x')
+    ax1.plot(gt_times, gt_positions[:, 0], label='gt x')
+    ax1.set_xlabel('Time [s]')
     ax1.set_ylabel('X [m]')
     ax1.legend()
 
     ax2 = fig.add_subplot(132)
-    ax2.plot(cam0_positions[:, 1], label='cam0 y')
-    ax2.plot(gt_positions[:, 1], label='gt y')
-    ax2.set_xlabel('Frame')
+    ax2.plot(cam0_times, cam0_positions[:, 1], label='cam0 y')
+    ax2.plot(gt_times, gt_positions[:, 1], label='gt y')
+    ax2.set_xlabel('Time [s]')
     ax2.set_ylabel('Y [m]')
     ax2.legend()
 
     ax3 = fig.add_subplot(133)
-    ax3.plot(cam0_positions[:, 2], label='cam0 z')
-    ax3.plot(gt_positions[:, 2], label='gt z')
-    ax3.set_xlabel('Frame')
+    ax3.plot(cam0_times, cam0_positions[:, 2], label='cam0 z')
+    ax3.plot(gt_times, gt_positions[:, 2], label='gt z')
+    ax3.set_xlabel('Time [s]')
     ax3.set_ylabel('Z [m]')
     ax3.legend()
 
