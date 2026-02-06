@@ -199,24 +199,15 @@ def main():
     sift = cv2.SIFT_create()
 
     keyframe_index = 0
-    transforms = []
+    cam0_transforms = [data.cam0_extrinsics]
     for i in range(10):
         T = solve_step(data,
                        sift,
                        data.cam_timestamps_ns[keyframe_index],
                        data.cam_timestamps_ns[i + 1])
-        transforms.append(T)
-
-    cam0_transforms = [data.cam0_extrinsics]
-    for i in range(len(transforms)):
-        cam0_transforms.append(cam0_transforms[keyframe_index] @ transforms[i])
+        cam0_transforms.append(cam0_transforms[keyframe_index] @ T)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
-    for i, T in enumerate(transforms):
-        t0_seconds = (data.cam_timestamps_ns[keyframe_index] - min_timestamp_ns) / 1e9
-        t1_seconds = (data.cam_timestamps_ns[i + 1] - min_timestamp_ns) / 1e9
-        print(f"\nTransformation matrix (t={t0_seconds:.3f}s -> t={t1_seconds:.3f}s):\n{T}")
-
     for i, T in enumerate(cam0_transforms):
         t_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
         print(f"\ncam0_transforms[{i}] (t={t_seconds:.3f}s):\n{T}")
