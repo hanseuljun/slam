@@ -222,6 +222,39 @@ def main():
         t_seconds = (sample.timestamp_ns - min_timestamp_ns) / 1e9
         print(f"  [{i}] t={t_seconds:.3f}s, pos={sample.position}, quat={sample.quaternion}")
 
+    # Extract translations from cam0_transforms
+    cam0_positions = np.array([T[:3, 3] for T in cam0_transforms])
+
+    # Extract ground truth positions
+    gt_positions = np.array([sample.position for sample in data.ground_truth_samples[:len(cam0_transforms)]])
+
+    # Plot cam0_transforms vs ground truth
+    fig = plt.figure(figsize=(12, 4))
+
+    ax1 = fig.add_subplot(131)
+    ax1.plot(cam0_positions[:, 0], label='cam0 x')
+    ax1.plot(gt_positions[:, 0], label='gt x')
+    ax1.set_xlabel('Frame')
+    ax1.set_ylabel('X [m]')
+    ax1.legend()
+
+    ax2 = fig.add_subplot(132)
+    ax2.plot(cam0_positions[:, 1], label='cam0 y')
+    ax2.plot(gt_positions[:, 1], label='gt y')
+    ax2.set_xlabel('Frame')
+    ax2.set_ylabel('Y [m]')
+    ax2.legend()
+
+    ax3 = fig.add_subplot(133)
+    ax3.plot(cam0_positions[:, 2], label='cam0 z')
+    ax3.plot(gt_positions[:, 2], label='gt z')
+    ax3.set_xlabel('Frame')
+    ax3.set_ylabel('Z [m]')
+    ax3.legend()
+
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == "__main__":
     main()
