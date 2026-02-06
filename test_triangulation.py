@@ -31,6 +31,37 @@ def main():
     print(f"Y range: [{points_3d[1, :].min():.2f}, {points_3d[1, :].max():.2f}]")
     print(f"Z range: [{points_3d[2, :].min():.2f}, {points_3d[2, :].max():.2f}]")
 
+    # Reproject 3D points back to cam0
+    K0 = data.cam0_intrinsics.to_matrix()
+    dist_coeffs0 = np.array([
+        data.cam0_intrinsics.k1,
+        data.cam0_intrinsics.k2,
+        data.cam0_intrinsics.p1,
+        data.cam0_intrinsics.p2,
+    ])
+
+    # Project 3D points (in cam0 frame) to 2D
+    rvec = np.zeros(3)  # No rotation (points are already in cam0 frame)
+    tvec = np.zeros(3)  # No translation
+    projected_points, _ = cv2.projectPoints(
+        points_3d.T, rvec, tvec, K0, dist_coeffs0
+    )
+    projected_points = projected_points.reshape(-1, 2)
+
+    # Draw reprojected points on cam0_img
+    cam0_img_color = cv2.cvtColor(cam0_img, cv2.COLOR_GRAY2BGR)
+    for pt in projected_points:
+        x, y = int(pt[0]), int(pt[1])
+        if 0 <= x < cam0_img.shape[1] and 0 <= y < cam0_img.shape[0]:
+            cv2.circle(cam0_img_color, (x, y), 3, (0, 255, 0), -1)
+
+    # Visualize reprojected points on cam0
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.imshow(cv2.cvtColor(cam0_img_color, cv2.COLOR_BGR2RGB))
+    ax.set_title('Reprojected 3D Points on cam0')
+    ax.axis('off')
+    plt.show()
+
     # Visualize 3D points
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
