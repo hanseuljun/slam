@@ -24,13 +24,28 @@ def triangulate_stereo_matches(
         if m.distance < 0.75 * n.distance:
             good_matches.append(m)
 
-    # Apply inverse intrinsic matrix to get normalized coordinates
     K0 = data.cam0_intrinsics.to_matrix()
     K1 = data.cam1_intrinsics.to_matrix()
+    dist_coeffs0 = np.array([
+        data.cam0_intrinsics.k1,
+        data.cam0_intrinsics.k2,
+        data.cam0_intrinsics.p1,
+        data.cam0_intrinsics.p2,
+    ])
+    dist_coeffs1 = np.array([
+        data.cam1_intrinsics.k1,
+        data.cam1_intrinsics.k2,
+        data.cam1_intrinsics.p1,
+        data.cam1_intrinsics.p2,
+    ])
 
     # Extract all matched points
     points0 = np.array([cam0_keypoints[m.queryIdx].pt for m in good_matches])
     points1 = np.array([cam1_keypoints[m.trainIdx].pt for m in good_matches])
+
+    # Undistort points (returns undistorted points in pixel coordinates)
+    points0 = cv2.undistortPoints(points0, K0, dist_coeffs0, P=K0).reshape(-1, 2)
+    points1 = cv2.undistortPoints(points1, K1, dist_coeffs1, P=K1).reshape(-1, 2)
 
     # Build projection matrices for triangulation
     # cam0 is the reference frame, so P0 = K0 @ [I | 0]
