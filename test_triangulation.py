@@ -48,17 +48,24 @@ def main():
     )
     projected_points = projected_points.reshape(-1, 2)
 
-    # Draw reprojected points on cam0_img
+    # Draw keypoints and reprojected points on cam0_img
     cam0_img_color = cv2.cvtColor(cam0_img, cv2.COLOR_GRAY2BGR)
+
+    # Draw original cam0_keypoints in red
+    for kp in cam0_keypoints:
+        x, y = int(kp.pt[0]), int(kp.pt[1])
+        cv2.circle(cam0_img_color, (x, y), 3, (0, 0, 255), -1)
+
+    # Draw reprojected points in green
     for pt in projected_points:
         x, y = int(pt[0]), int(pt[1])
         if 0 <= x < cam0_img.shape[1] and 0 <= y < cam0_img.shape[0]:
             cv2.circle(cam0_img_color, (x, y), 3, (0, 255, 0), -1)
 
-    # Visualize reprojected points on cam0
+    # Visualize keypoints and reprojected points on cam0
     fig, ax = plt.subplots(figsize=(12, 8))
     ax.imshow(cv2.cvtColor(cam0_img_color, cv2.COLOR_BGR2RGB))
-    ax.set_title('Reprojected 3D Points on cam0')
+    ax.set_title('cam0_keypoints (red) vs Reprojected 3D Points (green)')
     ax.axis('off')
     plt.show()
 
