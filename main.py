@@ -13,6 +13,10 @@ def main():
     print(f"Found {len(data.imu_samples)} IMU samples")
     print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
     print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
+    print(f"Leica extrinsics:\n{data.leica_extrinsics}")
+    print(f"Found {len(data.leica_samples)} Leica samples")
+    for i, sample in enumerate(data.leica_samples[:5]):
+        print(f"  [{i}] t={sample.timestamp_ns}, pos={sample.position}")
 
     orb = cv2.ORB_create(nfeatures=2000)
 

@@ -143,6 +143,7 @@ class DataFolder:
     leica_samples: list[LeicaSample]
     cam0_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
     cam1_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
+    leica_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
     cam0_intrinsics: CameraIntrinsics
     cam1_intrinsics: CameraIntrinsics
 
@@ -157,6 +158,7 @@ class DataFolder:
         leica_samples = read_leica_samples(path / "leica0" / "data.csv")
         cam0_extrinsics = read_extrinsics(path / "cam0" / "sensor.yaml")
         cam1_extrinsics = read_extrinsics(path / "cam1" / "sensor.yaml")
+        leica_extrinsics = read_extrinsics(path / "leica0" / "sensor.yaml")
         cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
         cam1_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
         return cls(
@@ -167,6 +169,7 @@ class DataFolder:
             leica_samples=leica_samples,
             cam0_extrinsics=cam0_extrinsics,
             cam1_extrinsics=cam1_extrinsics,
+            leica_extrinsics=leica_extrinsics,
             cam0_intrinsics=cam0_intrinsics,
             cam1_intrinsics=cam1_intrinsics,
         )
