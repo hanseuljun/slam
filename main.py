@@ -198,8 +198,13 @@ def main():
 
     sift = cv2.SIFT_create()
 
-    T = solve_step(data, sift, data.cam_timestamps[0], data.cam_timestamps[1])
-    print(f"\nTransformation matrix (cam0_img0 -> cam0_img1):\n{T}")
+    transforms = []
+    for i in range(5):
+        T = solve_step(data, sift, data.cam_timestamps[i], data.cam_timestamps[i + 1])
+        transforms.append(T)
+
+    for i, T in enumerate(transforms):
+        print(f"\nTransformation matrix (timestamp[{i}] -> timestamp[{i + 1}]):\n{T}")
 
 
 if __name__ == "__main__":
