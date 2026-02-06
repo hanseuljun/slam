@@ -7,32 +7,6 @@ import numpy as np
 from slam import DataFolder
 
 
-def visualize_3d_points(points_3d: np.ndarray) -> None:
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(points_3d[0, :], points_3d[1, :], points_3d[2, :], c='b', marker='o', s=1)
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    ax.set_title('Triangulated 3D Points')
-    plt.show()
-
-
-def visualize_keypoints(img0: np.ndarray, keypoints0, img1: np.ndarray, keypoints1) -> None:
-    img0_with_kp = cv2.drawKeypoints(img0, keypoints0, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-    img1_with_kp = cv2.drawKeypoints(img1, keypoints1, None, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-
-    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 5))
-    ax0.imshow(img0_with_kp)
-    ax0.set_title(f"Image 0: {len(keypoints0)} keypoints")
-    ax0.axis("off")
-    ax1.imshow(img1_with_kp)
-    ax1.set_title(f"Image 1: {len(keypoints1)} keypoints")
-    ax1.axis("off")
-    plt.tight_layout()
-    plt.show()
-
-
 def triangulate_stereo_matches(
     data: DataFolder,
     cam0_keypoints,
@@ -50,14 +24,9 @@ def triangulate_stereo_matches(
         if m.distance < 0.75 * n.distance:
             good_matches.append(m)
 
-    print(f"Good matches: {len(good_matches)}")
-
     # Apply inverse intrinsic matrix to get normalized coordinates
     K0 = data.cam0_intrinsics.to_matrix()
     K1 = data.cam1_intrinsics.to_matrix()
-
-    print(f"\nCam0 Extrinsics:\n{data.cam0_extrinsics}")
-    print(f"\nCam1 Extrinsics:\n{data.cam1_extrinsics}")
 
     # Extract all matched points
     points0 = np.array([cam0_keypoints[m.queryIdx].pt for m in good_matches])
@@ -69,10 +38,6 @@ def triangulate_stereo_matches(
     # P1 = K1 @ [R | t] where transformation is from cam0 to cam1
     T_cam0_to_cam1 = np.linalg.inv(data.cam1_extrinsics) @ data.cam0_extrinsics
     P1 = K1 @ T_cam0_to_cam1[:3, :]
-
-    print(f"\nT_cam0_to_cam1:\n{T_cam0_to_cam1}")
-    print(f"\nCam0 Projection Matrix (P0):\n{P0}")
-    print(f"\nCam1 Projection Matrix (P1):\n{P1}")
 
     # Triangulate points (cv2.triangulatePoints expects 2xN arrays)
     points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
@@ -108,8 +73,6 @@ def solve_pnp(
         if m.distance < 0.75 * n.distance:
             temporal_good_matches.append(m)
 
-    print(f"\nTemporal matches (cam0_img0 -> cam0_img1): {len(temporal_good_matches)}")
-
     # Find correspondences: cam0_keypoints0 that have both 3D points AND matches in cam0_img1
     object_points = []
     image_points = []
@@ -121,8 +84,6 @@ def solve_pnp(
 
     object_points = np.array(object_points, dtype=np.float64)
     image_points = np.array(image_points, dtype=np.float64)
-
-    print(f"Points for PnP: {len(object_points)}")
 
     # Run solvePnP
     K0 = data.cam0_intrinsics.to_matrix()
@@ -212,7 +173,7 @@ def main():
         t_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
         print(f"\ncam0_transforms[{i}] (t={t_seconds:.3f}s):\n{T}")
 
-    print("\nFirst 5 ground truth samples:")
+    print("\nFirst 10 ground truth samples:")
     for i, sample in enumerate(data.ground_truth_samples[:10]):
         t_seconds = (sample.timestamp_ns - min_timestamp_ns) / 1e9
         print(f"  [{i}] t={t_seconds:.3f}s, pos={sample.position}, quat={sample.quaternion}")
