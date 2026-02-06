@@ -143,29 +143,25 @@ def solve_pnp(
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3] = tvec.flatten()
-    print(f"\nTransformation matrix (cam0_img0 -> cam0_img1):\n{T}")
 
     return T
 
 
-def main():
-    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    print(f"Found {len(data.cam_timestamps)} camera frames")
-    print(f"Found {len(data.imu_samples)} IMU samples")
-    print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
-    print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
-
-    sift = cv2.SIFT_create()
-
+def solve_step(
+    data: DataFolder,
+    sift,
+    timestamp0: int,
+    timestamp1: int,
+) -> np.ndarray:
     # Load first frame from left and right cameras
-    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(timestamp0)), cv2.IMREAD_GRAYSCALE)
+    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(timestamp0)), cv2.IMREAD_GRAYSCALE)
 
     cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
     cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
 
     # Load second frame from left camera
-    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
+    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1)), cv2.IMREAD_GRAYSCALE)
     cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
 
     print(f"cam0_img0: {len(cam0_keypoints0)} keypoints")
@@ -190,8 +186,20 @@ def main():
         cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
     )
 
-    visualize_3d_points(points_3d)
-    visualize_keypoints(cam0_img0, cam0_keypoints0, cam1_img0, cam1_keypoints0)
+    return T
+
+
+def main():
+    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    print(f"Found {len(data.cam_timestamps)} camera frames")
+    print(f"Found {len(data.imu_samples)} IMU samples")
+    print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
+    print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
+
+    sift = cv2.SIFT_create()
+
+    T = solve_step(data, sift, data.cam_timestamps[0], data.cam_timestamps[1])
+    print(f"\nTransformation matrix (cam0_img0 -> cam0_img1):\n{T}")
 
 
 if __name__ == "__main__":
