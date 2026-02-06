@@ -48,25 +48,25 @@ def main():
     )
     projected_points = projected_points.reshape(-1, 2)
 
-    # Draw keypoints and reprojected points on cam0_img
-    cam0_img_color = cv2.cvtColor(cam0_img, cv2.COLOR_GRAY2BGR)
+    # Visualize keypoints and reprojected points side by side
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-    # Draw original cam0_keypoints in red
-    for kp in cam0_keypoints:
-        x, y = int(kp.pt[0]), int(kp.pt[1])
-        cv2.circle(cam0_img_color, (x, y), 3, (0, 0, 255), -1)
+    # Left: cam0_keypoints
+    ax1.imshow(cam0_img, cmap='gray')
+    kp_x = [kp.pt[0] for kp in cam0_keypoints]
+    kp_y = [kp.pt[1] for kp in cam0_keypoints]
+    ax1.scatter(kp_x, kp_y, c='red', s=20, alpha=0.5)
+    ax1.set_title(f'cam0_keypoints ({len(cam0_keypoints)})')
+    ax1.axis('off')
 
-    # Draw reprojected points in green
-    for pt in projected_points:
-        x, y = int(pt[0]), int(pt[1])
-        if 0 <= x < cam0_img.shape[1] and 0 <= y < cam0_img.shape[0]:
-            cv2.circle(cam0_img_color, (x, y), 3, (0, 255, 0), -1)
+    # Right: reprojected points
+    ax2.imshow(cam0_img, cmap='gray')
+    ax2.scatter(projected_points[:, 0], projected_points[:, 1],
+                c='green', s=20, alpha=0.5)
+    ax2.set_title(f'Reprojected 3D Points ({len(projected_points)})')
+    ax2.axis('off')
 
-    # Visualize keypoints and reprojected points on cam0
-    fig, ax = plt.subplots(figsize=(12, 8))
-    ax.imshow(cv2.cvtColor(cam0_img_color, cv2.COLOR_BGR2RGB))
-    ax.set_title('cam0_keypoints (red) vs Reprojected 3D Points (green)')
-    ax.axis('off')
+    plt.tight_layout()
     plt.show()
 
     # Visualize 3D points
