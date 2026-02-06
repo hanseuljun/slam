@@ -11,7 +11,7 @@ def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
     orb = cv2.ORB_create(nfeatures=2000)
 
-    min_timestamp_ns = data.ground_truth_samples[0].timestamp_ns
+    min_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = min_timestamp_ns + int(5e9)  # 5 seconds
 
     # pick the last leica sample before the first camera sample
@@ -21,17 +21,17 @@ def main():
     T_world_to_leica[:3, 3] = first_leica_pos
     initial_cam0_transform = T_world_to_leica @ np.linalg.inv(data.leica_extrinsics) @ data.cam0_extrinsics
 
-    keyframe_index = next(i for i, ts in enumerate(data.cam_timestamps_ns) if ts >= min_timestamp_ns)
+    keyframe_index = 0
     cam0_transforms = [initial_cam0_transform]
     viz_points_3d = None
-    i = keyframe_index + 1
-    while data.cam_timestamps_ns[i] <= max_timestamp_ns:
+    i = 0
+    while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
         T, points_3d = solve_step(data,
                                   orb,
                                   data.cam_timestamps_ns[keyframe_index],
-                                  data.cam_timestamps_ns[i])
-        cam0_transforms.append(initial_cam0_transform @ T)
-        if i == keyframe_index + 1:
+                                  data.cam_timestamps_ns[i + 1])
+        cam0_transforms.append(cam0_transforms[keyframe_index] @ T)
+        if i == 10:
             viz_points_3d = points_3d
         i += 1
 
