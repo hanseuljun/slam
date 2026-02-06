@@ -47,18 +47,12 @@ def main():
     gt_positions = np.array([s.position for s in gt_samples])
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
-    # Extract leica positions (within time range)
-    leica_samples = [s for s in data.leica_samples if s.timestamp_ns <= max_timestamp_ns]
-    leica_positions = np.array([s.position for s in leica_samples])
-    leica_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in leica_samples])
-
-    # Plot estimated_transforms_in_cam0 vs ground truth vs leica
+    # Plot estimated_transforms_in_cam0 vs ground truth
     fig = plt.figure(figsize=(12, 4))
 
     ax1 = fig.add_subplot(131)
     ax1.plot(cam0_times, cam0_positions[:, 0], label='cam0 x')
     ax1.plot(gt_times, gt_positions[:, 0], label='gt x')
-    ax1.plot(leica_times, leica_positions[:, 0], label='leica x')
     ax1.set_xlabel('Time [s]')
     ax1.set_ylabel('X [m]')
     ax1.legend()
@@ -66,7 +60,6 @@ def main():
     ax2 = fig.add_subplot(132)
     ax2.plot(cam0_times, cam0_positions[:, 1], label='cam0 y')
     ax2.plot(gt_times, gt_positions[:, 1], label='gt y')
-    ax2.plot(leica_times, leica_positions[:, 1], label='leica y')
     ax2.set_xlabel('Time [s]')
     ax2.set_ylabel('Y [m]')
     ax2.legend()
@@ -74,7 +67,6 @@ def main():
     ax3 = fig.add_subplot(133)
     ax3.plot(cam0_times, cam0_positions[:, 2], label='cam0 z')
     ax3.plot(gt_times, gt_positions[:, 2], label='gt z')
-    ax3.plot(leica_times, leica_positions[:, 2], label='leica z')
     ax3.set_xlabel('Time [s]')
     ax3.set_ylabel('Z [m]')
     ax3.legend()
