@@ -124,7 +124,7 @@ def solve_step(
     sift,
     timestamp0_ns: int,
     timestamp1_ns: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     # Load first frame from left and right cameras
     cam0_img0 = cv2.imread(str(data.get_cam0_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
     cam1_img0 = cv2.imread(str(data.get_cam1_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
@@ -145,4 +145,4 @@ def solve_step(
         cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
     )
 
-    return T
+    return T, points_3d

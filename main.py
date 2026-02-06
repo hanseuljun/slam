@@ -18,12 +18,15 @@ def main():
 
     keyframe_index = 0
     cam0_transforms = [data.cam0_extrinsics]
+    viz_points_3d = None
     for i in range(50):
-        T = solve_step(data,
-                       sift,
-                       data.cam_timestamps_ns[keyframe_index],
-                       data.cam_timestamps_ns[i + 1])
+        T, points_3d = solve_step(data,
+                                  sift,
+                                  data.cam_timestamps_ns[keyframe_index],
+                                  data.cam_timestamps_ns[i + 1])
         cam0_transforms.append(cam0_transforms[keyframe_index] @ T)
+        if i == 10:
+            viz_points_3d = points_3d
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
     for i, T in enumerate(cam0_transforms):
@@ -70,6 +73,16 @@ def main():
     ax3.legend()
 
     plt.tight_layout()
+    plt.show()
+
+    # Visualize 3D points
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(viz_points_3d[0, :], viz_points_3d[1, :], viz_points_3d[2, :], s=1, alpha=0.5)
+    ax.set_xlabel('X [m]')
+    ax.set_ylabel('Y [m]')
+    ax.set_zlabel('Z [m]')
+    ax.set_title('Triangulated 3D Points')
     plt.show()
 
 
