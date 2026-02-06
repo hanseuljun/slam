@@ -9,14 +9,14 @@ import yaml
 
 def read_timestamps(data_csv_path: Path) -> list[int]:
     """Read timestamps from a data.csv file."""
-    timestamps = []
+    timestamps_ns = []
     with open(data_csv_path, "r") as f:
         reader = csv.reader(f)
         next(reader)  # Skip header
         for row in reader:
             timestamp_ns = int(row[0])
-            timestamps.append(timestamp_ns)
-    return timestamps
+            timestamps_ns.append(timestamp_ns)
+    return timestamps_ns
 
 
 @dataclass
@@ -65,14 +65,14 @@ def read_extrinsics(sensor_yaml_path: Path) -> np.ndarray:
 
 @dataclass
 class ImuSample:
-    timestamp: int
+    timestamp_ns: int
     angular_velocity: tuple[float, float, float]  # w_x, w_y, w_z [rad/s]
     linear_acceleration: tuple[float, float, float]  # a_x, a_y, a_z [m/s^2]
 
 
 @dataclass
 class GroundTruthSample:
-    timestamp: int
+    timestamp_ns: int
     position: tuple[float, float, float]  # p_RS_R_x, p_RS_R_y, p_RS_R_z [m]
     quaternion: tuple[float, float, float, float]  # q_RS_w, q_RS_x, q_RS_y, q_RS_z
     velocity: tuple[float, float, float]  # v_RS_R_x, v_RS_R_y, v_RS_R_z [m/s]
@@ -88,7 +88,7 @@ def read_ground_truth_samples(data_csv_path: Path) -> list[GroundTruthSample]:
         next(reader)  # Skip header
         for row in reader:
             sample = GroundTruthSample(
-                timestamp=int(row[0]),
+                timestamp_ns=int(row[0]),
                 position=(float(row[1]), float(row[2]), float(row[3])),
                 quaternion=(float(row[4]), float(row[5]), float(row[6]), float(row[7])),
                 velocity=(float(row[8]), float(row[9]), float(row[10])),
@@ -106,17 +106,17 @@ def read_imu_samples(data_csv_path: Path) -> list[ImuSample]:
         reader = csv.reader(f)
         next(reader)  # Skip header
         for row in reader:
-            timestamp = int(row[0])
+            timestamp_ns = int(row[0])
             angular_velocity = (float(row[1]), float(row[2]), float(row[3]))
             linear_acceleration = (float(row[4]), float(row[5]), float(row[6]))
-            imu_samples.append(ImuSample(timestamp, angular_velocity, linear_acceleration))
+            imu_samples.append(ImuSample(timestamp_ns, angular_velocity, linear_acceleration))
     return imu_samples
 
 
 @dataclass
 class DataFolder:
     path: Path
-    cam_timestamps: list[int]
+    cam_timestamps_ns: list[int]
     imu_samples: list[ImuSample]
     ground_truth_samples: list[GroundTruthSample]
     cam0_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
@@ -126,9 +126,9 @@ class DataFolder:
 
     @classmethod
     def load(cls, path: Path) -> Self:
-        cam0_timestamps = read_timestamps(path / "cam0" / "data.csv")
-        cam1_timestamps = read_timestamps(path / "cam1" / "data.csv")
-        if cam0_timestamps != cam1_timestamps:
+        cam0_timestamps_ns = read_timestamps(path / "cam0" / "data.csv")
+        cam1_timestamps_ns = read_timestamps(path / "cam1" / "data.csv")
+        if cam0_timestamps_ns != cam1_timestamps_ns:
             raise ValueError("cam0 and cam1 timestamps do not match")
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
         ground_truth_samples = read_ground_truth_samples(path / "state_groundtruth_estimate0" / "data.csv")
@@ -138,7 +138,7 @@ class DataFolder:
         cam1_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
         return cls(
             path=path,
-            cam_timestamps=cam0_timestamps,
+            cam_timestamps_ns=cam0_timestamps_ns,
             imu_samples=imu_samples,
             ground_truth_samples=ground_truth_samples,
             cam0_extrinsics=cam0_extrinsics,
@@ -147,8 +147,8 @@ class DataFolder:
             cam1_intrinsics=cam1_intrinsics,
         )
 
-    def get_cam0_image_path(self, timestamp: int) -> Path:
-        return self.path / "cam0" / "data" / f"{timestamp}.png"
+    def get_cam0_image_path(self, timestamp_ns: int) -> Path:
+        return self.path / "cam0" / "data" / f"{timestamp_ns}.png"
 
-    def get_cam1_image_path(self, timestamp: int) -> Path:
-        return self.path / "cam1" / "data" / f"{timestamp}.png"
+    def get_cam1_image_path(self, timestamp_ns: int) -> Path:
+        return self.path / "cam1" / "data" / f"{timestamp_ns}.png"

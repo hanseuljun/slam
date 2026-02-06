@@ -150,18 +150,18 @@ def solve_pnp(
 def solve_step(
     data: DataFolder,
     sift,
-    timestamp0: int,
-    timestamp1: int,
+    timestamp0_ns: int,
+    timestamp1_ns: int,
 ) -> np.ndarray:
     # Load first frame from left and right cameras
-    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(timestamp0)), cv2.IMREAD_GRAYSCALE)
-    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(timestamp0)), cv2.IMREAD_GRAYSCALE)
+    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
+    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
 
     cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
     cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
 
     # Load second frame from left camera
-    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1)), cv2.IMREAD_GRAYSCALE)
+    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1_ns)), cv2.IMREAD_GRAYSCALE)
     cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
 
     print(f"cam0_img0: {len(cam0_keypoints0)} keypoints")
@@ -191,7 +191,7 @@ def solve_step(
 
 def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    print(f"Found {len(data.cam_timestamps)} camera frames")
+    print(f"Found {len(data.cam_timestamps_ns)} camera frames")
     print(f"Found {len(data.imu_samples)} IMU samples")
     print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
     print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
@@ -200,7 +200,7 @@ def main():
 
     transforms = []
     for i in range(5):
-        T = solve_step(data, sift, data.cam_timestamps[i], data.cam_timestamps[i + 1])
+        T = solve_step(data, sift, data.cam_timestamps_ns[i], data.cam_timestamps_ns[i + 1])
         transforms.append(T)
 
     for i, T in enumerate(transforms):
@@ -208,7 +208,7 @@ def main():
 
     print("\nFirst 5 ground truth samples:")
     for i, sample in enumerate(data.ground_truth_samples[:5]):
-        print(f"  [{i}] t={sample.timestamp}, pos={sample.position}, quat={sample.quaternion}")
+        print(f"  [{i}] t={sample.timestamp_ns}, pos={sample.position}, quat={sample.quaternion}")
 
 
 if __name__ == "__main__":
