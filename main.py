@@ -206,9 +206,11 @@ def main():
     for i, T in enumerate(transforms):
         print(f"\nTransformation matrix (timestamp[{i}] -> timestamp[{i + 1}]):\n{T}")
 
+    min_timestamp_ns = data.ground_truth_samples[0].timestamp_ns
     print("\nFirst 5 ground truth samples:")
     for i, sample in enumerate(data.ground_truth_samples[:5]):
-        print(f"  [{i}] t={sample.timestamp_ns}, pos={sample.position}, quat={sample.quaternion}")
+        t_seconds = (sample.timestamp_ns - min_timestamp_ns) / 1e9
+        print(f"  [{i}] t={t_seconds:.3f}s, pos={sample.position}, quat={sample.quaternion}")
 
 
 if __name__ == "__main__":
