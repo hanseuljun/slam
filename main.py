@@ -14,15 +14,8 @@ def main():
     min_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = min_timestamp_ns + int(5e9)  # 5 seconds
 
-    # pick the last leica sample before the first camera sample
-    first_leica_sample = [s for s in data.leica_samples if s.timestamp_ns < min_timestamp_ns][-1]
-    first_leica_pos = first_leica_sample.position
-    T_world_to_leica = np.eye(4)
-    T_world_to_leica[:3, 3] = first_leica_pos
-    initial_cam0_transform = T_world_to_leica @ np.linalg.inv(data.leica_extrinsics) @ data.cam0_extrinsics
-
     keyframe_index = 0
-    cam0_transforms = [initial_cam0_transform]
+    estimated_transforms_in_cam0 = [np.eye(4)]
     viz_points_3d = None
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
@@ -30,24 +23,24 @@ def main():
                                   orb,
                                   data.cam_timestamps_ns[keyframe_index],
                                   data.cam_timestamps_ns[i + 1])
-        cam0_transforms.append(cam0_transforms[keyframe_index] @ T)
+        estimated_transforms_in_cam0.append(estimated_transforms_in_cam0[keyframe_index] @ T)
         if i == 10:
             viz_points_3d = points_3d
         i += 1
 
-    for i, T in enumerate(cam0_transforms):
+    for i, T in enumerate(estimated_transforms_in_cam0):
         t_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
-        print(f"\ncam0_transforms[{i}] (t={t_seconds:.3f}s):\n{T}")
+        print(f"\nestimated_transforms_in_cam0[{i}] (t={t_seconds:.3f}s):\n{T}")
 
     print("\nFirst 10 ground truth samples:")
     for i, sample in enumerate(data.ground_truth_samples[:10]):
         t_seconds = (sample.timestamp_ns - min_timestamp_ns) / 1e9
         print(f"  [{i}] t={t_seconds:.3f}s, pos={sample.position}, quat={sample.quaternion}")
 
-    # Extract translations from cam0_transforms
-    cam0_positions = np.array([T[:3, 3] for T in cam0_transforms])
+    # Extract translations from estimated_transforms_in_cam0
+    cam0_positions = np.array([T[:3, 3] for T in estimated_transforms_in_cam0])
     cam0_times = np.array([(data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
-                           for i in range(len(cam0_transforms))])
+                           for i in range(len(estimated_transforms_in_cam0))])
 
     # Extract ground truth positions (within time range)
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
@@ -59,7 +52,7 @@ def main():
     leica_positions = np.array([s.position for s in leica_samples])
     leica_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in leica_samples])
 
-    # Plot cam0_transforms vs ground truth vs leica
+    # Plot estimated_transforms_in_cam0 vs ground truth vs leica
     fig = plt.figure(figsize=(12, 4))
 
     ax1 = fig.add_subplot(131)
