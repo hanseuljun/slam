@@ -12,10 +12,12 @@ def main():
     orb = cv2.ORB_create(nfeatures=2000)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
+    max_timestamp_ns = min_timestamp_ns + int(5e9)  # 5 seconds
     keyframe_index = 0
     cam0_transforms = [data.cam0_extrinsics]
     viz_points_3d = None
-    for i in range(100):
+    i = 0
+    while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
         T, points_3d = solve_step(data,
                                   orb,
                                   data.cam_timestamps_ns[keyframe_index],
@@ -23,6 +25,7 @@ def main():
         cam0_transforms.append(cam0_transforms[keyframe_index] @ T)
         if i == 10:
             viz_points_3d = points_3d
+        i += 1
 
     for i, T in enumerate(cam0_transforms):
         t_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
@@ -38,10 +41,10 @@ def main():
     cam0_times = np.array([(data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
                            for i in range(len(cam0_transforms))])
 
-    # Extract ground truth positions
-    gt_positions = np.array([sample.position for sample in data.ground_truth_samples[:400]])
-    gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9
-                         for s in data.ground_truth_samples[:len(gt_positions)]])
+    # Extract ground truth positions (within time range)
+    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
+    gt_positions = np.array([s.position for s in gt_samples])
+    gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
     # Plot cam0_transforms vs ground truth
     fig = plt.figure(figsize=(12, 4))
