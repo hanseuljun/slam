@@ -82,43 +82,14 @@ def triangulate_stereo_matches(
     return points_3d
 
 
-def main():
-    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    print(f"Found {len(data.cam_timestamps)} camera frames")
-    print(f"Found {len(data.imu_samples)} IMU samples")
-    print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
-    print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
-
-    sift = cv2.SIFT_create()
-
-    # Load first frame from left and right cameras
-    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
-
-    cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
-    cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
-
-    # Load second frame from left camera
-    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
-    cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
-
-    print(f"cam0_img0: {len(cam0_keypoints0)} keypoints")
-    print(f"cam1_img0: {len(cam1_keypoints0)} keypoints")
-    print(f"cam0_img1: {len(cam0_keypoints1)} keypoints")
-
-    points_3d = triangulate_stereo_matches(
-        data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
-    )
-
-    print(f"\nTriangulated {points_3d.shape[1]} points")
-    print(f"First 5 3D points (in cam0 frame):")
-    for i in range(min(5, points_3d.shape[1])):
-        print(f"  Point {i}: ({points_3d[0, i]:.4f}, {points_3d[1, i]:.4f}, {points_3d[2, i]:.4f})")
-
-    # Compute and print average of all 3D points
-    avg_point = np.mean(points_3d, axis=1)
-    print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
-
+def solve_pnp(
+    data: DataFolder,
+    points_3d: np.ndarray,
+    cam0_descriptors0: np.ndarray,
+    cam1_descriptors0: np.ndarray,
+    cam0_keypoints1,
+    cam0_descriptors1: np.ndarray,
+) -> np.ndarray:
     # Get stereo matches again to know which cam0_keypoints0 indices have 3D points
     bf = cv2.BFMatcher()
     stereo_matches = bf.knnMatch(cam0_descriptors0, cam1_descriptors0, k=2)
@@ -173,6 +144,51 @@ def main():
     T[:3, :3] = R
     T[:3, 3] = tvec.flatten()
     print(f"\nTransformation matrix (cam0_img0 -> cam0_img1):\n{T}")
+
+    return T
+
+
+def main():
+    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    print(f"Found {len(data.cam_timestamps)} camera frames")
+    print(f"Found {len(data.imu_samples)} IMU samples")
+    print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
+    print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
+
+    sift = cv2.SIFT_create()
+
+    # Load first frame from left and right cameras
+    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(data.cam_timestamps[0])), cv2.IMREAD_GRAYSCALE)
+
+    cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
+    cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
+
+    # Load second frame from left camera
+    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(data.cam_timestamps[1])), cv2.IMREAD_GRAYSCALE)
+    cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
+
+    print(f"cam0_img0: {len(cam0_keypoints0)} keypoints")
+    print(f"cam1_img0: {len(cam1_keypoints0)} keypoints")
+    print(f"cam0_img1: {len(cam0_keypoints1)} keypoints")
+
+    points_3d = triangulate_stereo_matches(
+        data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
+    )
+
+    print(f"\nTriangulated {points_3d.shape[1]} points")
+    print(f"First 5 3D points (in cam0 frame):")
+    for i in range(min(5, points_3d.shape[1])):
+        print(f"  Point {i}: ({points_3d[0, i]:.4f}, {points_3d[1, i]:.4f}, {points_3d[2, i]:.4f})")
+
+    # Compute and print average of all 3D points
+    avg_point = np.mean(points_3d, axis=1)
+    print(f"\nAverage 3D point: ({avg_point[0]:.4f}, {avg_point[1]:.4f}, {avg_point[2]:.4f})")
+
+    T = solve_pnp(
+        data, points_3d, cam0_descriptors0,
+        cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
+    )
 
     visualize_3d_points(points_3d)
     visualize_keypoints(cam0_img0, cam0_keypoints0, cam1_img0, cam1_keypoints0)
