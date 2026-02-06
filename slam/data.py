@@ -80,6 +80,27 @@ class GroundTruthSample:
     accelerometer_bias: tuple[float, float, float]  # b_a_RS_S_x, b_a_RS_S_y, b_a_RS_S_z [m/s^2]
 
 
+@dataclass
+class LeicaSample:
+    timestamp_ns: int
+    position: tuple[float, float, float]  # p_RS_R_x, p_RS_R_y, p_RS_R_z [m]
+
+
+def read_leica_samples(data_csv_path: Path) -> list[LeicaSample]:
+    """Read Leica position data from a data.csv file."""
+    samples = []
+    with open(data_csv_path, "r") as f:
+        reader = csv.reader(f)
+        next(reader)  # Skip header
+        for row in reader:
+            sample = LeicaSample(
+                timestamp_ns=int(row[0]),
+                position=(float(row[1]), float(row[2]), float(row[3])),
+            )
+            samples.append(sample)
+    return samples
+
+
 def read_ground_truth_samples(data_csv_path: Path) -> list[GroundTruthSample]:
     """Read ground truth data from a data.csv file."""
     samples = []
@@ -119,6 +140,7 @@ class DataFolder:
     cam_timestamps_ns: list[int]
     imu_samples: list[ImuSample]
     ground_truth_samples: list[GroundTruthSample]
+    leica_samples: list[LeicaSample]
     cam0_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
     cam1_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
     cam0_intrinsics: CameraIntrinsics
@@ -132,6 +154,7 @@ class DataFolder:
             raise ValueError("cam0 and cam1 timestamps do not match")
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
         ground_truth_samples = read_ground_truth_samples(path / "state_groundtruth_estimate0" / "data.csv")
+        leica_samples = read_leica_samples(path / "leica0" / "data.csv")
         cam0_extrinsics = read_extrinsics(path / "cam0" / "sensor.yaml")
         cam1_extrinsics = read_extrinsics(path / "cam1" / "sensor.yaml")
         cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
@@ -141,6 +164,7 @@ class DataFolder:
             cam_timestamps_ns=cam0_timestamps_ns,
             imu_samples=imu_samples,
             ground_truth_samples=ground_truth_samples,
+            leica_samples=leica_samples,
             cam0_extrinsics=cam0_extrinsics,
             cam1_extrinsics=cam1_extrinsics,
             cam0_intrinsics=cam0_intrinsics,
