@@ -23,7 +23,7 @@ def main():
     keyframe_index = 0
     cam0_transforms = [data.cam0_extrinsics]
     viz_points_3d = None
-    for i in range(50):
+    for i in range(100):
         T, points_3d = solve_step(data,
                                   orb,
                                   data.cam_timestamps_ns[keyframe_index],
@@ -48,7 +48,7 @@ def main():
                            for i in range(len(cam0_transforms))])
 
     # Extract ground truth positions
-    gt_positions = np.array([sample.position for sample in data.ground_truth_samples[:200]])
+    gt_positions = np.array([sample.position for sample in data.ground_truth_samples[:400]])
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9
                          for s in data.ground_truth_samples[:len(gt_positions)]])
 
