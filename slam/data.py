@@ -70,6 +70,35 @@ class ImuSample:
     linear_acceleration: tuple[float, float, float]  # a_x, a_y, a_z [m/s^2]
 
 
+@dataclass
+class GroundTruthSample:
+    timestamp: int
+    position: tuple[float, float, float]  # p_RS_R_x, p_RS_R_y, p_RS_R_z [m]
+    quaternion: tuple[float, float, float, float]  # q_RS_w, q_RS_x, q_RS_y, q_RS_z
+    velocity: tuple[float, float, float]  # v_RS_R_x, v_RS_R_y, v_RS_R_z [m/s]
+    gyroscope_bias: tuple[float, float, float]  # b_w_RS_S_x, b_w_RS_S_y, b_w_RS_S_z [rad/s]
+    accelerometer_bias: tuple[float, float, float]  # b_a_RS_S_x, b_a_RS_S_y, b_a_RS_S_z [m/s^2]
+
+
+def read_ground_truth_samples(data_csv_path: Path) -> list[GroundTruthSample]:
+    """Read ground truth data from a data.csv file."""
+    samples = []
+    with open(data_csv_path, "r") as f:
+        reader = csv.reader(f)
+        next(reader)  # Skip header
+        for row in reader:
+            sample = GroundTruthSample(
+                timestamp=int(row[0]),
+                position=(float(row[1]), float(row[2]), float(row[3])),
+                quaternion=(float(row[4]), float(row[5]), float(row[6]), float(row[7])),
+                velocity=(float(row[8]), float(row[9]), float(row[10])),
+                gyroscope_bias=(float(row[11]), float(row[12]), float(row[13])),
+                accelerometer_bias=(float(row[14]), float(row[15]), float(row[16])),
+            )
+            samples.append(sample)
+    return samples
+
+
 def read_imu_samples(data_csv_path: Path) -> list[ImuSample]:
     """Read IMU data from a data.csv file."""
     imu_samples = []
@@ -89,6 +118,7 @@ class DataFolder:
     path: Path
     cam_timestamps: list[int]
     imu_samples: list[ImuSample]
+    ground_truth_samples: list[GroundTruthSample]
     cam0_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
     cam1_extrinsics: np.ndarray  # 4x4 transformation matrix (T_BS)
     cam0_intrinsics: CameraIntrinsics
@@ -101,6 +131,7 @@ class DataFolder:
         if cam0_timestamps != cam1_timestamps:
             raise ValueError("cam0 and cam1 timestamps do not match")
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
+        ground_truth_samples = read_ground_truth_samples(path / "state_groundtruth_estimate0" / "data.csv")
         cam0_extrinsics = read_extrinsics(path / "cam0" / "sensor.yaml")
         cam1_extrinsics = read_extrinsics(path / "cam1" / "sensor.yaml")
         cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
@@ -109,6 +140,7 @@ class DataFolder:
             path=path,
             cam_timestamps=cam0_timestamps,
             imu_samples=imu_samples,
+            ground_truth_samples=ground_truth_samples,
             cam0_extrinsics=cam0_extrinsics,
             cam1_extrinsics=cam1_extrinsics,
             cam0_intrinsics=cam0_intrinsics,

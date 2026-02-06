@@ -206,6 +206,10 @@ def main():
     for i, T in enumerate(transforms):
         print(f"\nTransformation matrix (timestamp[{i}] -> timestamp[{i + 1}]):\n{T}")
 
+    print("\nFirst 5 ground truth samples:")
+    for i, sample in enumerate(data.ground_truth_samples[:5]):
+        print(f"  [{i}] t={sample.timestamp}, pos={sample.position}, quat={sample.quaternion}")
+
 
 if __name__ == "__main__":
     main()
