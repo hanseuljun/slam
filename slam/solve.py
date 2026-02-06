@@ -1,3 +1,5 @@
+import time
+
 import cv2
 import numpy as np
 
@@ -125,24 +127,34 @@ def solve_step(
     timestamp0_ns: int,
     timestamp1_ns: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    # Load first frame from left and right cameras
+    t_start = time.perf_counter()
+
+    # Load first frame from left and right cameras, and the second frame from left camera
     cam0_img0 = cv2.imread(str(data.get_cam0_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
     cam1_img0 = cv2.imread(str(data.get_cam1_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
+    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1_ns)), cv2.IMREAD_GRAYSCALE)
+    t_imread = time.perf_counter()
 
     cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
     cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
-
-    # Load second frame from left camera
-    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1_ns)), cv2.IMREAD_GRAYSCALE)
     cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
+    t_sift = time.perf_counter()
 
     points_3d = triangulate_stereo_matches(
         data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
     )
+    t_triangulate = time.perf_counter()
 
     T = solve_pnp(
         data, points_3d, cam0_descriptors0,
         cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
     )
+    t_pnp = time.perf_counter()
+
+    print(f"solve_step: {(t_pnp-t_start)*1000:.2f}ms "
+          f"(imread: {(t_imread-t_start)*1000:.2f}ms, "
+          f"sift: {(t_sift-t_imread)*1000:.2f}ms, "
+          f"triangulate: {(t_triangulate-t_sift)*1000:.2f}ms, "
+          f"solve_pnp: {(t_pnp-t_triangulate)*1000:.2f}ms)")
 
     return T, points_3d
