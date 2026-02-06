@@ -199,16 +199,18 @@ def main():
     sift = cv2.SIFT_create()
 
     transforms = []
-    for i in range(5):
+    for i in range(10):
         T = solve_step(data, sift, data.cam_timestamps_ns[i], data.cam_timestamps_ns[i + 1])
         transforms.append(T)
 
+    min_timestamp_ns = data.cam_timestamps_ns[0]
     for i, T in enumerate(transforms):
-        print(f"\nTransformation matrix (timestamp[{i}] -> timestamp[{i + 1}]):\n{T}")
+        t0_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
+        t1_seconds = (data.cam_timestamps_ns[i + 1] - min_timestamp_ns) / 1e9
+        print(f"\nTransformation matrix (t={t0_seconds:.3f}s -> t={t1_seconds:.3f}s):\n{T}")
 
-    min_timestamp_ns = data.ground_truth_samples[0].timestamp_ns
     print("\nFirst 5 ground truth samples:")
-    for i, sample in enumerate(data.ground_truth_samples[:5]):
+    for i, sample in enumerate(data.ground_truth_samples[:10]):
         t_seconds = (sample.timestamp_ns - min_timestamp_ns) / 1e9
         print(f"  [{i}] t={t_seconds:.3f}s, pos={sample.position}, quat={sample.quaternion}")
 
