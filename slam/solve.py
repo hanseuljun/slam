@@ -14,7 +14,8 @@ def triangulate_stereo_matches(
     cam1_descriptors: np.ndarray,
 ) -> np.ndarray:
     # Match descriptors using BFMatcher with ratio test
-    bf = cv2.BFMatcher()
+    # Use NORM_HAMMING for binary descriptors (ORB, BRIEF, BRISK)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
     matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2)
 
     # Apply ratio test (Lowe's ratio test)
@@ -70,7 +71,8 @@ def solve_pnp(
     cam0_descriptors1: np.ndarray,
 ) -> np.ndarray:
     # Get stereo matches again to know which cam0_keypoints0 indices have 3D points
-    bf = cv2.BFMatcher()
+    # Use NORM_HAMMING for binary descriptors (ORB, BRIEF, BRISK)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
     stereo_matches = bf.knnMatch(cam0_descriptors0, cam1_descriptors0, k=2)
     stereo_good_matches = []
     for m, n in stereo_matches:

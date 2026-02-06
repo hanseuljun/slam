@@ -14,14 +14,14 @@ def main():
     print(f"Cam0 distortion: k1={data.cam0_intrinsics.k1}, k2={data.cam0_intrinsics.k2}, p1={data.cam0_intrinsics.p1}, p2={data.cam0_intrinsics.p2}")
     print(f"Cam1 distortion: k1={data.cam1_intrinsics.k1}, k2={data.cam1_intrinsics.k2}, p1={data.cam1_intrinsics.p1}, p2={data.cam1_intrinsics.p2}")
 
-    sift = cv2.SIFT_create()
+    orb = cv2.ORB_create(nfeatures=2000)
 
     keyframe_index = 0
     cam0_transforms = [data.cam0_extrinsics]
     viz_points_3d = None
     for i in range(50):
         T, points_3d = solve_step(data,
-                                  sift,
+                                  orb,
                                   data.cam_timestamps_ns[keyframe_index],
                                   data.cam_timestamps_ns[i + 1])
         cam0_transforms.append(cam0_transforms[keyframe_index] @ T)
