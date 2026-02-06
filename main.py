@@ -167,6 +167,13 @@ def main():
     print(f"Rotation vector:\n{rvec}")
     print(f"Translation vector:\n{tvec}")
 
+    # Convert rvec and tvec to 4x4 transformation matrix
+    R, _ = cv2.Rodrigues(rvec)
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = tvec.flatten()
+    print(f"\nTransformation matrix (cam0_img0 -> cam0_img1):\n{T}")
+
     visualize_3d_points(points_3d)
     visualize_keypoints(cam0_img0, cam0_keypoints0, cam1_img0, cam1_keypoints0)
 
