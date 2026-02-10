@@ -80,9 +80,13 @@ def main():
 
     # Extract forward directions (z-axis of rotation) from estimated transforms
     estimated_forward = np.array([T[:3, 2] for T in estimated_transforms_in_world])
+    # Extract up directions (y-axis of rotation) from estimated transforms
+    estimated_up = np.array([T[:3, 1] for T in estimated_transforms_in_world])
 
     # Extract forward directions from ground truth quaternions
     gt_forward = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 2] for s in gt_samples])
+    # Extract up directions from ground truth quaternions
+    gt_up = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 1] for s in gt_samples])
 
     # Plot forward directions
     fig = plt.figure(figsize=(12, 4))
@@ -107,6 +111,34 @@ def main():
     ax3.plot(gt_times, gt_forward[:, 2], label='gt')
     ax3.set_xlabel('Time [s]')
     ax3.set_ylabel('Forward Z')
+    ax3.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot up directions
+    fig = plt.figure(figsize=(12, 4))
+    fig.suptitle('Up Direction (y-axis)')
+
+    ax1 = fig.add_subplot(131)
+    ax1.plot(world_times, estimated_up[:, 0], label='estimated')
+    ax1.plot(gt_times, gt_up[:, 0], label='gt')
+    ax1.set_xlabel('Time [s]')
+    ax1.set_ylabel('Up X')
+    ax1.legend()
+
+    ax2 = fig.add_subplot(132)
+    ax2.plot(world_times, estimated_up[:, 1], label='estimated')
+    ax2.plot(gt_times, gt_up[:, 1], label='gt')
+    ax2.set_xlabel('Time [s]')
+    ax2.set_ylabel('Up Y')
+    ax2.legend()
+
+    ax3 = fig.add_subplot(133)
+    ax3.plot(world_times, estimated_up[:, 2], label='estimated')
+    ax3.plot(gt_times, gt_up[:, 2], label='gt')
+    ax3.set_xlabel('Time [s]')
+    ax3.set_ylabel('Up Z')
     ax3.legend()
 
     plt.tight_layout()
@@ -140,14 +172,14 @@ def main():
     plt.show()
 
     # Visualize 3D points
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(viz_points_3d[0, :], viz_points_3d[1, :], viz_points_3d[2, :], s=1, alpha=0.5)
-    ax.set_xlabel('X [m]')
-    ax.set_ylabel('Y [m]')
-    ax.set_zlabel('Z [m]')
-    ax.set_title('Triangulated 3D Points')
-    plt.show()
+    # fig = plt.figure(figsize=(10, 8))
+    # ax = fig.add_subplot(111, projection='3d')
+    # ax.scatter(viz_points_3d[0, :], viz_points_3d[1, :], viz_points_3d[2, :], s=1, alpha=0.5)
+    # ax.set_xlabel('X [m]')
+    # ax.set_ylabel('Y [m]')
+    # ax.set_zlabel('Z [m]')
+    # ax.set_title('Triangulated 3D Points')
+    # plt.show()
 
 
 if __name__ == "__main__":
