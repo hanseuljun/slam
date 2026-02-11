@@ -52,15 +52,10 @@ def main():
     print(f"Closest cam timestamp: {data.cam_timestamps_ns[closest_cam_index]} (index {closest_cam_index})")
     print(f"Time diff: {(data.cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
-    # Compute T_cam0_to_world matrix: first_gt_transform @ inv(leica_extrinsics) @ cam0_extrinsics = T_cam0_to_world @ estimated_transforms_in_cam0[closest_cam_index]
-    # T_cam0_to_world = first_gt_transform @ np.linalg.inv(data.leica_extrinsics) @ data.cam0_extrinsics @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index])
-    # T_cam0_to_world = first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(data.cam0_extrinsics) @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index])
-    T_cam0_to_world = first_gt_transform @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index])
-    print(f"T_cam0_to_world:\n{T_cam0_to_world}")
-
     # Transform estimated poses to world frame
-    # estimated_transforms_in_world = [T_cam0_to_world @ T for T in estimated_transforms_in_cam0]
-    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(data.cam0_extrinsics) @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @ T @ data.cam0_extrinsics for T in estimated_transforms_in_cam0]
+    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(data.cam0_extrinsics) @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
+                                     T @
+                                     data.cam0_extrinsics for T in estimated_transforms_in_cam0]
 
     # for i, T in enumerate(estimated_transforms_in_world):
     #     t_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
