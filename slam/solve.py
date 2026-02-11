@@ -112,7 +112,7 @@ def solve_pnp(
 
     success, rvec, tvec, _ = cv2.solvePnPRansac(object_points, image_points, K0, dist_coeffs)
     if not success:
-        raise RuntimeError("cv2.solvePnPRansac failed")
+        raise RuntimeError(f"cv2.solvePnPRansac failed. len(object_points): {len(object_points)}")
 
     # Convert rvec and tvec to 4x4 transformation matrix
     R, _ = cv2.Rodrigues(rvec)

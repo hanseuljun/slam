@@ -22,20 +22,17 @@ def main():
     orb = cv2.ORB_create(nfeatures=2000)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
-    max_timestamp_ns = min_timestamp_ns + int(5e9)  # 5 seconds
+    max_timestamp_ns = min_timestamp_ns + int(6e9)  # 6 seconds
 
     keyframe_index = 0
     estimated_transforms_in_cam0 = [np.eye(4)]
-    viz_points_3d = None
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
-        T, points_3d = solve_step(data,
-                                  orb,
-                                  data.cam_timestamps_ns[keyframe_index],
-                                  data.cam_timestamps_ns[i + 1])
+        T, _ = solve_step(data,
+                          orb,
+                          data.cam_timestamps_ns[keyframe_index],
+                          data.cam_timestamps_ns[i + 1])
         estimated_transforms_in_cam0.append(estimated_transforms_in_cam0[keyframe_index] @ T)
-        if i == 10:
-            viz_points_3d = points_3d
         i += 1
 
     # Get first ground truth sample as 4x4 transformation matrix
@@ -53,18 +50,13 @@ def main():
     print(f"Time diff: {(data.cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(data.cam0_extrinsics) @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
+    # with first_gt_transform and inverse of estimated_transforms_in_cam0[closest_cam_index],
+    # convert T into matching first_gt_transform at closest_cam_index.
+    # apply data.leica_extrinsics and data.cam0_extrinsics to get the coordinate system right.
+    # TODO: i think inverse of data.leica_extrinsics and data.cam0_extrinsics on the left side of T, but the opposite is working. figure out why.
+    estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(data.cam0_extrinsics) @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
                                      T @
-                                     data.cam0_extrinsics for T in estimated_transforms_in_cam0]
-
-    # for i, T in enumerate(estimated_transforms_in_world):
-    #     t_seconds = (data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
-    #     print(f"\nestimated_transforms_in_world[{i}] (t={t_seconds:.3f}s):\n{T}")
-
-    # print("\nFirst 10 ground truth samples:")
-    # for i, sample in enumerate(data.ground_truth_samples[:10]):
-    #     t_seconds = (sample.timestamp_ns - min_timestamp_ns) / 1e9
-    #     print(f"  [{i}] t={t_seconds:.3f}s, pos={sample.position}, quat={sample.quaternion}")
+                                     data.cam0_extrinsics @ np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_cam0]
 
     # Extract translations from estimated_transforms_in_world
     world_positions = np.array([T[:3, 3] for T in estimated_transforms_in_world])
@@ -133,16 +125,6 @@ def main():
 
     plt.tight_layout()
     plt.show()
-
-    # Visualize 3D points
-    # fig = plt.figure(figsize=(10, 8))
-    # ax = fig.add_subplot(111, projection='3d')
-    # ax.scatter(viz_points_3d[0, :], viz_points_3d[1, :], viz_points_3d[2, :], s=1, alpha=0.5)
-    # ax.set_xlabel('X [m]')
-    # ax.set_ylabel('Y [m]')
-    # ax.set_zlabel('Z [m]')
-    # ax.set_title('Triangulated 3D Points')
-    # plt.show()
 
 
 if __name__ == "__main__":
