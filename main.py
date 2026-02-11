@@ -54,7 +54,7 @@ def main():
 
     # Compute T_cam0_to_world matrix: first_gt_transform @ inv(leica_extrinsics) @ cam0_extrinsics = T_cam0_to_world @ estimated_transforms_in_cam0[closest_cam_index]
     T_cam0_to_world = first_gt_transform @ np.linalg.inv(data.leica_extrinsics) @ data.cam0_extrinsics @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index])
-    print(f"\T_cam0_to_world:\n{T_cam0_to_world}")
+    print(f"T_cam0_to_world:\n{T_cam0_to_world}")
 
     # Transform estimated poses to world frame
     estimated_transforms_in_world = [T_cam0_to_world @ T for T in estimated_transforms_in_cam0]
@@ -78,68 +78,33 @@ def main():
     gt_positions = np.array([s.position for s in gt_samples])
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
-    # Extract forward directions (z-axis of rotation) from estimated transforms
-    estimated_forward = np.array([T[:3, 2] for T in estimated_transforms_in_world])
-    # Extract up directions (y-axis of rotation) from estimated transforms
+    # Extract rotation axes from estimated transforms
+    estimated_right = np.array([T[:3, 0] for T in estimated_transforms_in_world])
     estimated_up = np.array([T[:3, 1] for T in estimated_transforms_in_world])
+    estimated_forward = np.array([T[:3, 2] for T in estimated_transforms_in_world])
 
-    # Extract forward directions from ground truth quaternions
-    gt_forward = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 2] for s in gt_samples])
-    # Extract up directions from ground truth quaternions
+    # Extract rotation axes from ground truth quaternions
+    gt_right = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 0] for s in gt_samples])
     gt_up = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 1] for s in gt_samples])
+    gt_forward = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 2] for s in gt_samples])
 
-    # Plot forward directions
-    fig = plt.figure(figsize=(12, 4))
-    fig.suptitle('Forward Direction (z-axis)')
+    # Plot rotation axes: rows = x/y/z axis, cols = x/y/z component
+    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
+    fig.suptitle('Rotation Axes (estimated vs gt)')
 
-    ax1 = fig.add_subplot(131)
-    ax1.plot(world_times, estimated_forward[:, 0], label='estimated')
-    ax1.plot(gt_times, gt_forward[:, 0], label='gt')
-    ax1.set_xlabel('Time [s]')
-    ax1.set_ylabel('Forward X')
-    ax1.legend()
+    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
+    estimated_axes = [estimated_right, estimated_up, estimated_forward]
+    gt_axes = [gt_right, gt_up, gt_forward]
+    component_names = ['X', 'Y', 'Z']
 
-    ax2 = fig.add_subplot(132)
-    ax2.plot(world_times, estimated_forward[:, 1], label='estimated')
-    ax2.plot(gt_times, gt_forward[:, 1], label='gt')
-    ax2.set_xlabel('Time [s]')
-    ax2.set_ylabel('Forward Y')
-    ax2.legend()
-
-    ax3 = fig.add_subplot(133)
-    ax3.plot(world_times, estimated_forward[:, 2], label='estimated')
-    ax3.plot(gt_times, gt_forward[:, 2], label='gt')
-    ax3.set_xlabel('Time [s]')
-    ax3.set_ylabel('Forward Z')
-    ax3.legend()
-
-    plt.tight_layout()
-    plt.show()
-
-    # Plot up directions
-    fig = plt.figure(figsize=(12, 4))
-    fig.suptitle('Up Direction (y-axis)')
-
-    ax1 = fig.add_subplot(131)
-    ax1.plot(world_times, estimated_up[:, 0], label='estimated')
-    ax1.plot(gt_times, gt_up[:, 0], label='gt')
-    ax1.set_xlabel('Time [s]')
-    ax1.set_ylabel('Up X')
-    ax1.legend()
-
-    ax2 = fig.add_subplot(132)
-    ax2.plot(world_times, estimated_up[:, 1], label='estimated')
-    ax2.plot(gt_times, gt_up[:, 1], label='gt')
-    ax2.set_xlabel('Time [s]')
-    ax2.set_ylabel('Up Y')
-    ax2.legend()
-
-    ax3 = fig.add_subplot(133)
-    ax3.plot(world_times, estimated_up[:, 2], label='estimated')
-    ax3.plot(gt_times, gt_up[:, 2], label='gt')
-    ax3.set_xlabel('Time [s]')
-    ax3.set_ylabel('Up Z')
-    ax3.legend()
+    for row in range(3):
+        for col in range(3):
+            ax = axes[row, col]
+            ax.plot(world_times, estimated_axes[row][:, col], label='estimated')
+            ax.plot(gt_times, gt_axes[row][:, col], label='gt')
+            ax.set_xlabel('Time [s]')
+            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
+            ax.legend()
 
     plt.tight_layout()
     plt.show()
