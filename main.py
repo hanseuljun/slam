@@ -100,7 +100,7 @@ def main():
 
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
-    slam_transforms_in_body = [data.cam0_extrinsics]
+    slam_poses_in_body = [data.cam0_extrinsics]
     slam_angular_velocities_in_body = []
     num_temporal_matches_list = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
@@ -126,17 +126,17 @@ def main():
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
-        slam_transforms_in_body.append(slam_transforms_in_body[keyframe_indices[-1]] @ T)
+        slam_poses_in_body.append(slam_poses_in_body[keyframe_indices[-1]] @ T)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
 
-    # Get first ground truth sample as 4x4 transformation matrix
+    # Get first ground truth sample as 4x4 pose matrix
     first_gt = data.ground_truth_samples[0]
-    first_gt_transform = np.eye(4)
-    first_gt_transform[:3, :3] = quaternion_to_rotation_matrix(first_gt.quaternion)
-    first_gt_transform[:3, 3] = first_gt.position
-    print(f"First ground truth transform:\n{first_gt_transform}")
+    first_gt_pose = np.eye(4)
+    first_gt_pose[:3, :3] = quaternion_to_rotation_matrix(first_gt.quaternion)
+    first_gt_pose[:3, 3] = first_gt.position
+    print(f"First ground truth pose:\n{first_gt_pose}")
 
     # Find camera timestamp closest to first ground truth timestamp
     cam_timestamps_ns = np.array([data.cam_timestamps_ns[i] for i in cam_timestamp_indices_in_range])
@@ -146,14 +146,14 @@ def main():
     print(f"Time diff: {(cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    slam_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(slam_transforms_in_body[closest_cam_index]) @
+    slam_poses_in_world = [first_gt_pose @ data.leica_extrinsics @ np.linalg.inv(slam_poses_in_body[closest_cam_index]) @
                                      T @
-                                     np.linalg.inv(data.leica_extrinsics) for T in slam_transforms_in_body]
+                                     np.linalg.inv(data.leica_extrinsics) for T in slam_poses_in_body]
 
-    # Extract translations from slam_transforms_in_world
-    world_positions = np.array([T[:3, 3] for T in slam_transforms_in_world])
+    # Extract translations from slam_poses_in_world
+    world_positions = np.array([T[:3, 3] for T in slam_poses_in_world])
     world_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
-                            for i in range(len(slam_transforms_in_world))])
+                            for i in range(len(slam_poses_in_world))])
 
     # Extract ground truth positions (within time range)
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
@@ -161,7 +161,7 @@ def main():
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
     # Extract rotations
-    slam_attitudes = np.array([T[:3, :3] for T in slam_transforms_in_world])
+    slam_attitudes = np.array([T[:3, :3] for T in slam_poses_in_world])
     gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
@@ -182,7 +182,7 @@ def main():
     closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
     # +1 because imu_attitudes_in_body has an extra identity at index 0
     closest_imu_attitude_index = closest_imu_index + 1
-    R_gt = first_gt_transform[:3, :3]
+    R_gt = first_gt_pose[:3, :3]
     R_leica = data.leica_extrinsics[:3, :3]
     imu_attitudes_in_world = np.array([
         R_gt @ R_leica @ imu_attitudes_in_body[closest_imu_attitude_index].T @ att @ R_leica.T
