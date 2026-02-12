@@ -139,20 +139,27 @@ def main():
     angular_velocity_times = np.array([(data.cam_timestamps_ns[i + 1] - min_timestamp_ns) / 1e9
                                        for i in range(len(angular_velocities))])
 
+    imu_samples_in_range = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples_in_range])
+    imu_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in imu_samples_in_range])
+
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle('Angular Velocity in Body Frame')
 
     ax_wx.plot(angular_velocity_times, angular_velocities[:, 0], label='estimated')
+    ax_wx.plot(imu_times, imu_angular_velocities[:, 0], label='imu')
     ax_wx.set_xlabel('Time [s]')
     ax_wx.set_ylabel('wx [rad/s]')
     ax_wx.legend()
 
     ax_wy.plot(angular_velocity_times, angular_velocities[:, 1], label='estimated')
+    ax_wy.plot(imu_times, imu_angular_velocities[:, 1], label='imu')
     ax_wy.set_xlabel('Time [s]')
     ax_wy.set_ylabel('wy [rad/s]')
     ax_wy.legend()
 
     ax_wz.plot(angular_velocity_times, angular_velocities[:, 2], label='estimated')
+    ax_wz.plot(imu_times, imu_angular_velocities[:, 2], label='imu')
     ax_wz.set_xlabel('Time [s]')
     ax_wz.set_ylabel('wz [rad/s]')
     ax_wz.legend()
