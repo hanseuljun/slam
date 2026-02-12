@@ -22,23 +22,24 @@ def main():
     orb = cv2.ORB_create(nfeatures=2000)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
-    max_timestamp_ns = min_timestamp_ns + int(7e9)  # 7 seconds
+    max_timestamp_ns = min_timestamp_ns + int(30e9)  # 30 seconds
+    cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
     estimated_transforms_in_body = [data.cam0_extrinsics]
     estimated_angular_velocities_in_body = []
     num_temporal_matches_list = []
-    i = 0
-    while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
+    for i in range(1, len(cam_timestamp_indices_in_range)):
+        if i % 100 == 0:
+            print(f"i={i}")
         try:
             rvec, tvec, num_temporal_matches = solve_step(data,
                                        orb,
-                                       data.cam_timestamps_ns[keyframe_indices[-1]],
-                                       data.cam_timestamps_ns[i + 1])
+                                       data.cam_timestamps_ns[cam_timestamp_indices_in_range[keyframe_indices[-1]]],
+                                       data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]])
         except Exception as e:
             print(f"solve_step failed at i={i}: {e}")
-            i += 1
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
@@ -54,9 +55,8 @@ def main():
         T[:3, 3] = tvec.flatten()
         estimated_transforms_in_body.append(estimated_transforms_in_body[keyframe_indices[-1]] @ T)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
-            keyframe_indices.append(i + 1)
+            keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-        i += 1
 
     # Get first ground truth sample as 4x4 transformation matrix
     first_gt = data.ground_truth_samples[0]
@@ -66,11 +66,11 @@ def main():
     print(f"First ground truth transform:\n{first_gt_transform}")
 
     # Find camera timestamp closest to first ground truth timestamp
-    cam_timestamps = np.array(data.cam_timestamps_ns)
-    closest_cam_index = np.argmin(np.abs(cam_timestamps - first_gt.timestamp_ns))
+    cam_timestamps_ns = np.array([data.cam_timestamps_ns[i] for i in cam_timestamp_indices_in_range])
+    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt.timestamp_ns))
     print(f"First GT timestamp: {first_gt.timestamp_ns}")
-    print(f"Closest cam timestamp: {data.cam_timestamps_ns[closest_cam_index]} (index {closest_cam_index})")
-    print(f"Time diff: {(data.cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
+    print(f"Closest cam timestamp: {cam_timestamps_ns[closest_cam_index]} (index {closest_cam_index})")
+    print(f"Time diff: {(cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
     estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(estimated_transforms_in_body[closest_cam_index]) @
@@ -79,7 +79,7 @@ def main():
 
     # Extract translations from estimated_transforms_in_world
     world_positions = np.array([T[:3, 3] for T in estimated_transforms_in_world])
-    world_times = np.array([(data.cam_timestamps_ns[i] - min_timestamp_ns) / 1e9
+    world_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
                             for i in range(len(estimated_transforms_in_world))])
 
     # Extract ground truth positions (within time range)
@@ -176,9 +176,23 @@ def main():
     plt.tight_layout()
     plt.show()
 
+    # Compute ground truth angular velocities from consecutive quaternions
+    gt_angular_velocities = []
+    gt_angular_velocity_times = []
+    for j in range(len(gt_samples) - 1):
+        R0 = quaternion_to_rotation_matrix(gt_samples[j].quaternion)
+        R1 = quaternion_to_rotation_matrix(gt_samples[j + 1].quaternion)
+        R_rel = R0.T @ R1
+        rvec_gt, _ = cv2.Rodrigues(R_rel)
+        dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
+        gt_angular_velocities.append(rvec_gt.flatten() / dt)
+        gt_angular_velocity_times.append((gt_samples[j + 1].timestamp_ns - min_timestamp_ns) / 1e9)
+    gt_angular_velocities = np.array(gt_angular_velocities)
+    gt_angular_velocity_times = np.array(gt_angular_velocity_times)
+
     # Plot estimated angular velocities in body frame
     angular_velocities = np.array(estimated_angular_velocities_in_body)
-    angular_velocity_times = np.array([(data.cam_timestamps_ns[i + 1] - min_timestamp_ns) / 1e9
+    angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
                                        for i in range(len(angular_velocities))])
 
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
@@ -186,18 +200,21 @@ def main():
 
     ax_wx.plot(angular_velocity_times, angular_velocities[:, 0], label='estimated')
     ax_wx.plot(imu_times, imu_angular_velocities[:, 0], label='imu')
+    ax_wx.plot(gt_angular_velocity_times, gt_angular_velocities[:, 0], label='gt')
     ax_wx.set_xlabel('Time [s]')
     ax_wx.set_ylabel('wx [rad/s]')
     ax_wx.legend()
 
     ax_wy.plot(angular_velocity_times, angular_velocities[:, 1], label='estimated')
     ax_wy.plot(imu_times, imu_angular_velocities[:, 1], label='imu')
+    ax_wy.plot(gt_angular_velocity_times, gt_angular_velocities[:, 1], label='gt')
     ax_wy.set_xlabel('Time [s]')
     ax_wy.set_ylabel('wy [rad/s]')
     ax_wy.legend()
 
     ax_wz.plot(angular_velocity_times, angular_velocities[:, 2], label='estimated')
     ax_wz.plot(imu_times, imu_angular_velocities[:, 2], label='imu')
+    ax_wz.plot(gt_angular_velocity_times, gt_angular_velocities[:, 2], label='gt')
     ax_wz.set_xlabel('Time [s]')
     ax_wz.set_ylabel('wz [rad/s]')
     ax_wz.legend()
