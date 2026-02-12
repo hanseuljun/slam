@@ -32,6 +32,10 @@ def main():
                                     orb,
                                     data.cam_timestamps_ns[keyframe_index],
                                     data.cam_timestamps_ns[i + 1])
+        # TODO: i think the inverse of the extrinsics should be here but that is not the case based on data. figure out why.
+        M = np.linalg.inv(data.cam0_extrinsics)
+        rvec = M[:3, :3] @ rvec
+        tvec = M[:3, :3] @ tvec + M[:3, 3:]
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
@@ -54,13 +58,11 @@ def main():
     print(f"Time diff: {(data.cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    # with first_gt_transform and inverse of estimated_transforms_in_cam0[closest_cam_index],
-    # convert T into matching first_gt_transform at closest_cam_index.
-    # apply data.leica_extrinsics and data.cam0_extrinsics to get the coordinate system right.
-    # TODO: i think inverse of data.leica_extrinsics and data.cam0_extrinsics on the left side of T, but the opposite is working. figure out why.
-    estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(data.cam0_extrinsics) @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
+    estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
                                      T @
-                                     data.cam0_extrinsics @ np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_cam0]
+                                     np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_cam0]
+    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
+                                     T for T in estimated_transforms_in_cam0]
 
     # Extract translations from estimated_transforms_in_world
     world_positions = np.array([T[:3, 3] for T in estimated_transforms_in_world])
