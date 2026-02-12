@@ -69,7 +69,7 @@ def solve_pnp(
     cam1_descriptors0: np.ndarray,
     cam0_keypoints1,
     cam0_descriptors1: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     # Get stereo matches again to know which cam0_keypoints0 indices have 3D points
     # Use NORM_HAMMING for binary descriptors (ORB, BRIEF, BRISK)
     bf = cv2.BFMatcher(cv2.NORM_HAMMING)
@@ -114,7 +114,7 @@ def solve_pnp(
     if not success:
         raise RuntimeError(f"cv2.solvePnPRansac failed. len(object_points): {len(object_points)}")
 
-    return rvec, tvec
+    return rvec, tvec, len(temporal_good_matches)
 
 
 def solve_step(
@@ -122,7 +122,7 @@ def solve_step(
     sift,
     timestamp0_ns: int,
     timestamp1_ns: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     t_start = time.perf_counter()
 
     # Load first frame from left and right cameras, and the second frame from left camera
@@ -141,16 +141,16 @@ def solve_step(
     )
     t_triangulate = time.perf_counter()
 
-    rvec, tvec = solve_pnp(
+    rvec, tvec, num_temporal_matches = solve_pnp(
         data, points_3d, cam0_descriptors0,
         cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
     )
     t_pnp = time.perf_counter()
 
-    print(f"solve_step: {(t_pnp-t_start)*1000:.2f}ms "
-          f"(imread: {(t_imread-t_start)*1000:.2f}ms, "
-          f"sift: {(t_sift-t_imread)*1000:.2f}ms, "
-          f"triangulate: {(t_triangulate-t_sift)*1000:.2f}ms, "
-          f"solve_pnp: {(t_pnp-t_triangulate)*1000:.2f}ms)")
+    # print(f"solve_step: {(t_pnp-t_start)*1000:.2f}ms "
+    #       f"(imread: {(t_imread-t_start)*1000:.2f}ms, "
+    #       f"sift: {(t_sift-t_imread)*1000:.2f}ms, "
+    #       f"triangulate: {(t_triangulate-t_sift)*1000:.2f}ms, "
+    #       f"solve_pnp: {(t_pnp-t_triangulate)*1000:.2f}ms)")
 
-    return rvec, tvec, points_3d
+    return rvec, tvec, num_temporal_matches

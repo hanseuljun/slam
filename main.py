@@ -27,13 +27,14 @@ def main():
     keyframe_index = 0
     estimated_transforms_in_body = [np.eye(4)]
     estimated_angular_velocities_in_body = []
+    num_temporal_matches_list = []
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
         try:
-            rvec, tvec, _ = solve_step(data,
-                                        orb,
-                                        data.cam_timestamps_ns[keyframe_index],
-                                        data.cam_timestamps_ns[i + 1])
+            rvec, tvec, num_temporal_matches = solve_step(data,
+                                       orb,
+                                       data.cam_timestamps_ns[keyframe_index],
+                                       data.cam_timestamps_ns[i + 1])
         except Exception as e:
             print(f"solve_step failed at i={i}: {e}")
             i += 1
@@ -43,6 +44,7 @@ def main():
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec + M[:3, 3:]
         estimated_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
+        num_temporal_matches_list.append(num_temporal_matches)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
@@ -169,6 +171,15 @@ def main():
     ax_wz.set_ylabel('wz [rad/s]')
     ax_wz.legend()
 
+    plt.tight_layout()
+    plt.show()
+
+    # Plot number of temporal matches over time
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(angular_velocity_times, num_temporal_matches_list)
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('Num Temporal Matches')
+    ax.set_title('Number of Temporal Matches')
     plt.tight_layout()
     plt.show()
 
