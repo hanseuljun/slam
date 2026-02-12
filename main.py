@@ -25,7 +25,7 @@ def main():
     max_timestamp_ns = min_timestamp_ns + int(6e9)  # 6 seconds
 
     keyframe_index = 0
-    estimated_transforms_in_cam0 = [np.eye(4)]
+    estimated_transforms_in_body = [np.eye(4)]
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
         rvec, tvec, _ = solve_step(data,
@@ -40,7 +40,7 @@ def main():
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
-        estimated_transforms_in_cam0.append(estimated_transforms_in_cam0[keyframe_index] @ T)
+        estimated_transforms_in_body.append(estimated_transforms_in_body[keyframe_index] @ T)
         i += 1
 
     # Get first ground truth sample as 4x4 transformation matrix
@@ -58,11 +58,11 @@ def main():
     print(f"Time diff: {(data.cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
+    estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(estimated_transforms_in_body[closest_cam_index]) @
                                      T @
-                                     np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_cam0]
-    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(estimated_transforms_in_cam0[closest_cam_index]) @
-                                     T for T in estimated_transforms_in_cam0]
+                                     np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_body]
+    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(estimated_transforms_in_body[closest_cam_index]) @
+                                     T for T in estimated_transforms_in_body]
 
     # Extract translations from estimated_transforms_in_world
     world_positions = np.array([T[:3, 3] for T in estimated_transforms_in_world])
@@ -105,7 +105,7 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # Plot estimated_transforms_in_cam0 vs ground truth
+    # Plot estimated_transforms_in_body vs ground truth
     fig = plt.figure(figsize=(12, 4))
 
     ax1 = fig.add_subplot(131)
