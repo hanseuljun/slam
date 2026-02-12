@@ -98,21 +98,33 @@ def main():
     gt_forward = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 2] for s in gt_samples])
 
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
-    # imu_attitudes is computed in the angular velocity section below, so move it up
+    # imu_attitudes_in_body is computed in the angular velocity section below, so move it up
     imu_samples_in_range = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples_in_range])
     imu_rotations = imu_angular_velocities / data.imu0_rate_hz
-    imu_attitudes = [np.eye(3)]
+    imu_attitudes_in_body = [np.eye(3)]
     for rot in imu_rotations:
         R, _ = cv2.Rodrigues(rot)
-        imu_attitudes.append(imu_attitudes[-1] @ R)
-    imu_attitudes = np.array(imu_attitudes)
+        imu_attitudes_in_body.append(imu_attitudes_in_body[-1] @ R)
+    imu_attitudes_in_body = np.array(imu_attitudes_in_body)
     imu_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in imu_samples_in_range])
     imu_attitude_times = np.concatenate([[0.0], imu_times])
 
-    imu_right = imu_attitudes[:, :, 0]
-    imu_up = imu_attitudes[:, :, 1]
-    imu_forward = imu_attitudes[:, :, 2]
+    # Transform IMU attitudes from body frame to world frame
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples_in_range])
+    closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
+    # +1 because imu_attitudes_in_body has an extra identity at index 0
+    closest_imu_attitude_index = closest_imu_index + 1
+    R_gt = first_gt_transform[:3, :3]
+    R_leica = data.leica_extrinsics[:3, :3]
+    imu_attitudes_in_world = np.array([
+        R_gt @ R_leica @ imu_attitudes_in_body[closest_imu_attitude_index].T @ att @ R_leica.T
+        for att in imu_attitudes_in_body
+    ])
+
+    imu_right = imu_attitudes_in_world[:, :, 0]
+    imu_up = imu_attitudes_in_world[:, :, 1]
+    imu_forward = imu_attitudes_in_world[:, :, 2]
 
     # Plot rotation axes: rows = x/y/z axis, cols = x/y/z component
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
