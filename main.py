@@ -26,7 +26,7 @@ def main():
 
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
-    estimated_transforms_in_body = [np.eye(4)]
+    estimated_transforms_in_body = [data.cam0_extrinsics]
     estimated_angular_velocities_in_body = []
     num_temporal_matches_list = []
     i = 0
@@ -45,7 +45,7 @@ def main():
         # TODO: i think the inverse of the extrinsics should be here but that is not the case based on data. figure out why.
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
-        tvec = M[:3, :3] @ tvec + M[:3, 3:]
+        tvec = M[:3, :3] @ tvec
         estimated_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
         num_temporal_matches_list.append(num_temporal_matches)
         R, _ = cv2.Rodrigues(rvec)
