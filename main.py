@@ -28,10 +28,14 @@ def main():
     estimated_transforms_in_cam0 = [np.eye(4)]
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
-        T, _ = solve_step(data,
-                          orb,
-                          data.cam_timestamps_ns[keyframe_index],
-                          data.cam_timestamps_ns[i + 1])
+        rvec, tvec, _ = solve_step(data,
+                                    orb,
+                                    data.cam_timestamps_ns[keyframe_index],
+                                    data.cam_timestamps_ns[i + 1])
+        R, _ = cv2.Rodrigues(rvec)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = tvec.flatten()
         estimated_transforms_in_cam0.append(estimated_transforms_in_cam0[keyframe_index] @ T)
         i += 1
 
