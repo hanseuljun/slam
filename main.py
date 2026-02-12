@@ -22,17 +22,22 @@ def main():
     orb = cv2.ORB_create(nfeatures=2000)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
-    max_timestamp_ns = min_timestamp_ns + int(6e9)  # 6 seconds
+    max_timestamp_ns = min_timestamp_ns + int(7e9)  # 7 seconds
 
     keyframe_index = 0
     estimated_transforms_in_body = [np.eye(4)]
     estimated_angular_velocities_in_body = []
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
-        rvec, tvec, _ = solve_step(data,
-                                    orb,
-                                    data.cam_timestamps_ns[keyframe_index],
-                                    data.cam_timestamps_ns[i + 1])
+        try:
+            rvec, tvec, _ = solve_step(data,
+                                        orb,
+                                        data.cam_timestamps_ns[keyframe_index],
+                                        data.cam_timestamps_ns[i + 1])
+        except Exception as e:
+            print(f"solve_step failed at i={i}: {e}")
+            i += 1
+            continue
         # TODO: i think the inverse of the extrinsics should be here but that is not the case based on data. figure out why.
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
