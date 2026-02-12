@@ -7,6 +7,34 @@ import numpy as np
 from slam import DataFolder, solve_step
 
 
+def plot_rotation_axes(
+    estimated_times: np.ndarray,
+    estimated_rotations: np.ndarray,
+    gt_times: np.ndarray,
+    gt_rotations: np.ndarray,
+    imu_times: np.ndarray,
+    imu_rotations: np.ndarray,
+):
+    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
+    fig.suptitle('Rotation Axes (estimated vs gt vs imu)')
+
+    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
+    component_names = ['X', 'Y', 'Z']
+
+    for row in range(3):
+        for col in range(3):
+            ax = axes[row, col]
+            ax.plot(estimated_times, estimated_rotations[:, col, row], label='estimated')
+            ax.plot(gt_times, gt_rotations[:, col, row], label='gt')
+            ax.plot(imu_times, imu_rotations[:, col, row], label='imu', alpha=0.5)
+            ax.set_xlabel('Time [s]')
+            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
+            ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
 def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
     """Convert quaternion (w, x, y, z) to 3x3 rotation matrix."""
     w, x, y, z = q
@@ -87,15 +115,9 @@ def main():
     gt_positions = np.array([s.position for s in gt_samples])
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
-    # Extract rotation axes from estimated transforms
-    estimated_right = np.array([T[:3, 0] for T in estimated_transforms_in_world])
-    estimated_up = np.array([T[:3, 1] for T in estimated_transforms_in_world])
-    estimated_forward = np.array([T[:3, 2] for T in estimated_transforms_in_world])
-
-    # Extract rotation axes from ground truth quaternions
-    gt_right = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 0] for s in gt_samples])
-    gt_up = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 1] for s in gt_samples])
-    gt_forward = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 2] for s in gt_samples])
+    # Extract rotations
+    estimated_rotations = np.array([T[:3, :3] for T in estimated_transforms_in_world])
+    gt_rotations = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
     # imu_attitudes_in_body is computed in the angular velocity section below, so move it up
@@ -122,32 +144,11 @@ def main():
         for att in imu_attitudes_in_body
     ])
 
-    imu_right = imu_attitudes_in_world[:, :, 0]
-    imu_up = imu_attitudes_in_world[:, :, 1]
-    imu_forward = imu_attitudes_in_world[:, :, 2]
-
-    # Plot rotation axes: rows = x/y/z axis, cols = x/y/z component
-    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
-    fig.suptitle('Rotation Axes (estimated vs gt vs imu)')
-
-    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
-    estimated_axes = [estimated_right, estimated_up, estimated_forward]
-    gt_axes = [gt_right, gt_up, gt_forward]
-    imu_axes = [imu_right, imu_up, imu_forward]
-    component_names = ['X', 'Y', 'Z']
-
-    for row in range(3):
-        for col in range(3):
-            ax = axes[row, col]
-            ax.plot(world_times, estimated_axes[row][:, col], label='estimated')
-            ax.plot(gt_times, gt_axes[row][:, col], label='gt')
-            ax.plot(imu_attitude_times, imu_axes[row][:, col], label='imu', alpha=0.5)
-            ax.set_xlabel('Time [s]')
-            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
-            ax.legend()
-
-    plt.tight_layout()
-    plt.show()
+    plot_rotation_axes(
+        world_times, estimated_rotations,
+        gt_times, gt_rotations,
+        imu_attitude_times, imu_attitudes_in_world,
+    )
 
     # Plot estimated_transforms_in_body vs ground truth
     fig = plt.figure(figsize=(12, 4))
