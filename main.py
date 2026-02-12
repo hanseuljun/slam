@@ -24,7 +24,7 @@ def main():
     min_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = min_timestamp_ns + int(7e9)  # 7 seconds
 
-    keyframe_index = 0
+    keyframe_indices = [0]
     keyframe_num_temporal_matches = None
     estimated_transforms_in_body = [np.eye(4)]
     estimated_angular_velocities_in_body = []
@@ -34,7 +34,7 @@ def main():
         try:
             rvec, tvec, num_temporal_matches = solve_step(data,
                                        orb,
-                                       data.cam_timestamps_ns[keyframe_index],
+                                       data.cam_timestamps_ns[keyframe_indices[-1]],
                                        data.cam_timestamps_ns[i + 1])
         except Exception as e:
             print(f"solve_step failed at i={i}: {e}")
@@ -52,9 +52,9 @@ def main():
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
-        estimated_transforms_in_body.append(estimated_transforms_in_body[keyframe_index] @ T)
+        estimated_transforms_in_body.append(estimated_transforms_in_body[keyframe_indices[-1]] @ T)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
-            keyframe_index = i + 1
+            keyframe_indices.append(i + 1)
             keyframe_num_temporal_matches = None
         i += 1
 
