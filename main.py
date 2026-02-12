@@ -7,13 +7,37 @@ import numpy as np
 from slam import DataFolder, solve_step
 
 
+def plot_angular_velocities(
+    estimated_times: np.ndarray,
+    estimated_angular_velocities: np.ndarray,
+    imu_times: np.ndarray,
+    imu_angular_velocities: np.ndarray,
+    gt_times: np.ndarray,
+    gt_angular_velocities: np.ndarray,
+):
+    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
+    fig.suptitle('Angular Velocity in Body Frame')
+
+    labels = ['wx', 'wy', 'wz']
+    for ax, i in zip([ax_wx, ax_wy, ax_wz], range(3)):
+        ax.plot(estimated_times, estimated_angular_velocities[:, i], label='estimated')
+        ax.plot(imu_times, imu_angular_velocities[:, i], label='imu')
+        ax.plot(gt_times, gt_angular_velocities[:, i], label='gt')
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{labels[i]} [rad/s]')
+        ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_rotation_axes(
     estimated_times: np.ndarray,
     estimated_rotations: np.ndarray,
-    gt_times: np.ndarray,
-    gt_rotations: np.ndarray,
     imu_times: np.ndarray,
     imu_rotations: np.ndarray,
+    gt_times: np.ndarray,
+    gt_rotations: np.ndarray,
 ):
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
     fig.suptitle('Rotation Axes (estimated vs gt vs imu)')
@@ -25,8 +49,8 @@ def plot_rotation_axes(
         for col in range(3):
             ax = axes[row, col]
             ax.plot(estimated_times, estimated_rotations[:, col, row], label='estimated')
-            ax.plot(gt_times, gt_rotations[:, col, row], label='gt')
-            ax.plot(imu_times, imu_rotations[:, col, row], label='imu', alpha=0.5)
+            ax.plot(imu_times, imu_rotations[:, col, row], label='imu')
+            ax.plot(gt_times, gt_rotations[:, col, row], label='gt', alpha=0.5)
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
             ax.legend()
@@ -146,8 +170,8 @@ def main():
 
     plot_rotation_axes(
         world_times, estimated_rotations,
-        gt_times, gt_rotations,
         imu_attitude_times, imu_attitudes_in_world,
+        gt_times, gt_rotations,
     )
 
     # Plot estimated_transforms_in_body vs ground truth
@@ -191,37 +215,15 @@ def main():
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
-    # Plot estimated angular velocities in body frame
     angular_velocities = np.array(estimated_angular_velocities_in_body)
     angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
                                        for i in range(len(angular_velocities))])
 
-    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
-    fig.suptitle('Angular Velocity in Body Frame')
-
-    ax_wx.plot(angular_velocity_times, angular_velocities[:, 0], label='estimated')
-    ax_wx.plot(imu_times, imu_angular_velocities[:, 0], label='imu')
-    ax_wx.plot(gt_angular_velocity_times, gt_angular_velocities[:, 0], label='gt')
-    ax_wx.set_xlabel('Time [s]')
-    ax_wx.set_ylabel('wx [rad/s]')
-    ax_wx.legend()
-
-    ax_wy.plot(angular_velocity_times, angular_velocities[:, 1], label='estimated')
-    ax_wy.plot(imu_times, imu_angular_velocities[:, 1], label='imu')
-    ax_wy.plot(gt_angular_velocity_times, gt_angular_velocities[:, 1], label='gt')
-    ax_wy.set_xlabel('Time [s]')
-    ax_wy.set_ylabel('wy [rad/s]')
-    ax_wy.legend()
-
-    ax_wz.plot(angular_velocity_times, angular_velocities[:, 2], label='estimated')
-    ax_wz.plot(imu_times, imu_angular_velocities[:, 2], label='imu')
-    ax_wz.plot(gt_angular_velocity_times, gt_angular_velocities[:, 2], label='gt')
-    ax_wz.set_xlabel('Time [s]')
-    ax_wz.set_ylabel('wz [rad/s]')
-    ax_wz.legend()
-
-    plt.tight_layout()
-    plt.show()
+    plot_angular_velocities(
+        angular_velocity_times, angular_velocities,
+        imu_times, imu_angular_velocities,
+        gt_angular_velocity_times, gt_angular_velocities,
+    )
 
     # Plot number of temporal matches over time
     fig, ax = plt.subplots(figsize=(12, 4))
