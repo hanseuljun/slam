@@ -25,6 +25,7 @@ def main():
     max_timestamp_ns = min_timestamp_ns + int(7e9)  # 7 seconds
 
     keyframe_index = 0
+    keyframe_num_temporal_matches = None
     estimated_transforms_in_body = [np.eye(4)]
     estimated_angular_velocities_in_body = []
     num_temporal_matches_list = []
@@ -39,6 +40,8 @@ def main():
             print(f"solve_step failed at i={i}: {e}")
             i += 1
             continue
+        if keyframe_num_temporal_matches is None:
+            keyframe_num_temporal_matches = num_temporal_matches
         # TODO: i think the inverse of the extrinsics should be here but that is not the case based on data. figure out why.
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
@@ -50,6 +53,9 @@ def main():
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
         estimated_transforms_in_body.append(estimated_transforms_in_body[keyframe_index] @ T)
+        if num_temporal_matches < keyframe_num_temporal_matches / 2:
+            keyframe_index = i + 1
+            keyframe_num_temporal_matches = None
         i += 1
 
     # Get first ground truth sample as 4x4 transformation matrix
