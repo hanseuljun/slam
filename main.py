@@ -8,8 +8,8 @@ from slam import DataFolder, solve_step
 
 
 def plot_positions(
-    estimated_times: np.ndarray,
-    estimated_positions: np.ndarray,
+    slam_times: np.ndarray,
+    slam_positions: np.ndarray,
     gt_times: np.ndarray,
     gt_positions: np.ndarray,
 ):
@@ -18,7 +18,7 @@ def plot_positions(
 
     labels = ['X', 'Y', 'Z']
     for ax, i in zip([ax_x, ax_y, ax_z], range(3)):
-        ax.plot(estimated_times, estimated_positions[:, i], label='estimated')
+        ax.plot(slam_times, slam_positions[:, i], label='slam')
         ax.plot(gt_times, gt_positions[:, i], label='gt')
         ax.set_xlabel('Time [s]')
         ax.set_ylabel(f'{labels[i]} [m]')
@@ -29,8 +29,8 @@ def plot_positions(
 
 
 def plot_angular_velocities(
-    estimated_times: np.ndarray,
-    estimated_angular_velocities: np.ndarray,
+    slam_times: np.ndarray,
+    slam_angular_velocities: np.ndarray,
     imu_times: np.ndarray,
     imu_angular_velocities: np.ndarray,
     gt_times: np.ndarray,
@@ -41,7 +41,7 @@ def plot_angular_velocities(
 
     labels = ['wx', 'wy', 'wz']
     for ax, i in zip([ax_wx, ax_wy, ax_wz], range(3)):
-        ax.plot(estimated_times, estimated_angular_velocities[:, i], label='estimated')
+        ax.plot(slam_times, slam_angular_velocities[:, i], label='slam')
         ax.plot(imu_times, imu_angular_velocities[:, i], label='imu')
         ax.plot(gt_times, gt_angular_velocities[:, i], label='gt')
         ax.set_xlabel('Time [s]')
@@ -53,12 +53,12 @@ def plot_angular_velocities(
 
 
 def plot_rotation_axes(
-    estimated_times: np.ndarray,
-    estimated_rotations: np.ndarray,
+    slam_times: np.ndarray,
+    slam_attitudes: np.ndarray,
     imu_times: np.ndarray,
     imu_rotations: np.ndarray,
     gt_times: np.ndarray,
-    gt_rotations: np.ndarray,
+    gt_attitudes: np.ndarray,
 ):
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
     fig.suptitle('Rotation Axes')
@@ -69,9 +69,9 @@ def plot_rotation_axes(
     for row in range(3):
         for col in range(3):
             ax = axes[row, col]
-            ax.plot(estimated_times, estimated_rotations[:, col, row], label='estimated')
+            ax.plot(slam_times, slam_attitudes[:, col, row], label='slam')
             ax.plot(imu_times, imu_rotations[:, col, row], label='imu')
-            ax.plot(gt_times, gt_rotations[:, col, row], label='gt', alpha=0.5)
+            ax.plot(gt_times, gt_attitudes[:, col, row], label='gt', alpha=0.5)
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
             ax.legend()
@@ -100,8 +100,8 @@ def main():
 
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
-    estimated_transforms_in_body = [data.cam0_extrinsics]
-    estimated_angular_velocities_in_body = []
+    slam_transforms_in_body = [data.cam0_extrinsics]
+    slam_angular_velocities_in_body = []
     num_temporal_matches_list = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
         if i % 100 == 0:
@@ -120,13 +120,13 @@ def main():
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec
-        estimated_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
+        slam_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
         num_temporal_matches_list.append(num_temporal_matches)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
-        estimated_transforms_in_body.append(estimated_transforms_in_body[keyframe_indices[-1]] @ T)
+        slam_transforms_in_body.append(slam_transforms_in_body[keyframe_indices[-1]] @ T)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
@@ -146,14 +146,14 @@ def main():
     print(f"Time diff: {(cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(estimated_transforms_in_body[closest_cam_index]) @
+    slam_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(slam_transforms_in_body[closest_cam_index]) @
                                      T @
-                                     np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_body]
+                                     np.linalg.inv(data.leica_extrinsics) for T in slam_transforms_in_body]
 
-    # Extract translations from estimated_transforms_in_world
-    world_positions = np.array([T[:3, 3] for T in estimated_transforms_in_world])
+    # Extract translations from slam_transforms_in_world
+    world_positions = np.array([T[:3, 3] for T in slam_transforms_in_world])
     world_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
-                            for i in range(len(estimated_transforms_in_world))])
+                            for i in range(len(slam_transforms_in_world))])
 
     # Extract ground truth positions (within time range)
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
@@ -161,8 +161,8 @@ def main():
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
     # Extract rotations
-    estimated_rotations = np.array([T[:3, :3] for T in estimated_transforms_in_world])
-    gt_rotations = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
+    slam_attitudes = np.array([T[:3, :3] for T in slam_transforms_in_world])
+    gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
     # imu_attitudes_in_body is computed in the angular velocity section below, so move it up
@@ -190,14 +190,14 @@ def main():
     ])
 
     plot_rotation_axes(
-        world_times, estimated_rotations,
-        imu_attitude_times, imu_attitudes_in_world,
-        gt_times, gt_rotations,
+        slam_times=world_times, slam_attitudes=slam_attitudes,
+        imu_times=imu_attitude_times, imu_rotations=imu_attitudes_in_world,
+        gt_times=gt_times, gt_attitudes=gt_attitudes,
     )
 
     plot_positions(
-        world_times, world_positions,
-        gt_times, gt_positions,
+        slam_times=world_times, slam_positions=world_positions,
+        gt_times=gt_times, gt_positions=gt_positions,
     )
 
     # Compute ground truth angular velocities from consecutive quaternions
@@ -214,14 +214,14 @@ def main():
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
-    angular_velocities = np.array(estimated_angular_velocities_in_body)
+    angular_velocities = np.array(slam_angular_velocities_in_body)
     angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
                                        for i in range(len(angular_velocities))])
 
     plot_angular_velocities(
-        angular_velocity_times, angular_velocities,
-        imu_times, imu_angular_velocities,
-        gt_angular_velocity_times, gt_angular_velocities,
+        slam_times=angular_velocity_times, slam_angular_velocities=angular_velocities,
+        imu_times=imu_times, imu_angular_velocities=imu_angular_velocities,
+        gt_times=gt_angular_velocity_times, gt_angular_velocities=gt_angular_velocities,
     )
 
     # Plot number of temporal matches over time
