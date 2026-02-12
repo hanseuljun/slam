@@ -26,6 +26,7 @@ def main():
 
     keyframe_index = 0
     estimated_transforms_in_body = [np.eye(4)]
+    estimated_angular_velocities_in_body = []
     i = 0
     while data.cam_timestamps_ns[i + 1] <= max_timestamp_ns:
         rvec, tvec, _ = solve_step(data,
@@ -36,6 +37,7 @@ def main():
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec + M[:3, 3:]
+        estimated_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
@@ -128,6 +130,32 @@ def main():
     ax3.set_xlabel('Time [s]')
     ax3.set_ylabel('Z [m]')
     ax3.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot estimated angular velocities in body frame
+    angular_velocities = np.array(estimated_angular_velocities_in_body)
+    angular_velocity_times = np.array([(data.cam_timestamps_ns[i + 1] - min_timestamp_ns) / 1e9
+                                       for i in range(len(angular_velocities))])
+
+    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
+    fig.suptitle('Angular Velocity in Body Frame')
+
+    ax_wx.plot(angular_velocity_times, angular_velocities[:, 0], label='estimated')
+    ax_wx.set_xlabel('Time [s]')
+    ax_wx.set_ylabel('wx [rad/s]')
+    ax_wx.legend()
+
+    ax_wy.plot(angular_velocity_times, angular_velocities[:, 1], label='estimated')
+    ax_wy.set_xlabel('Time [s]')
+    ax_wy.set_ylabel('wy [rad/s]')
+    ax_wy.legend()
+
+    ax_wz.plot(angular_velocity_times, angular_velocities[:, 2], label='estimated')
+    ax_wz.set_xlabel('Time [s]')
+    ax_wz.set_ylabel('wz [rad/s]')
+    ax_wz.legend()
 
     plt.tight_layout()
     plt.show()
