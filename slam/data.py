@@ -147,6 +147,7 @@ class DataFolder:
     cam0_intrinsics: CameraIntrinsics
     cam1_intrinsics: CameraIntrinsics
     cam0_rate_hz: int
+    imu0_rate_hz: int
 
     @classmethod
     def load(cls, path: Path) -> Self:
@@ -165,6 +166,9 @@ class DataFolder:
         with open(path / "cam0" / "sensor.yaml", "r") as f:
             cam0_sensor = yaml.safe_load(f)
         cam0_rate_hz = cam0_sensor["rate_hz"]
+        with open(path / "imu0" / "sensor.yaml", "r") as f:
+            imu0_sensor = yaml.safe_load(f)
+        imu0_rate_hz = imu0_sensor["rate_hz"]
         return cls(
             path=path,
             cam_timestamps_ns=cam0_timestamps_ns,
@@ -177,6 +181,7 @@ class DataFolder:
             cam0_intrinsics=cam0_intrinsics,
             cam1_intrinsics=cam1_intrinsics,
             cam0_rate_hz=cam0_rate_hz,
+            imu0_rate_hz=imu0_rate_hz,
         )
 
     def get_cam0_image_path(self, timestamp_ns: int) -> Path:

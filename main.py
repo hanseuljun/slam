@@ -76,8 +76,6 @@ def main():
     estimated_transforms_in_world = [first_gt_transform @ data.leica_extrinsics @ np.linalg.inv(estimated_transforms_in_body[closest_cam_index]) @
                                      T @
                                      np.linalg.inv(data.leica_extrinsics) for T in estimated_transforms_in_body]
-    estimated_transforms_in_world = [first_gt_transform @ np.linalg.inv(estimated_transforms_in_body[closest_cam_index]) @
-                                     T for T in estimated_transforms_in_body]
 
     # Extract translations from estimated_transforms_in_world
     world_positions = np.array([T[:3, 3] for T in estimated_transforms_in_world])
@@ -99,13 +97,31 @@ def main():
     gt_up = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 1] for s in gt_samples])
     gt_forward = np.array([quaternion_to_rotation_matrix(s.quaternion)[:, 2] for s in gt_samples])
 
+    # Extract rotation axes from IMU attitudes (computed later, but referenced here)
+    # imu_attitudes is computed in the angular velocity section below, so move it up
+    imu_samples_in_range = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples_in_range])
+    imu_rotations = imu_angular_velocities / data.imu0_rate_hz
+    imu_attitudes = [np.eye(3)]
+    for rot in imu_rotations:
+        R, _ = cv2.Rodrigues(rot)
+        imu_attitudes.append(imu_attitudes[-1] @ R)
+    imu_attitudes = np.array(imu_attitudes)
+    imu_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in imu_samples_in_range])
+    imu_attitude_times = np.concatenate([[0.0], imu_times])
+
+    imu_right = imu_attitudes[:, :, 0]
+    imu_up = imu_attitudes[:, :, 1]
+    imu_forward = imu_attitudes[:, :, 2]
+
     # Plot rotation axes: rows = x/y/z axis, cols = x/y/z component
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
-    fig.suptitle('Rotation Axes (estimated vs gt)')
+    fig.suptitle('Rotation Axes (estimated vs gt vs imu)')
 
     axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
     estimated_axes = [estimated_right, estimated_up, estimated_forward]
     gt_axes = [gt_right, gt_up, gt_forward]
+    imu_axes = [imu_right, imu_up, imu_forward]
     component_names = ['X', 'Y', 'Z']
 
     for row in range(3):
@@ -113,6 +129,7 @@ def main():
             ax = axes[row, col]
             ax.plot(world_times, estimated_axes[row][:, col], label='estimated')
             ax.plot(gt_times, gt_axes[row][:, col], label='gt')
+            ax.plot(imu_attitude_times, imu_axes[row][:, col], label='imu', alpha=0.5)
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
             ax.legend()
@@ -151,10 +168,6 @@ def main():
     angular_velocities = np.array(estimated_angular_velocities_in_body)
     angular_velocity_times = np.array([(data.cam_timestamps_ns[i + 1] - min_timestamp_ns) / 1e9
                                        for i in range(len(angular_velocities))])
-
-    imu_samples_in_range = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples_in_range])
-    imu_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in imu_samples_in_range])
 
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle('Angular Velocity in Body Frame')
