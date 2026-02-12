@@ -7,6 +7,27 @@ import numpy as np
 from slam import DataFolder, solve_step
 
 
+def plot_positions(
+    estimated_times: np.ndarray,
+    estimated_positions: np.ndarray,
+    gt_times: np.ndarray,
+    gt_positions: np.ndarray,
+):
+    fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
+    fig.suptitle('Position')
+
+    labels = ['X', 'Y', 'Z']
+    for ax, i in zip([ax_x, ax_y, ax_z], range(3)):
+        ax.plot(estimated_times, estimated_positions[:, i], label='estimated')
+        ax.plot(gt_times, gt_positions[:, i], label='gt')
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{labels[i]} [m]')
+        ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_angular_velocities(
     estimated_times: np.ndarray,
     estimated_angular_velocities: np.ndarray,
@@ -40,7 +61,7 @@ def plot_rotation_axes(
     gt_rotations: np.ndarray,
 ):
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
-    fig.suptitle('Rotation Axes (estimated vs gt vs imu)')
+    fig.suptitle('Rotation Axes')
 
     axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
     component_names = ['X', 'Y', 'Z']
@@ -174,32 +195,10 @@ def main():
         gt_times, gt_rotations,
     )
 
-    # Plot estimated_transforms_in_body vs ground truth
-    fig = plt.figure(figsize=(12, 4))
-
-    ax1 = fig.add_subplot(131)
-    ax1.plot(world_times, world_positions[:, 0], label='estimated x')
-    ax1.plot(gt_times, gt_positions[:, 0], label='gt x')
-    ax1.set_xlabel('Time [s]')
-    ax1.set_ylabel('X [m]')
-    ax1.legend()
-
-    ax2 = fig.add_subplot(132)
-    ax2.plot(world_times, world_positions[:, 1], label='estimated y')
-    ax2.plot(gt_times, gt_positions[:, 1], label='gt y')
-    ax2.set_xlabel('Time [s]')
-    ax2.set_ylabel('Y [m]')
-    ax2.legend()
-
-    ax3 = fig.add_subplot(133)
-    ax3.plot(world_times, world_positions[:, 2], label='estimated z')
-    ax3.plot(gt_times, gt_positions[:, 2], label='gt z')
-    ax3.set_xlabel('Time [s]')
-    ax3.set_ylabel('Z [m]')
-    ax3.legend()
-
-    plt.tight_layout()
-    plt.show()
+    plot_positions(
+        world_times, world_positions,
+        gt_times, gt_positions,
+    )
 
     # Compute ground truth angular velocities from consecutive quaternions
     gt_angular_velocities = []
