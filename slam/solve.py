@@ -117,7 +117,7 @@ def solve_pnp(
     return rvec, tvec, len(temporal_good_matches)
 
 
-def solve_step(
+def solve_stereo_pnp(
     data: DataFolder,
     sift,
     timestamp0_ns: int,

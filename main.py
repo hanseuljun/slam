@@ -4,7 +4,7 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-from slam import DataFolder, solve_step
+from slam import DataFolder, solve_stereo_pnp
 
 
 def plot_positions(
@@ -95,7 +95,7 @@ def main():
     orb = cv2.ORB_create(nfeatures=2000)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
-    max_timestamp_ns = min_timestamp_ns + int(30e9)  # 30 seconds
+    max_timestamp_ns = min_timestamp_ns + int(10e9)  # 10 seconds
     cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
     keyframe_indices = [0]
@@ -107,12 +107,12 @@ def main():
         if i % 100 == 0:
             print(f"i={i}")
         try:
-            rvec, tvec, num_temporal_matches = solve_step(data,
+            rvec, tvec, num_temporal_matches = solve_stereo_pnp(data,
                                        orb,
                                        data.cam_timestamps_ns[cam_timestamp_indices_in_range[keyframe_indices[-1]]],
                                        data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]])
         except Exception as e:
-            print(f"solve_step failed at i={i}: {e}")
+            print(f"solve_stereo_pnp failed at i={i}: {e}")
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
