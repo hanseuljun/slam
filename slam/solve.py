@@ -69,7 +69,7 @@ def solve_pnp(
     cam1_descriptors0: np.ndarray,
     cam0_keypoints1,
     cam0_descriptors1: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, int, float]:
     # Get stereo matches again to know which cam0_keypoints0 indices have 3D points
     # Use NORM_HAMMING for binary descriptors (ORB, BRIEF, BRISK)
     bf = cv2.BFMatcher(cv2.NORM_HAMMING)
@@ -110,11 +110,17 @@ def solve_pnp(
         data.cam0_intrinsics.p2,
     ])
 
-    success, rvec, tvec, _ = cv2.solvePnPRansac(object_points, image_points, K0, dist_coeffs)
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(object_points, image_points, K0, dist_coeffs)
     if not success:
         raise RuntimeError(f"cv2.solvePnPRansac failed. len(object_points): {len(object_points)}")
 
-    return rvec, tvec, len(temporal_good_matches)
+    # Compute mean reprojection error over inliers
+    inlier_object_points = object_points[inliers.flatten()]
+    inlier_image_points = image_points[inliers.flatten()]
+    projected, _ = cv2.projectPoints(inlier_object_points, rvec, tvec, K0, dist_coeffs)
+    reprojection_error = np.mean(np.linalg.norm(inlier_image_points - projected.reshape(-1, 2), axis=1))
+
+    return rvec, tvec, len(temporal_good_matches), reprojection_error
 
 
 def solve_stereo_pnp(
@@ -122,7 +128,7 @@ def solve_stereo_pnp(
     sift,
     timestamp0_ns: int,
     timestamp1_ns: int,
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, int, float]:
     t_start = time.perf_counter()
 
     # Load first frame from left and right cameras, and the second frame from left camera
@@ -141,7 +147,7 @@ def solve_stereo_pnp(
     )
     t_triangulate = time.perf_counter()
 
-    rvec, tvec, num_temporal_matches = solve_pnp(
+    rvec, tvec, num_temporal_matches, reprojection_error = solve_pnp(
         data, points_3d, cam0_descriptors0,
         cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
     )
@@ -153,4 +159,4 @@ def solve_stereo_pnp(
     #       f"triangulate: {(t_triangulate-t_sift)*1000:.2f}ms, "
     #       f"solve_pnp: {(t_pnp-t_triangulate)*1000:.2f}ms)")
 
-    return rvec, tvec, num_temporal_matches
+    return rvec, tvec, num_temporal_matches, reprojection_error

@@ -103,11 +103,12 @@ def main():
     slam_poses_in_body = [data.cam0_extrinsics]
     slam_angular_velocities_in_body = []
     num_temporal_matches_list = []
+    reprojection_errors = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
         if i % 100 == 0:
             print(f"i={i}")
         try:
-            rvec, tvec, num_temporal_matches = solve_stereo_pnp(data,
+            rvec, tvec, num_temporal_matches, reprojection_error = solve_stereo_pnp(data,
                                        orb,
                                        data.cam_timestamps_ns[cam_timestamp_indices_in_range[keyframe_indices[-1]]],
                                        data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]])
@@ -122,6 +123,7 @@ def main():
         tvec = M[:3, :3] @ tvec
         slam_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
         num_temporal_matches_list.append(num_temporal_matches)
+        reprojection_errors.append(reprojection_error)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
@@ -225,11 +227,20 @@ def main():
     )
 
     # Plot number of temporal matches over time
+    # fig, ax = plt.subplots(figsize=(12, 4))
+    # ax.plot(angular_velocity_times, num_temporal_matches_list)
+    # ax.set_xlabel('Time [s]')
+    # ax.set_ylabel('Num Temporal Matches')
+    # ax.set_title('Number of Temporal Matches')
+    # plt.tight_layout()
+    # plt.show()
+
+    # Plot reprojection errors over time
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(angular_velocity_times, num_temporal_matches_list)
+    ax.plot(angular_velocity_times, reprojection_errors)
     ax.set_xlabel('Time [s]')
-    ax.set_ylabel('Num Temporal Matches')
-    ax.set_title('Number of Temporal Matches')
+    ax.set_ylabel('Reprojection Error [px]')
+    ax.set_title('Mean Reprojection Error (Inliers)')
     plt.tight_layout()
     plt.show()
 
