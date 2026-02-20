@@ -26,21 +26,15 @@ def plot_positions(
 
 
 def plot_angular_velocities(
-    slam_times: np.ndarray,
-    slam_angular_velocities: np.ndarray,
-    imu_times: np.ndarray,
-    imu_angular_velocities: np.ndarray,
-    gt_times: np.ndarray,
-    gt_angular_velocities: np.ndarray,
+    series: list[tuple[np.ndarray, np.ndarray, str]],
 ):
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle('Angular Velocity in Body Frame')
 
     labels = ['wx', 'wy', 'wz']
     for ax, i in zip([ax_wx, ax_wy, ax_wz], range(3)):
-        ax.plot(slam_times, slam_angular_velocities[:, i], label='slam')
-        ax.plot(imu_times, imu_angular_velocities[:, i], label='imu')
-        ax.plot(gt_times, gt_angular_velocities[:, i], label='gt')
+        for times, angular_velocities, label in series:
+            ax.plot(times, angular_velocities[:, i], label=label)
         ax.set_xlabel('Time [s]')
         ax.set_ylabel(f'{labels[i]} [rad/s]')
         ax.legend()
@@ -50,12 +44,7 @@ def plot_angular_velocities(
 
 
 def plot_rotation_axes(
-    slam_times: np.ndarray,
-    slam_attitudes: np.ndarray,
-    imu_times: np.ndarray,
-    imu_attitudes: np.ndarray,
-    gt_times: np.ndarray,
-    gt_attitudes: np.ndarray,
+    series: list[tuple[np.ndarray, np.ndarray, str]],
 ):
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
     fig.suptitle('Rotation Axes')
@@ -66,9 +55,8 @@ def plot_rotation_axes(
     for row in range(3):
         for col in range(3):
             ax = axes[row, col]
-            ax.plot(slam_times, slam_attitudes[:, col, row], label='slam')
-            ax.plot(imu_times, imu_attitudes[:, col, row], label='imu')
-            ax.plot(gt_times, gt_attitudes[:, col, row], label='gt', alpha=0.5)
+            for times, attitudes, label in series:
+                ax.plot(times, attitudes[:, col, row], label=label)
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
             ax.legend()
@@ -189,9 +177,11 @@ def main():
     ])
 
     plot_rotation_axes(
-        slam_times=slam_times, slam_attitudes=slam_attitudes,
-        imu_times=imu_attitude_times, imu_attitudes=imu_attitudes_in_world,
-        gt_times=gt_times, gt_attitudes=gt_attitudes,
+        series=[
+            (slam_times, slam_attitudes, 'slam'),
+            (imu_attitude_times, imu_attitudes_in_world, 'imu'),
+            (gt_times, gt_attitudes, 'gt'),
+        ],
     )
 
     plot_positions(
@@ -220,9 +210,11 @@ def main():
                                              for i in range(len(slam_angular_velocities))])
 
     plot_angular_velocities(
-        slam_times=slam_angular_velocity_times, slam_angular_velocities=slam_angular_velocities,
-        imu_times=imu_times, imu_angular_velocities=imu_angular_velocities_in_body,
-        gt_times=gt_angular_velocity_times, gt_angular_velocities=gt_angular_velocities,
+        series=[
+            (slam_angular_velocity_times, slam_angular_velocities, 'slam'),
+            (imu_times, imu_angular_velocities_in_body, 'imu'),
+            (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
+        ],
     )
 
     # Plot number of temporal matches over time
