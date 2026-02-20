@@ -167,24 +167,6 @@ def main():
         ],
     )
 
-    # Plot number of temporal matches over time
-    # fig, ax = plt.subplots(figsize=(12, 4))
-    # ax.plot(angular_velocity_times, num_temporal_matches_list)
-    # ax.set_xlabel('Time [s]')
-    # ax.set_ylabel('Num Temporal Matches')
-    # ax.set_title('Number of Temporal Matches')
-    # plt.tight_layout()
-    # plt.show()
-
-    # Plot reprojection errors over time
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(slam_angular_velocity_times, reprojection_errors)
-    ax.set_xlabel('Time [s]')
-    ax.set_ylabel('Reprojection Error [px]')
-    ax.set_title('Mean Reprojection Error (Inliers)')
-    plt.tight_layout()
-    plt.show()
-
 
 if __name__ == "__main__":
     main()
