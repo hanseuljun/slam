@@ -114,6 +114,7 @@ def main():
         for i in range(len(slam_poses_in_body))
     ])
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in slam_cam_timestamps_ns])
+    nearest_imu_times = (imu_timestamps_ns[nearest_imu_indices] - min_timestamp_ns) / 1e9
     imu_angular_velocities_in_body_at_cam_times = imu_angular_velocities_in_body[nearest_imu_indices]
     closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
     # +1 because imu_attitudes_in_body has an extra identity at index 0
@@ -166,6 +167,16 @@ def main():
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
         ],
     )
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(slam_times, slam_times, label='slam')
+    ax.plot(slam_times, nearest_imu_times, label='nearest imu', linestyle='--')
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('Time [s]')
+    ax.set_title('Nearest IMU Time vs Slam Time')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
