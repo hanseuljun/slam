@@ -8,18 +8,15 @@ from slam import DataFolder, solve_stereo_pnp
 
 
 def plot_positions(
-    slam_times: np.ndarray,
-    slam_positions: np.ndarray,
-    gt_times: np.ndarray,
-    gt_positions: np.ndarray,
+    series: list[tuple[np.ndarray, np.ndarray, str]],
 ):
     fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
     fig.suptitle('Position')
 
     labels = ['X', 'Y', 'Z']
     for ax, i in zip([ax_x, ax_y, ax_z], range(3)):
-        ax.plot(slam_times, slam_positions[:, i], label='slam')
-        ax.plot(gt_times, gt_positions[:, i], label='gt')
+        for times, positions, label in series:
+            ax.plot(times, positions[:, i], label=label)
         ax.set_xlabel('Time [s]')
         ax.set_ylabel(f'{labels[i]} [m]')
         ax.legend()
@@ -198,8 +195,10 @@ def main():
     )
 
     plot_positions(
-        slam_times=slam_times, slam_positions=slam_positions_in_world,
-        gt_times=gt_times, gt_positions=gt_positions,
+        series=[
+            (slam_times, slam_positions_in_world, 'slam'),
+            (gt_times, gt_positions, 'gt'),
+        ],
     )
 
     # Compute ground truth angular velocities from consecutive quaternions
