@@ -101,7 +101,7 @@ def main():
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
     slam_poses_in_body = [data.cam0_extrinsics]
-    slam_angular_velocities_in_body = []
+    slam_angular_velocities_from_rvec_in_body = []
     num_temporal_matches_list = []
     reprojection_errors = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
@@ -121,7 +121,7 @@ def main():
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec
-        slam_angular_velocities_in_body.append(rvec.flatten() * data.cam0_rate_hz)
+        slam_angular_velocities_from_rvec_in_body.append(rvec.flatten() * data.cam0_rate_hz)
         num_temporal_matches_list.append(num_temporal_matches)
         reprojection_errors.append(reprojection_error)
         R, _ = cv2.Rodrigues(rvec)
@@ -216,12 +216,12 @@ def main():
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
-    angular_velocities = np.array(slam_angular_velocities_in_body)
-    angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
-                                       for i in range(len(angular_velocities))])
+    slam_angular_velocities = np.array(slam_angular_velocities_from_rvec_in_body)
+    slam_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
+                                             for i in range(len(slam_angular_velocities))])
 
     plot_angular_velocities(
-        slam_times=angular_velocity_times, slam_angular_velocities=angular_velocities,
+        slam_times=slam_angular_velocity_times, slam_angular_velocities=slam_angular_velocities,
         imu_times=imu_times, imu_angular_velocities=imu_angular_velocities,
         gt_times=gt_angular_velocity_times, gt_angular_velocities=gt_angular_velocities,
     )
@@ -237,7 +237,7 @@ def main():
 
     # Plot reprojection errors over time
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(angular_velocity_times, reprojection_errors)
+    ax.plot(slam_angular_velocity_times, reprojection_errors)
     ax.set_xlabel('Time [s]')
     ax.set_ylabel('Reprojection Error [px]')
     ax.set_title('Mean Reprojection Error (Inliers)')
