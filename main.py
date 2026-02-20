@@ -56,7 +56,7 @@ def plot_rotation_axes(
     slam_times: np.ndarray,
     slam_attitudes: np.ndarray,
     imu_times: np.ndarray,
-    imu_rotations: np.ndarray,
+    imu_attitudes: np.ndarray,
     gt_times: np.ndarray,
     gt_attitudes: np.ndarray,
 ):
@@ -70,7 +70,7 @@ def plot_rotation_axes(
         for col in range(3):
             ax = axes[row, col]
             ax.plot(slam_times, slam_attitudes[:, col, row], label='slam')
-            ax.plot(imu_times, imu_rotations[:, col, row], label='imu')
+            ax.plot(imu_times, imu_attitudes[:, col, row], label='imu')
             ax.plot(gt_times, gt_attitudes[:, col, row], label='gt', alpha=0.5)
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
@@ -193,7 +193,7 @@ def main():
 
     plot_rotation_axes(
         slam_times=world_times, slam_attitudes=slam_attitudes,
-        imu_times=imu_attitude_times, imu_rotations=imu_attitudes_in_world,
+        imu_times=imu_attitude_times, imu_attitudes=imu_attitudes_in_world,
         gt_times=gt_times, gt_attitudes=gt_attitudes,
     )
 
