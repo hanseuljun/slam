@@ -18,11 +18,11 @@ def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.nd
     ])
 
 
-def run_slam(data, orb, cam_timestamp_indices_in_range):
+def run_pnp(data, orb, cam_timestamp_indices_in_range):
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
-    slam_poses_in_body = [data.cam0_extrinsics]
-    slam_angular_velocities_from_rvec_in_body = []
+    pnp_poses_in_body = [data.cam0_extrinsics]
+    pnp_angular_velocities_from_rvec_in_body = []
     num_temporal_matches_list = []
     reprojection_errors = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
@@ -42,18 +42,18 @@ def run_slam(data, orb, cam_timestamp_indices_in_range):
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec
-        slam_angular_velocities_from_rvec_in_body.append(rvec.flatten() * data.cam0_rate_hz)
+        pnp_angular_velocities_from_rvec_in_body.append(rvec.flatten() * data.cam0_rate_hz)
         num_temporal_matches_list.append(num_temporal_matches)
         reprojection_errors.append(reprojection_error)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
-        slam_poses_in_body.append(slam_poses_in_body[keyframe_indices[-1]] @ T)
+        pnp_poses_in_body.append(pnp_poses_in_body[keyframe_indices[-1]] @ T)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return slam_poses_in_body, slam_angular_velocities_from_rvec_in_body, num_temporal_matches_list, reprojection_errors
+    return pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body, num_temporal_matches_list, reprojection_errors
 
 
 def main():
@@ -64,8 +64,8 @@ def main():
     max_timestamp_ns = min_timestamp_ns + int(10e9)  # 10 seconds
     cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
-    slam_poses_in_body, slam_angular_velocities_from_rvec_in_body, _, _ = \
-        run_slam(data, orb, cam_timestamp_indices_in_range)
+    pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body, _, _ = \
+        run_pnp(data, orb, cam_timestamp_indices_in_range)
 
     # Get first ground truth sample as 4x4 pose matrix
     first_gt = data.ground_truth_samples[0]
@@ -82,14 +82,14 @@ def main():
     print(f"Time diff: {(cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    slam_poses_in_world = [first_gt_pose @ data.leica_extrinsics @ np.linalg.inv(slam_poses_in_body[closest_cam_index]) @
+    pnp_poses_in_world = [first_gt_pose @ data.leica_extrinsics @ np.linalg.inv(pnp_poses_in_body[closest_cam_index]) @
                                      T @
-                                     np.linalg.inv(data.leica_extrinsics) for T in slam_poses_in_body]
+                                     np.linalg.inv(data.leica_extrinsics) for T in pnp_poses_in_body]
 
-    # Extract translations from slam_poses_in_world
-    slam_positions_in_world = np.array([T[:3, 3] for T in slam_poses_in_world])
-    slam_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
-                            for i in range(len(slam_poses_in_world))])
+    # Extract translations from pnp_poses_in_world
+    pnp_positions_in_world = np.array([T[:3, 3] for T in pnp_poses_in_world])
+    pnp_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
+                            for i in range(len(pnp_poses_in_world))])
 
     # Extract ground truth positions (within time range)
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
@@ -97,7 +97,7 @@ def main():
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
     # Extract rotations
-    slam_attitudes = np.array([T[:3, :3] for T in slam_poses_in_world])
+    pnp_attitudes = np.array([T[:3, :3] for T in pnp_poses_in_world])
     gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
@@ -115,11 +115,11 @@ def main():
 
     # Transform IMU attitudes from body frame to world frame
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples_in_range])
-    slam_cam_timestamps_ns = np.array([
+    pnp_cam_timestamps_ns = np.array([
         data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]]
-        for i in range(len(slam_poses_in_body))
+        for i in range(len(pnp_poses_in_body))
     ])
-    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in slam_cam_timestamps_ns])
+    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in pnp_cam_timestamps_ns])
     nearest_imu_times = (imu_timestamps_ns[nearest_imu_indices] - min_timestamp_ns) / 1e9
     imu_angular_velocities_in_body_at_cam_times = imu_angular_velocities_in_body[nearest_imu_indices]
     closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
@@ -134,7 +134,7 @@ def main():
 
     plot_rotation_axes(
         series=[
-            (slam_times, slam_attitudes, 'slam'),
+            (pnp_times, pnp_attitudes, 'pnp'),
             (imu_attitude_times, imu_attitudes_in_world, 'imu'),
             (gt_times, gt_attitudes, 'gt'),
         ],
@@ -142,7 +142,7 @@ def main():
 
     plot_positions(
         series=[
-            (slam_times, slam_positions_in_world, 'slam'),
+            (pnp_times, pnp_positions_in_world, 'pnp'),
             (gt_times, gt_positions, 'gt'),
         ],
     )
@@ -161,22 +161,22 @@ def main():
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
-    slam_angular_velocities = np.array(slam_angular_velocities_from_rvec_in_body)
-    slam_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
-                                             for i in range(len(slam_angular_velocities))])
+    pnp_angular_velocities = np.array(pnp_angular_velocities_from_rvec_in_body)
+    pnp_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
+                                             for i in range(len(pnp_angular_velocities))])
 
     plot_angular_velocities(
         series=[
-            (slam_angular_velocity_times, slam_angular_velocities, 'slam'),
+            (pnp_angular_velocity_times, pnp_angular_velocities, 'pnp'),
             (imu_times, imu_angular_velocities_in_body, 'imu'),
-            (slam_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
+            (pnp_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
         ],
     )
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(slam_times, slam_times, label='slam')
-    ax.plot(slam_times, nearest_imu_times, label='nearest imu', linestyle='--')
+    ax.plot(pnp_times, pnp_times, label='pnp')
+    ax.plot(pnp_times, nearest_imu_times, label='nearest imu', linestyle='--')
     ax.set_xlabel('Time [s]')
     ax.set_ylabel('Time [s]')
     ax.set_title('Nearest IMU Time vs Slam Time')
