@@ -169,8 +169,8 @@ def main():
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
     # imu_attitudes_in_body is computed in the angular velocity section below, so move it up
     imu_samples_in_range = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples_in_range])
-    imu_rotations = imu_angular_velocities / data.imu0_rate_hz
+    imu_angular_velocities_in_body = np.array([s.angular_velocity for s in imu_samples_in_range])
+    imu_rotations = imu_angular_velocities_in_body / data.imu0_rate_hz
     imu_attitudes_in_body = [np.eye(3)]
     for rot in imu_rotations:
         R, _ = cv2.Rodrigues(rot)
@@ -222,7 +222,7 @@ def main():
 
     plot_angular_velocities(
         slam_times=slam_angular_velocity_times, slam_angular_velocities=slam_angular_velocities,
-        imu_times=imu_times, imu_angular_velocities=imu_angular_velocities,
+        imu_times=imu_times, imu_angular_velocities=imu_angular_velocities_in_body,
         gt_times=gt_angular_velocity_times, gt_angular_velocities=gt_angular_velocities,
     )
 
