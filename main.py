@@ -109,6 +109,12 @@ def main():
 
     # Transform IMU attitudes from body frame to world frame
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples_in_range])
+    slam_cam_timestamps_ns = np.array([
+        data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]]
+        for i in range(len(slam_poses_in_body))
+    ])
+    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in slam_cam_timestamps_ns])
+    imu_angular_velocities_in_body_at_cam_times = imu_angular_velocities_in_body[nearest_imu_indices]
     closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
     # +1 because imu_attitudes_in_body has an extra identity at index 0
     closest_imu_attitude_index = closest_imu_index + 1
@@ -156,6 +162,7 @@ def main():
         series=[
             (slam_angular_velocity_times, slam_angular_velocities, 'slam'),
             (imu_times, imu_angular_velocities_in_body, 'imu'),
+            (slam_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
         ],
     )
