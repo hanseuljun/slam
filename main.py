@@ -153,8 +153,8 @@ def main():
                                      np.linalg.inv(data.leica_extrinsics) for T in slam_poses_in_body]
 
     # Extract translations from slam_poses_in_world
-    world_positions = np.array([T[:3, 3] for T in slam_poses_in_world])
-    world_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
+    slam_positions_in_world = np.array([T[:3, 3] for T in slam_poses_in_world])
+    slam_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
                             for i in range(len(slam_poses_in_world))])
 
     # Extract ground truth positions (within time range)
@@ -192,13 +192,13 @@ def main():
     ])
 
     plot_rotation_axes(
-        slam_times=world_times, slam_attitudes=slam_attitudes,
+        slam_times=slam_times, slam_attitudes=slam_attitudes,
         imu_times=imu_attitude_times, imu_attitudes=imu_attitudes_in_world,
         gt_times=gt_times, gt_attitudes=gt_attitudes,
     )
 
     plot_positions(
-        slam_times=world_times, slam_positions=world_positions,
+        slam_times=slam_times, slam_positions=slam_positions_in_world,
         gt_times=gt_times, gt_positions=gt_positions,
     )
 
