@@ -18,14 +18,7 @@ def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.nd
     ])
 
 
-def main():
-    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    orb = cv2.ORB_create(nfeatures=2000)
-
-    min_timestamp_ns = data.cam_timestamps_ns[0]
-    max_timestamp_ns = min_timestamp_ns + int(10e9)  # 10 seconds
-    cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
-
+def run_slam(data, orb, cam_timestamp_indices_in_range):
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
     slam_poses_in_body = [data.cam0_extrinsics]
@@ -60,6 +53,19 @@ def main():
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
+    return slam_poses_in_body, slam_angular_velocities_from_rvec_in_body, num_temporal_matches_list, reprojection_errors
+
+
+def main():
+    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    orb = cv2.ORB_create(nfeatures=2000)
+
+    min_timestamp_ns = data.cam_timestamps_ns[0]
+    max_timestamp_ns = min_timestamp_ns + int(10e9)  # 10 seconds
+    cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
+
+    slam_poses_in_body, slam_angular_velocities_from_rvec_in_body, _, _ = \
+        run_slam(data, orb, cam_timestamp_indices_in_range)
 
     # Get first ground truth sample as 4x4 pose matrix
     first_gt = data.ground_truth_samples[0]
