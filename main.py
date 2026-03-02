@@ -48,7 +48,7 @@ def optimize_angular_velocities(imu_angular_velocities_in_body_at_cam_times, pnp
 def run_pnp(data, orb, cam_timestamp_indices_in_range):
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
-    pnp_poses_in_body = [data.cam0_extrinsics]
+    pnp_poses_in_world_without_initial_value = [np.eye(4)]
     pnp_angular_velocities_from_rvec_in_body = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
         if i % 100 == 0:
@@ -72,11 +72,11 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = tvec.flatten()
-        pnp_poses_in_body.append(pnp_poses_in_body[keyframe_indices[-1]] @ T)
+        pnp_poses_in_world_without_initial_value.append(pnp_poses_in_world_without_initial_value[keyframe_indices[-1]] @ T)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body
+    return pnp_poses_in_world_without_initial_value, pnp_angular_velocities_from_rvec_in_body
 
 
 def main():
@@ -87,7 +87,7 @@ def main():
     max_timestamp_ns = min_timestamp_ns + int(20e9)  # 20 seconds
     cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
-    pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body = \
+    pnp_poses_in_world_without_initial_value, pnp_angular_velocities_from_rvec_in_body = \
         run_pnp(data, orb, cam_timestamp_indices_in_range)
 
     # Get first ground truth sample as 4x4 pose matrix
@@ -105,9 +105,13 @@ def main():
     print(f"Time diff: {(cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    pnp_poses_in_world = [first_gt_pose @ data.leica_extrinsics @ np.linalg.inv(pnp_poses_in_body[closest_cam_index]) @
-                                     T @
-                                     np.linalg.inv(data.leica_extrinsics) for T in pnp_poses_in_body]
+    pnp_poses_in_world = [
+        first_gt_pose @ data.leica_extrinsics
+        @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses_in_world_without_initial_value[closest_cam_index])
+        @ data.cam0_extrinsics @ T
+        @ np.linalg.inv(data.leica_extrinsics)
+        for T in pnp_poses_in_world_without_initial_value
+    ]
 
     # Extract translations from pnp_poses_in_world
     pnp_positions_in_world = np.array([T[:3, 3] for T in pnp_poses_in_world])
@@ -140,7 +144,7 @@ def main():
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples_in_range])
     pnp_cam_timestamps_ns = np.array([
         data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]]
-        for i in range(len(pnp_poses_in_body))
+        for i in range(len(pnp_poses_in_world_without_initial_value))
     ])
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in pnp_cam_timestamps_ns])
     nearest_imu_times = (imu_timestamps_ns[nearest_imu_indices] - min_timestamp_ns) / 1e9
