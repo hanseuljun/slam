@@ -88,7 +88,7 @@ def main():
     orb = cv2.ORB_create(nfeatures=2000)
 
     min_timestamp_ns = data.cam_timestamps_ns[0]
-    max_timestamp_ns = min_timestamp_ns + int(10e9)  # 10 seconds
+    max_timestamp_ns = min_timestamp_ns + int(20e9)  # 20 seconds
     cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
     pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body, _, _ = \
@@ -167,7 +167,7 @@ def main():
     plot_rotation_axes(
         series=[
             (pnp_times, pnp_attitudes, 'pnp'),
-            (imu_attitude_times, imu_attitudes_in_world, 'imu'),
+            # (imu_attitude_times, imu_attitudes_in_world, 'imu'),
             (gt_times, gt_attitudes, 'gt'),
             (pnp_times, optimized_attitudes, 'opt'),
         ],
@@ -210,15 +210,15 @@ def main():
         ],
     )
 
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(pnp_times, pnp_times, label='pnp')
-    ax.plot(pnp_times, nearest_imu_times, label='nearest imu', linestyle='--')
-    ax.set_xlabel('Time [s]')
-    ax.set_ylabel('Time [s]')
-    ax.set_title('Nearest IMU Time vs Slam Time')
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
+    # fig, ax = plt.subplots(figsize=(12, 4))
+    # ax.plot(pnp_times, pnp_times, label='pnp')
+    # ax.plot(pnp_times, nearest_imu_times, label='nearest imu', linestyle='--')
+    # ax.set_xlabel('Time [s]')
+    # ax.set_ylabel('Time [s]')
+    # ax.set_title('Nearest IMU Time vs Slam Time')
+    # ax.legend()
+    # plt.tight_layout()
+    # plt.show()
 
 
 if __name__ == "__main__":
