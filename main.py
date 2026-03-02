@@ -193,12 +193,13 @@ def main():
 
     plot_attitudes_and_angular_velocities(
         attitude_series=[
-            (imu_attitude_times, imu_attitudes_in_world, 'imu'),
             (pnp_times, pnp_attitudes, 'pnp'),
+            (imu_attitude_times, imu_attitudes_in_world, 'imu'),
             (gt_times, gt_attitudes, 'gt'),
             (pnp_times, optimized_attitudes, 'opt'),
         ],
         angular_velocity_series=[
+            (pnp_angular_velocity_times, pnp_angular_velocities, 'pnp'),
             (imu_times, imu_angular_velocities_in_body, 'imu'),
             (pnp_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
