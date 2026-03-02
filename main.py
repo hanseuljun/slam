@@ -4,6 +4,8 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
+from scipy.optimize import least_squares
+
 from slam import DataFolder, solve_stereo_pnp
 from slam.plot import plot_angular_velocities, plot_positions, plot_rotation_axes
 
@@ -16,6 +18,31 @@ def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.nd
         [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
         [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)],
     ])
+
+
+def optimize_angular_velocities(imu_angular_velocities_in_body_at_cam_times, pnp_attitudes, cam_rate_hz):
+    N = len(pnp_attitudes)
+    x0 = imu_angular_velocities_in_body_at_cam_times[:-1].flatten()  # (N-1)*3
+
+    def accumulate(x):
+        omegas = x.reshape(N - 1, 3)
+        attitudes = [pnp_attitudes[0]]
+        for omega in omegas:
+            R, _ = cv2.Rodrigues(omega / cam_rate_hz)
+            attitudes.append(attitudes[-1] @ R)
+        return np.array(attitudes)  # (N, 3, 3)
+
+    def residuals(x):
+        omegas = x.reshape(N - 1, 3)
+        optimized_attitudes = accumulate(x)
+        omega_res = (omegas - imu_angular_velocities_in_body_at_cam_times[:-1]).flatten()
+        attitude_res = (optimized_attitudes[1:] - pnp_attitudes[1:]).flatten()
+        return np.concatenate([omega_res, attitude_res])
+
+    result = least_squares(residuals, x0, method='lm')
+    optimized_angular_velocities = result.x.reshape(N - 1, 3)
+    optimized_attitudes = accumulate(result.x)
+    return optimized_angular_velocities, optimized_attitudes
 
 
 def run_pnp(data, orb, cam_timestamp_indices_in_range):
@@ -122,6 +149,11 @@ def main():
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in pnp_cam_timestamps_ns])
     nearest_imu_times = (imu_timestamps_ns[nearest_imu_indices] - min_timestamp_ns) / 1e9
     imu_angular_velocities_in_body_at_cam_times = imu_angular_velocities_in_body[nearest_imu_indices]
+
+    print("Optimizing angular velocities...")
+    optimized_angular_velocities, optimized_attitudes = optimize_angular_velocities(
+        imu_angular_velocities_in_body_at_cam_times, pnp_attitudes, data.cam0_rate_hz
+    )
     closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
     # +1 because imu_attitudes_in_body has an extra identity at index 0
     closest_imu_attitude_index = closest_imu_index + 1
@@ -137,6 +169,7 @@ def main():
             (pnp_times, pnp_attitudes, 'pnp'),
             (imu_attitude_times, imu_attitudes_in_world, 'imu'),
             (gt_times, gt_attitudes, 'gt'),
+            (pnp_times, optimized_attitudes, 'opt'),
         ],
     )
 
@@ -171,6 +204,7 @@ def main():
             (imu_times, imu_angular_velocities_in_body, 'imu'),
             (pnp_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
+            (pnp_angular_velocity_times, optimized_angular_velocities, 'opt'),
         ],
     )
 
