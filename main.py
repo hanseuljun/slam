@@ -50,13 +50,11 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
     keyframe_num_temporal_matches = None
     pnp_poses_in_body = [data.cam0_extrinsics]
     pnp_angular_velocities_from_rvec_in_body = []
-    num_temporal_matches_list = []
-    reprojection_errors = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
         if i % 100 == 0:
             print(f"i={i}")
         try:
-            rvec, tvec, num_temporal_matches, reprojection_error = solve_stereo_pnp(data,
+            rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(data,
                                        orb,
                                        data.cam_timestamps_ns[cam_timestamp_indices_in_range[keyframe_indices[-1]]],
                                        data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]])
@@ -70,8 +68,6 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec
         pnp_angular_velocities_from_rvec_in_body.append(rvec.flatten() * data.cam0_rate_hz)
-        num_temporal_matches_list.append(num_temporal_matches)
-        reprojection_errors.append(reprojection_error)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
@@ -80,7 +76,7 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body, num_temporal_matches_list, reprojection_errors
+    return pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body
 
 
 def main():
@@ -91,7 +87,7 @@ def main():
     max_timestamp_ns = min_timestamp_ns + int(20e9)  # 20 seconds
     cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
-    pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body, _, _ = \
+    pnp_poses_in_body, pnp_angular_velocities_from_rvec_in_body = \
         run_pnp(data, orb, cam_timestamp_indices_in_range)
 
     # Get first ground truth sample as 4x4 pose matrix
@@ -193,6 +189,7 @@ def main():
 
     plot_attitudes_and_angular_velocities(
         attitude_series=[
+            (imu_attitude_times, imu_attitudes_in_world, 'imu'),
             (pnp_times, pnp_attitudes, 'pnp'),
             (gt_times, gt_attitudes, 'gt'),
             (pnp_times, optimized_attitudes, 'opt'),
@@ -204,16 +201,6 @@ def main():
             (pnp_angular_velocity_times, optimized_angular_velocities, 'opt'),
         ],
     )
-
-    # fig, ax = plt.subplots(figsize=(12, 4))
-    # ax.plot(pnp_times, pnp_times, label='pnp')
-    # ax.plot(pnp_times, nearest_imu_times, label='nearest imu', linestyle='--')
-    # ax.set_xlabel('Time [s]')
-    # ax.set_ylabel('Time [s]')
-    # ax.set_title('Nearest IMU Time vs Slam Time')
-    # ax.legend()
-    # plt.tight_layout()
-    # plt.show()
 
 
 if __name__ == "__main__":
