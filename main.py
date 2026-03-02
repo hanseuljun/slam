@@ -7,7 +7,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from slam import DataFolder, solve_stereo_pnp
-from slam.plot import plot_angular_velocities, plot_positions, plot_rotation_axes
+from slam.plot import plot_attitudes_and_angular_velocities, plot_positions
 
 
 def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
@@ -164,15 +164,6 @@ def main():
         for att in imu_attitudes_in_body
     ])
 
-    plot_rotation_axes(
-        series=[
-            (pnp_times, pnp_attitudes, 'pnp'),
-            # (imu_attitude_times, imu_attitudes_in_world, 'imu'),
-            (gt_times, gt_attitudes, 'gt'),
-            (pnp_times, optimized_attitudes, 'opt'),
-        ],
-    )
-
     plot_positions(
         series=[
             (pnp_times, pnp_positions_in_world, 'pnp'),
@@ -200,9 +191,13 @@ def main():
     pnp_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
                                              for i in range(len(pnp_angular_velocities))])
 
-    plot_angular_velocities(
-        series=[
-            # (pnp_angular_velocity_times, pnp_angular_velocities, 'pnp'),
+    plot_attitudes_and_angular_velocities(
+        attitude_series=[
+            (pnp_times, pnp_attitudes, 'pnp'),
+            (gt_times, gt_attitudes, 'gt'),
+            (pnp_times, optimized_attitudes, 'opt'),
+        ],
+        angular_velocity_series=[
             (imu_times, imu_angular_velocities_in_body, 'imu'),
             (pnp_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),

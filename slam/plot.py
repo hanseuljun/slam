@@ -38,7 +38,7 @@ def plot_angular_velocities(
     plt.show()
 
 
-def plot_rotation_axes(
+def plot_attitudes(
     series: list[tuple[np.ndarray, np.ndarray, str]],
 ):
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
@@ -55,6 +55,38 @@ def plot_rotation_axes(
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
             ax.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_attitudes_and_angular_velocities(
+    attitude_series: list[tuple[np.ndarray, np.ndarray, str]],
+    angular_velocity_series: list[tuple[np.ndarray, np.ndarray, str]],
+):
+    fig = plt.figure(figsize=(18, 9))
+    fig.suptitle('Rotation Axes & Angular Velocity')
+    gs = fig.add_gridspec(3, 4)
+
+    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
+    component_names = ['X', 'Y', 'Z']
+    omega_labels = ['wx', 'wy', 'wz']
+
+    for row in range(3):
+        for col in range(3):
+            ax = fig.add_subplot(gs[row, col])
+            for times, attitudes, label in attitude_series:
+                ax.plot(times, attitudes[:, col, row], label=label)
+            ax.set_xlabel('Time [s]')
+            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
+            ax.legend()
+
+        ax_omega = fig.add_subplot(gs[row, 3])
+        for times, angular_velocities, label in angular_velocity_series:
+            ax_omega.plot(times, angular_velocities[:, row], label=label)
+        ax_omega.set_xlabel('Time [s]')
+        ax_omega.set_ylabel(f'{omega_labels[row]} [rad/s]')
+        ax_omega.legend()
 
     plt.tight_layout()
     plt.show()
