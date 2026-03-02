@@ -49,7 +49,7 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
     pnp_poses_in_world_without_initial_value = [np.eye(4)]
-    pnp_angular_velocities_from_rvec_in_body = []
+    pnp_angular_velocities_from_rvec_in_world = []
     for i in range(1, len(cam_timestamp_indices_in_range)):
         if i % 100 == 0:
             print(f"i={i}")
@@ -67,7 +67,7 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
         M = np.linalg.inv(data.cam0_extrinsics)
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec
-        pnp_angular_velocities_from_rvec_in_body.append(rvec.flatten() * data.cam0_rate_hz)
+        pnp_angular_velocities_from_rvec_in_world.append(rvec.flatten() * data.cam0_rate_hz)
         R, _ = cv2.Rodrigues(rvec)
         T = np.eye(4)
         T[:3, :3] = R
@@ -76,7 +76,7 @@ def run_pnp(data, orb, cam_timestamp_indices_in_range):
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return pnp_poses_in_world_without_initial_value, pnp_angular_velocities_from_rvec_in_body
+    return np.array(pnp_poses_in_world_without_initial_value), np.array(pnp_angular_velocities_from_rvec_in_world)
 
 
 def main():
@@ -87,7 +87,7 @@ def main():
     max_timestamp_ns = min_timestamp_ns + int(20e9)  # 20 seconds
     cam_timestamp_indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_timestamp_ns]
 
-    pnp_poses_in_world_without_initial_value, pnp_angular_velocities_from_rvec_in_body = \
+    pnp_poses_in_world_without_initial_value, pnp_angular_velocities_from_rvec_in_world = \
         run_pnp(data, orb, cam_timestamp_indices_in_range)
 
     # Get first ground truth sample as 4x4 pose matrix
@@ -105,18 +105,20 @@ def main():
     print(f"Time diff: {(cam_timestamps_ns[closest_cam_index] - first_gt.timestamp_ns) / 1e6:.2f} ms")
 
     # Transform estimated poses to world frame
-    pnp_poses_in_world = [
+    pnp_poses_in_world = np.array([
         first_gt_pose @ data.leica_extrinsics
         @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses_in_world_without_initial_value[closest_cam_index])
         @ data.cam0_extrinsics @ T
         @ np.linalg.inv(data.leica_extrinsics)
         for T in pnp_poses_in_world_without_initial_value
-    ]
+    ])
 
-    # Extract translations from pnp_poses_in_world
-    pnp_positions_in_world = np.array([T[:3, 3] for T in pnp_poses_in_world])
+    pnp_positions_in_world = pnp_poses_in_world[:, :3, 3]
     pnp_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
                             for i in range(len(pnp_poses_in_world))])
+    pnp_angular_velocities = pnp_angular_velocities_from_rvec_in_world
+    pnp_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
+                                             for i in range(len(pnp_angular_velocities))])
 
     # Extract ground truth positions (within time range)
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
@@ -124,7 +126,7 @@ def main():
     gt_times = np.array([(s.timestamp_ns - min_timestamp_ns) / 1e9 for s in gt_samples])
 
     # Extract rotations
-    pnp_attitudes = np.array([T[:3, :3] for T in pnp_poses_in_world])
+    pnp_attitudes = pnp_poses_in_world[:, :3, :3]
     gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     # Extract rotation axes from IMU attitudes (computed later, but referenced here)
@@ -186,10 +188,6 @@ def main():
         gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - min_timestamp_ns) / 1e9)
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
-
-    pnp_angular_velocities = np.array(pnp_angular_velocities_from_rvec_in_body)
-    pnp_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
-                                             for i in range(len(pnp_angular_velocities))])
 
     plot_attitudes_and_angular_velocities(
         attitude_series=[
