@@ -190,17 +190,19 @@ def main():
         rvec_gt, _ = cv2.Rodrigues(R_rel)
         dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
         gt_angular_velocities.append(rvec_gt.flatten() / dt)
-        gt_angular_velocity_times.append((gt_samples[j + 1].timestamp_ns - min_timestamp_ns) / 1e9)
+        # The angular velocity coming from attitude difference from frame t + 1 and frame t
+        # goes to frame t for angular velocity.
+        gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - min_timestamp_ns) / 1e9)
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
     pnp_angular_velocities = np.array(pnp_angular_velocities_from_rvec_in_body)
-    pnp_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i + 1]] - min_timestamp_ns) / 1e9
+    pnp_angular_velocity_times = np.array([(data.cam_timestamps_ns[cam_timestamp_indices_in_range[i]] - min_timestamp_ns) / 1e9
                                              for i in range(len(pnp_angular_velocities))])
 
     plot_angular_velocities(
         series=[
-            (pnp_angular_velocity_times, pnp_angular_velocities, 'pnp'),
+            # (pnp_angular_velocity_times, pnp_angular_velocities, 'pnp'),
             (imu_times, imu_angular_velocities_in_body, 'imu'),
             (pnp_times, imu_angular_velocities_in_body_at_cam_times, 'imu@cam'),
             (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
