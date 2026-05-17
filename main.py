@@ -204,6 +204,7 @@ def main():
             (pnp_angular_velocity_times, optimized_angular_velocities, 'opt'),
         ],
     )
+    plt.show()
 
 
 if __name__ == "__main__":

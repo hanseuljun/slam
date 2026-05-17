@@ -4,7 +4,7 @@ import numpy as np
 
 def plot_positions(
     series: list[tuple[np.ndarray, np.ndarray, str]],
-):
+) -> plt.Figure:
     fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
     fig.suptitle('Position')
 
@@ -17,12 +17,12 @@ def plot_positions(
         ax.legend()
 
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 def plot_angular_velocities(
     series: list[tuple[np.ndarray, np.ndarray, str]],
-):
+) -> plt.Figure:
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle('Angular Velocity in Body Frame')
 
@@ -35,12 +35,12 @@ def plot_angular_velocities(
         ax.legend()
 
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 def plot_attitudes(
     series: list[tuple[np.ndarray, np.ndarray, str]],
-):
+) -> plt.Figure:
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
     fig.suptitle('Rotation Axes')
 
@@ -57,13 +57,13 @@ def plot_attitudes(
             ax.legend()
 
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 def plot_attitudes_and_angular_velocities(
     attitude_series: list[tuple[np.ndarray, np.ndarray, str]],
     angular_velocity_series: list[tuple[np.ndarray, np.ndarray, str]],
-):
+) -> plt.Figure:
     fig = plt.figure(figsize=(18, 9))
     fig.suptitle('Rotation Axes & Angular Velocity')
     gs = fig.add_gridspec(3, 4)
@@ -89,4 +89,4 @@ def plot_attitudes_and_angular_velocities(
         ax_omega.legend()
 
     plt.tight_layout()
-    plt.show()
+    return fig
