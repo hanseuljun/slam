@@ -16,7 +16,7 @@ from slam import DataFolder, solve_stereo_pnp
 from slam.plot import plot_positions, plot_attitudes_and_angular_velocities
 
 
-def _quaternion_to_rotation_matrix(q: tuple) -> np.ndarray:
+def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
     w, x, y, z = q
     return np.array([
         [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
@@ -25,11 +25,15 @@ def _quaternion_to_rotation_matrix(q: tuple) -> np.ndarray:
     ])
 
 
-def _optimize_angular_velocities(imu_angular_velocities_at_cam_times, pnp_attitudes, cam_rate_hz):
+def _optimize_angular_velocities(
+    imu_angular_velocities_at_cam_times: np.ndarray,
+    pnp_attitudes: np.ndarray,
+    cam_rate_hz: int,
+) -> tuple[np.ndarray, np.ndarray]:
     N = len(pnp_attitudes)
     x0 = imu_angular_velocities_at_cam_times[:-1].flatten()
 
-    def accumulate(x):
+    def accumulate(x: np.ndarray) -> np.ndarray:
         omegas = x.reshape(N - 1, 3)
         attitudes = [pnp_attitudes[0]]
         for omega in omegas:
@@ -37,7 +41,7 @@ def _optimize_angular_velocities(imu_angular_velocities_at_cam_times, pnp_attitu
             attitudes.append(attitudes[-1] @ R)
         return np.array(attitudes)
 
-    def residuals(x):
+    def residuals(x: np.ndarray) -> np.ndarray:
         omegas = x.reshape(N - 1, 3)
         optimized_attitudes = accumulate(x)
         omega_res = (omegas - imu_angular_velocities_at_cam_times[:-1]).flatten()
@@ -48,11 +52,16 @@ def _optimize_angular_velocities(imu_angular_velocities_at_cam_times, pnp_attitu
     return result.x.reshape(N - 1, 3), accumulate(result.x)
 
 
-def _run_pnp(data, orb, indices_in_range, on_progress: Callable[[float], None]):
-    keyframe_indices = [0]
-    keyframe_num_temporal_matches = None
-    pnp_poses = [np.eye(4)]
-    pnp_angular_velocities = []
+def _run_pnp(
+    data: DataFolder,
+    orb: cv2.ORB,
+    indices_in_range: list[int],
+    on_progress: Callable[[float], None],
+) -> tuple[np.ndarray, np.ndarray]:
+    keyframe_indices: list[int] = [0]
+    keyframe_num_temporal_matches: Optional[int] = None
+    pnp_poses: list[np.ndarray] = [np.eye(4)]
+    pnp_angular_velocities: list[np.ndarray] = []
     n = len(indices_in_range)
     for i in range(1, n):
         on_progress(i / n)
@@ -221,12 +230,12 @@ def _compute_plots(
 
 
 class SlamTabState:
-    def __init__(self, data: DataFolder):
+    def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._plots: Optional[_Plots] = None
-        self._loading = False
+        self._loading: bool = False
         self._error: Optional[str] = None
-        self._started = False
+        self._started: bool = False
         self._progress: float = 0.0
         self._progress_label: str = ""
 
@@ -234,7 +243,7 @@ class SlamTabState:
         self._progress = value
         self._progress_label = label
 
-    def _compute(self):
+    def _compute(self) -> None:
         try:
             self._plots = _compute_plots(self._data, self._set_progress)
         except Exception as e:
@@ -242,7 +251,7 @@ class SlamTabState:
         finally:
             self._loading = False
 
-    def start(self):
+    def start(self) -> None:
         if self._started:
             return
         self._started = True

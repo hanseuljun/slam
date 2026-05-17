@@ -1,17 +1,20 @@
+from typing import Optional
+
 import cv2
+import numpy as np
 from imgui_bundle import imgui, immvision
 
 from slam import DataFolder
 
 
 class CameraFramesState:
-    def __init__(self, data: DataFolder):
+    def __init__(self, data: DataFolder) -> None:
         self.data = data
-        self.frame_index = 0
-        self._cached_index = -1
-        self._cached_image = None
+        self.frame_index: int = 0
+        self._cached_index: int = -1
+        self._cached_image: Optional[np.ndarray] = None
 
-    def current_image(self):
+    def current_image(self) -> Optional[np.ndarray]:
         if self._cached_index != self.frame_index:
             ts = self.data.cam_timestamps_ns[self.frame_index]
             self._cached_image = cv2.imread(

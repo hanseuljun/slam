@@ -36,14 +36,14 @@ class _Results:
 
 
 class TriangulationTabState:
-    def __init__(self, data: DataFolder):
+    def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._results: Optional[_Results] = None
-        self._loading = False
+        self._loading: bool = False
         self._error: Optional[str] = None
-        self._started = False
+        self._started: bool = False
 
-    def _compute(self):
+    def _compute(self) -> None:
         try:
             data = self._data
             orb = cv2.ORB_create(nfeatures=2000)
@@ -121,7 +121,7 @@ class TriangulationTabState:
         finally:
             self._loading = False
 
-    def start(self):
+    def start(self) -> None:
         if self._started:
             return
         self._started = True
