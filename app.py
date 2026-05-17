@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from imgui_bundle import imgui, hello_imgui, immapp
+from nicegui import ui
 
 from slam import DataFolder
 from slam.slam_solver import SlamSolver
@@ -20,52 +20,33 @@ class App:
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
 
-    def render(self) -> None:
-        viewport = imgui.get_main_viewport()
-        imgui.set_next_window_pos(viewport.work_pos)
-        imgui.set_next_window_size(viewport.work_size)
-        imgui.begin(
-            "##main",
-            flags=imgui.WindowFlags_.no_title_bar
-            | imgui.WindowFlags_.no_resize
-            | imgui.WindowFlags_.no_move
-            | imgui.WindowFlags_.no_scrollbar,
-        )
+    def setup_ui(self) -> None:
+        with ui.tabs().classes('w-full') as tabs:
+            tab_camera = ui.tab('Camera Frames')
+            tab_data = ui.tab('Data')
+            tab_slam = ui.tab('SLAM')
+            tab_tri = ui.tab('Triangulation')
 
-        if imgui.begin_tab_bar("##tabs"):
-            if imgui.begin_tab_item("Camera Frames")[0]:
+        with ui.tab_panels(tabs, value=tab_camera).classes('w-full'):
+            with ui.tab_panel(tab_camera):
                 camera_frames_tab(self.camera_frames_tab_state)
-                imgui.end_tab_item()
-
-            if imgui.begin_tab_item("Data")[0]:
+            with ui.tab_panel(tab_data):
                 data_tab(self.data)
-                imgui.end_tab_item()
-
-            if imgui.begin_tab_item("SLAM")[0]:
+            with ui.tab_panel(tab_slam):
                 slam_tab(self.slam_tab_state)
-                imgui.end_tab_item()
-
-            if imgui.begin_tab_item("Triangulation")[0]:
+            with ui.tab_panel(tab_tri):
                 triangulation_tab(self.triangulation_tab_state)
-                imgui.end_tab_item()
-
-            imgui.end_tab_bar()
-
-        imgui.end()
 
 
-def main():
-    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    app = App(data)
+def main() -> None:
+    data = DataFolder.load(Path('data/machine_hall/MH_01_easy/mav0'))
+    instance = App(data)
 
-    runner_params = hello_imgui.RunnerParams()
-    runner_params.app_window_params.window_title = "slam"
-    runner_params.app_window_params.window_geometry.size = (1280, 720)
-    runner_params.ini_filename = "slam.ini"
-    runner_params.callbacks.show_gui = app.render
+    @ui.page('/')
+    def index() -> None:
+        instance.setup_ui()
 
-    immapp.run(runner_params)
+    ui.run(title='slam')
 
-
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     main()

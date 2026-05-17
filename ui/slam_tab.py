@@ -1,41 +1,41 @@
-from typing import Optional
-
-import cv2
-import numpy as np
-from imgui_bundle import imgui, hello_imgui
+from nicegui import ui
 
 from slam.slam_solver import SlamSolver
-
-
-def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
-    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
-    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
+from ui._utils import array_to_data_uri
 
 
 class SlamTabState:
     def __init__(self, solver: SlamSolver) -> None:
         self._solver = solver
-        self._tex_positions: Optional[hello_imgui.TextureGpu] = None
-        self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
 
 
 def slam_tab(state: SlamTabState) -> None:
     solver = state._solver
-    if solver.loading:
-        imgui.text(solver.progress_label)
-        imgui.progress_bar(solver.progress, (-1, 0))
-        return
-    if solver.error:
-        imgui.text(f"Error: {solver.error}")
-        return
-    if solver.plots is None:
-        return
 
-    if state._tex_positions is None:
-        state._tex_positions = _to_texture(solver.plots.positions)
-        state._tex_attitudes = _to_texture(solver.plots.attitudes_and_angular_velocities)
+    with ui.column().classes('w-full'):
+        progress_label = ui.label('')
+        progress_bar = ui.linear_progress(value=0).classes('w-full')
+        error_label = ui.label('').classes('text-red-500').set_visibility(False)
+        img_positions = ui.image('').classes('w-full').set_visibility(False)
+        img_attitudes = ui.image('').classes('w-full').set_visibility(False)
 
-    imgui.begin_child("##slam_scroll", (0, 0), False)
-    imgui.image(imgui.ImTextureRef(state._tex_positions.texture_id()), (state._tex_positions.width, state._tex_positions.height))
-    imgui.image(imgui.ImTextureRef(state._tex_attitudes.texture_id()), (state._tex_attitudes.width, state._tex_attitudes.height))
-    imgui.end_child()
+        def poll() -> None:
+            if solver.loading:
+                progress_label.text = solver.progress_label
+                progress_bar.value = solver.progress
+            elif solver.error:
+                progress_label.set_visibility(False)
+                progress_bar.set_visibility(False)
+                error_label.text = f'Error: {solver.error}'
+                error_label.set_visibility(True)
+                timer.cancel()
+            elif solver.plots is not None:
+                progress_label.set_visibility(False)
+                progress_bar.set_visibility(False)
+                img_positions.source = array_to_data_uri(solver.plots.positions)
+                img_attitudes.source = array_to_data_uri(solver.plots.attitudes_and_angular_velocities)
+                img_positions.set_visibility(True)
+                img_attitudes.set_visibility(True)
+                timer.cancel()
+
+        timer = ui.timer(0.5, poll)

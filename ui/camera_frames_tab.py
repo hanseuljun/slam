@@ -2,17 +2,10 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from imgui_bundle import imgui, hello_imgui
+from nicegui import ui
 
 from slam import DataFolder
-
-
-def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
-    if image.ndim == 2:
-        rgba = np.stack([image, image, image, np.full_like(image, 255)], axis=-1)
-    else:
-        rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
-    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
+from ui._utils import array_to_data_uri
 
 
 class CameraFramesTabState:
@@ -21,11 +14,9 @@ class CameraFramesTabState:
         self.frame_index: int = 0
         self._cached_index: int = -1
         self._cached_image: Optional[np.ndarray] = None
-        self._texture: Optional[hello_imgui.TextureGpu] = None
 
     def current_image(self) -> Optional[np.ndarray]:
         if self._cached_index != self.frame_index:
-            self._texture = None
             ts = self.data.cam_timestamps_ns[self.frame_index]
             self._cached_image = cv2.imread(
                 str(self.data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE
@@ -33,18 +24,19 @@ class CameraFramesTabState:
             self._cached_index = self.frame_index
         return self._cached_image
 
-    def current_texture(self) -> Optional[hello_imgui.TextureGpu]:
-        image = self.current_image()
-        if image is None:
-            return None
-        if self._texture is None:
-            self._texture = _to_texture(image)
-        return self._texture
-
 
 def camera_frames_tab(state: CameraFramesTabState) -> None:
     n = len(state.data.cam_timestamps_ns)
-    _, state.frame_index = imgui.slider_int("Frame", state.frame_index, 0, n - 1)
-    tex = state.current_texture()
-    if tex is not None:
-        imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    img = ui.image(source='').classes('w-full')
+
+    def on_slide(e) -> None:
+        state.frame_index = int(e.value)
+        image = state.current_image()
+        if image is not None:
+            img.source = array_to_data_uri(image)
+
+    ui.slider(min=0, max=n - 1, step=1, value=0, on_change=on_slide)
+
+    image = state.current_image()
+    if image is not None:
+        img.source = array_to_data_uri(image)
