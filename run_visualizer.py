@@ -3,13 +3,13 @@ from pathlib import Path
 from imgui_bundle import hello_imgui, immapp, imgui
 
 from slam import DataFolder
-from slam.viz import CameraFramesState, camera_frames_tab, SlamTabState, slam_tab
+from slam.viz import CameraFramesState, camera_frames_tab, data_tab, SlamTabState, slam_tab
 
 from imgui_bundle import immvision
 immvision.use_bgr_color_order()
 
 
-def make_gui(camera_frames: CameraFramesState, slam: SlamTabState):
+def make_gui(data: DataFolder, camera_frames: CameraFramesState, slam: SlamTabState):
     def gui():
         viewport = imgui.get_main_viewport()
         imgui.set_next_window_pos(viewport.work_pos)
@@ -34,6 +34,10 @@ def make_gui(camera_frames: CameraFramesState, slam: SlamTabState):
                 slam_tab(slam)
                 imgui.end_tab_item()
 
+            if imgui.begin_tab_item("Data")[0]:
+                data_tab(data)
+                imgui.end_tab_item()
+
             imgui.end_tab_bar()
 
         imgui.end()
@@ -51,7 +55,7 @@ def main():
     runner_params.app_window_params.window_title = "SLAM Visualizer"
     runner_params.app_window_params.window_geometry.size = (1280, 720)
     runner_params.ini_filename = "visualizer.ini"
-    runner_params.callbacks.show_gui = make_gui(camera_frames, slam)
+    runner_params.callbacks.show_gui = make_gui(data, camera_frames, slam)
 
     immapp.run(runner_params)
 
