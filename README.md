@@ -1,5 +1,9 @@
 # slam
 
+## setup
+
+`source venv/bin/activate`
+
 ## data
 
 following directories are expected to contain files from the following datasets.
