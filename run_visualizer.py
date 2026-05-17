@@ -1,4 +1,4 @@
-from imgui_bundle import imgui, immapp
+from imgui_bundle import imgui, immapp, hello_imgui
 
 
 def gui():
@@ -15,4 +15,10 @@ def gui():
     imgui.end()
 
 
-immapp.run(gui, window_title="SLAM Visualizer", window_size=(1280, 720))
+runner_params = hello_imgui.RunnerParams()
+runner_params.app_window_params.window_title = "SLAM Visualizer"
+runner_params.app_window_params.window_geometry.size = (1280, 720)
+runner_params.ini_filename = "visualizer.ini"
+runner_params.callbacks.show_gui = gui
+
+immapp.run(runner_params)
