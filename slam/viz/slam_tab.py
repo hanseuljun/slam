@@ -1,7 +1,7 @@
 import io
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import matplotlib
 matplotlib.use('Agg')
@@ -48,14 +48,14 @@ def _optimize_angular_velocities(imu_angular_velocities_at_cam_times, pnp_attitu
     return result.x.reshape(N - 1, 3), accumulate(result.x)
 
 
-def _run_pnp(data, orb, indices_in_range):
+def _run_pnp(data, orb, indices_in_range, on_progress: Callable[[float], None]):
     keyframe_indices = [0]
     keyframe_num_temporal_matches = None
     pnp_poses = [np.eye(4)]
     pnp_angular_velocities = []
-    for i in range(1, len(indices_in_range)):
-        if i % 100 == 0:
-            print(f"i={i}")
+    n = len(indices_in_range)
+    for i in range(1, n):
+        on_progress(i / n)
         try:
             rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(
                 data, orb,
@@ -98,14 +98,22 @@ class _Plots:
     attitudes_and_angular_velocities: np.ndarray
 
 
-def _compute_plots(data: DataFolder) -> _Plots:
+def _compute_plots(
+    data: DataFolder,
+    set_progress: Callable[[float, str], None],
+) -> _Plots:
     orb = cv2.ORB_create(nfeatures=2000)
     min_ts = data.cam_timestamps_ns[0]
     max_ts = min_ts + int(20e9)
     indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_ts]
 
-    pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(data, orb, indices_in_range)
+    set_progress(0.0, "Running PnP...")
+    pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
+        data, orb, indices_in_range,
+        on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
+    )
 
+    set_progress(0.8, "Transforming poses...")
     first_gt = data.ground_truth_samples[0]
     first_gt_pose = np.eye(4)
     first_gt_pose[:3, :3] = _quaternion_to_rotation_matrix(first_gt.quaternion)
@@ -159,7 +167,7 @@ def _compute_plots(data: DataFolder) -> _Plots:
     ])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
 
-    print("Optimizing angular velocities...")
+    set_progress(0.85, "Optimizing angular velocities...")
     optimized_angular_velocities, optimized_attitudes = _optimize_angular_velocities(
         imu_angular_velocities_at_cam_times, pnp_attitudes, data.cam0_rate_hz
     )
@@ -185,6 +193,7 @@ def _compute_plots(data: DataFolder) -> _Plots:
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
+    set_progress(0.95, "Rendering plots...")
     fig_pos = plot_positions(series=[
         (pnp_times, pnp_positions_in_world, 'pnp'),
         (gt_times, gt_positions, 'gt'),
@@ -218,10 +227,16 @@ class SlamTabState:
         self._loading = False
         self._error: Optional[str] = None
         self._started = False
+        self._progress: float = 0.0
+        self._progress_label: str = ""
+
+    def _set_progress(self, value: float, label: str) -> None:
+        self._progress = value
+        self._progress_label = label
 
     def _compute(self):
         try:
-            self._plots = _compute_plots(self._data)
+            self._plots = _compute_plots(self._data, self._set_progress)
         except Exception as e:
             self._error = str(e)
         finally:
@@ -239,7 +254,8 @@ def slam_tab(state: SlamTabState) -> None:
     state._start_if_needed()
 
     if state._loading:
-        imgui.text("Computing SLAM results...")
+        imgui.text(state._progress_label)
+        imgui.progress_bar(state._progress, (-1, 0))
         return
     if state._error:
         imgui.text(f"Error: {state._error}")
