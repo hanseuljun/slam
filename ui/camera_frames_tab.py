@@ -15,7 +15,7 @@ def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
     return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
-class CameraFramesState:
+class CameraFramesTabState:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.frame_index: int = 0
@@ -42,7 +42,7 @@ class CameraFramesState:
         return self._texture
 
 
-def camera_frames_tab(state: CameraFramesState) -> None:
+def camera_frames_tab(state: CameraFramesTabState) -> None:
     n = len(state.data.cam_timestamps_ns)
     _, state.frame_index = imgui.slider_int("Frame", state.frame_index, 0, n - 1)
     tex = state.current_texture()

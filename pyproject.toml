@@ -1,7 +1,7 @@
 [project]
 name = "slam"
 version = "0.1.0"
-description = "SLAM implementation"
+description = "simultaneous localization and mapping"
 requires-python = ">=3.11"
 dependencies = [
     "matplotlib",
