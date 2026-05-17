@@ -267,7 +267,6 @@ class SlamTabState:
 
 
 def slam_tab(state: SlamTabState) -> None:
-
     if state._loading:
         imgui.text(state._progress_label)
         imgui.progress_bar(state._progress, (-1, 0))
