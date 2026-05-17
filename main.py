@@ -33,11 +33,12 @@ def make_gui(
         )
 
         if imgui.begin_tab_bar("##tabs"):
-            if imgui.begin_tab_item("Overview")[0]:
-                imgui.end_tab_item()
-
             if imgui.begin_tab_item("Camera Frames")[0]:
                 camera_frames_tab(camera_frames)
+                imgui.end_tab_item()
+
+            if imgui.begin_tab_item("Data")[0]:
+                data_tab(data)
                 imgui.end_tab_item()
 
             if imgui.begin_tab_item("SLAM")[0]:
@@ -46,10 +47,6 @@ def make_gui(
 
             if imgui.begin_tab_item("Triangulation")[0]:
                 triangulation_tab(triangulation)
-                imgui.end_tab_item()
-
-            if imgui.begin_tab_item("Data")[0]:
-                data_tab(data)
                 imgui.end_tab_item()
 
             imgui.end_tab_bar()
