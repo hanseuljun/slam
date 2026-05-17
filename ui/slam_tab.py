@@ -4,7 +4,6 @@ import cv2
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
-from slam import DataFolder
 from slam.slam_solver import SlamSolver
 
 
@@ -14,13 +13,10 @@ def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
 
 
 class SlamTabState:
-    def __init__(self, data: DataFolder) -> None:
-        self._solver = SlamSolver(data)
+    def __init__(self, solver: SlamSolver) -> None:
+        self._solver = solver
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
-
-    def start(self) -> None:
-        self._solver.start()
 
 
 def slam_tab(state: SlamTabState) -> None:

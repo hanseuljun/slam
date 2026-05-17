@@ -3,6 +3,7 @@ from pathlib import Path
 from imgui_bundle import imgui, hello_imgui, immapp
 
 from slam import DataFolder
+from slam.slam_solver import SlamSolver
 from ui.camera_frames_tab import CameraFramesTabState, camera_frames_tab
 from ui.data_tab import data_tab
 from ui.slam_tab import SlamTabState, slam_tab
@@ -13,8 +14,9 @@ class App:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.camera_frames_tab_state = CameraFramesTabState(data)
-        self.slam_tab_state = SlamTabState(data)
-        self.slam_tab_state.start()
+        self.slam_solver = SlamSolver(data)
+        self.slam_solver.start()
+        self.slam_tab_state = SlamTabState(self.slam_solver)
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
 
