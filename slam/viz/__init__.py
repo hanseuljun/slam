@@ -1,4 +1,4 @@
-from slam.viz.camera_frames import CameraFramesState, camera_frames_tab
+from slam.viz.camera_frame_tab import CameraFramesState, camera_frames_tab
 from slam.viz.data_tab import data_tab
 from slam.viz.slam_tab import SlamTabState, slam_tab
 from slam.viz.triangulation_tab import TriangulationTabState, triangulation_tab
