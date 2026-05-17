@@ -242,7 +242,7 @@ class SlamTabState:
         finally:
             self._loading = False
 
-    def _start_if_needed(self):
+    def start(self):
         if self._started:
             return
         self._started = True
@@ -251,7 +251,6 @@ class SlamTabState:
 
 
 def slam_tab(state: SlamTabState) -> None:
-    state._start_if_needed()
 
     if state._loading:
         imgui.text(state._progress_label)

@@ -45,6 +45,7 @@ def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
     camera_frames = CameraFramesState(data)
     slam = SlamTabState(data)
+    slam.start()
 
     runner_params = hello_imgui.RunnerParams()
     runner_params.app_window_params.window_title = "SLAM Visualizer"
