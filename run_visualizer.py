@@ -15,10 +15,15 @@ def gui():
     imgui.end()
 
 
-runner_params = hello_imgui.RunnerParams()
-runner_params.app_window_params.window_title = "SLAM Visualizer"
-runner_params.app_window_params.window_geometry.size = (1280, 720)
-runner_params.ini_filename = "visualizer.ini"
-runner_params.callbacks.show_gui = gui
+def main():
+    runner_params = hello_imgui.RunnerParams()
+    runner_params.app_window_params.window_title = "SLAM Visualizer"
+    runner_params.app_window_params.window_geometry.size = (1280, 720)
+    runner_params.ini_filename = "visualizer.ini"
+    runner_params.callbacks.show_gui = gui
 
-immapp.run(runner_params)
+    immapp.run(runner_params)
+
+
+if __name__ == "__main__":
+    main()
