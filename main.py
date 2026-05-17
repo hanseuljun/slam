@@ -54,7 +54,7 @@ def main():
     runner_params = hello_imgui.RunnerParams()
     runner_params.app_window_params.window_title = "SLAM Visualizer"
     runner_params.app_window_params.window_geometry.size = (1280, 720)
-    runner_params.ini_filename = "visualizer.ini"
+    runner_params.ini_filename = "main.ini"
     runner_params.callbacks.show_gui = make_gui(data, camera_frames, slam)
 
     immapp.run(runner_params)
