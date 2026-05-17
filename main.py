@@ -10,8 +10,6 @@ from slam.viz import (
     TriangulationTabState, triangulation_tab,
 )
 
-from imgui_bundle import immvision
-immvision.use_bgr_color_order()
 
 
 def make_gui(

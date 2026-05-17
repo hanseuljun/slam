@@ -10,10 +10,15 @@ import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 from scipy.optimize import least_squares
-from imgui_bundle import imgui, immvision
+from imgui_bundle import imgui, hello_imgui
 
 from slam import DataFolder, solve_stereo_pnp
 from slam.plot import plot_positions, plot_attitudes_and_angular_velocities
+
+
+def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
+    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
 def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
@@ -233,6 +238,8 @@ class SlamTabState:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._plots: Optional[_Plots] = None
+        self._tex_positions: Optional[hello_imgui.TextureGpu] = None
+        self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._loading: bool = False
         self._error: Optional[str] = None
         self._started: bool = False
@@ -271,7 +278,11 @@ def slam_tab(state: SlamTabState) -> None:
     if state._plots is None:
         return
 
+    if state._tex_positions is None:
+        state._tex_positions = _to_texture(state._plots.positions)
+        state._tex_attitudes = _to_texture(state._plots.attitudes_and_angular_velocities)
+
     imgui.begin_child("##slam_scroll", (0, 0), False)
-    immvision.image("##positions", state._plots.positions, immvision.ImageParams())
-    immvision.image("##attitudes", state._plots.attitudes_and_angular_velocities, immvision.ImageParams())
+    imgui.image(imgui.ImTextureRef(state._tex_positions.texture_id()), (state._tex_positions.width, state._tex_positions.height))
+    imgui.image(imgui.ImTextureRef(state._tex_attitudes.texture_id()), (state._tex_attitudes.width, state._tex_attitudes.height))
     imgui.end_child()

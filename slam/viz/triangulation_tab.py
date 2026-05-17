@@ -6,9 +6,14 @@ from typing import Optional
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from imgui_bundle import imgui, immvision
+from imgui_bundle import imgui, hello_imgui
 
 from slam import DataFolder, triangulate_stereo_matches
+
+
+def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
+    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
 def _fig_to_image(fig: plt.Figure) -> np.ndarray:
@@ -39,6 +44,8 @@ class TriangulationTabState:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._results: Optional[_Results] = None
+        self._tex_keypoints: Optional[hello_imgui.TextureGpu] = None
+        self._tex_3d: Optional[hello_imgui.TextureGpu] = None
         self._loading: bool = False
         self._error: Optional[str] = None
         self._started: bool = False
@@ -140,6 +147,10 @@ def triangulation_tab(state: TriangulationTabState) -> None:
         return
 
     r = state._results
+    if state._tex_keypoints is None:
+        state._tex_keypoints = _to_texture(r.keypoints_plot)
+        state._tex_3d = _to_texture(r.points_3d_plot)
+
     imgui.begin_child("##tri_scroll", (0, 0), False)
     imgui.text(f"cam0 keypoints: {r.n_cam0_keypoints}")
     imgui.text(f"cam1 keypoints: {r.n_cam1_keypoints}")
@@ -150,6 +161,6 @@ def triangulation_tab(state: TriangulationTabState) -> None:
     imgui.text(f"Median reprojection error: {r.median_reprojection_error:.2f} px")
     imgui.text(f"Mean reprojection error: {r.mean_reprojection_error:.2f} px")
     imgui.separator()
-    immvision.image("##kp_plot", r.keypoints_plot, immvision.ImageParams())
-    immvision.image("##3d_plot", r.points_3d_plot, immvision.ImageParams())
+    imgui.image(imgui.ImTextureRef(state._tex_keypoints.texture_id()), (state._tex_keypoints.width, state._tex_keypoints.height))
+    imgui.image(imgui.ImTextureRef(state._tex_3d.texture_id()), (state._tex_3d.width, state._tex_3d.height))
     imgui.end_child()
