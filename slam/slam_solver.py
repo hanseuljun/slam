@@ -1,11 +1,6 @@
-import io
 import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
-
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 import cv2
 import numpy as np
@@ -13,7 +8,6 @@ from scipy.optimize import least_squares
 
 from slam.data import DataFolder
 from slam.solve import solve_stereo_pnp
-from slam.plot import plot_positions, plot_attitudes_and_angular_velocities
 
 
 def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
@@ -98,20 +92,25 @@ def _run_pnp(
     return np.array(pnp_poses), np.array(pnp_angular_velocities)
 
 
-def _fig_to_image(fig: plt.Figure) -> np.ndarray:
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    arr = np.frombuffer(buf.read(), dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    plt.close(fig)
-    return img
-
-
 @dataclass
-class SlamPlots:
-    positions: np.ndarray
-    attitudes_and_angular_velocities: np.ndarray
+class SlamResults:
+    pnp_times: np.ndarray
+    pnp_positions: np.ndarray
+    pnp_attitudes: np.ndarray
+    pnp_angular_velocity_times: np.ndarray
+    pnp_angular_velocities: np.ndarray
+    imu_attitude_times: np.ndarray
+    imu_attitudes: np.ndarray
+    imu_times: np.ndarray
+    imu_angular_velocities: np.ndarray
+    imu_angular_velocities_at_cam_times: np.ndarray
+    gt_times: np.ndarray
+    gt_positions: np.ndarray
+    gt_attitudes: np.ndarray
+    gt_angular_velocity_times: np.ndarray
+    gt_angular_velocities: np.ndarray
+    optimized_attitudes: np.ndarray
+    optimized_angular_velocities: np.ndarray
 
 
 def _compute_plots(
@@ -119,7 +118,7 @@ def _compute_plots(
     set_progress: Callable[[float, str], None],
     stop_event: threading.Event,
     duration_s: float,
-) -> SlamPlots:
+) -> SlamResults:
     orb = cv2.ORB_create(nfeatures=2000)
     min_ts = data.cam_timestamps_ns[0]
     max_ts = min_ts + int(duration_s * 1e9)
@@ -212,30 +211,25 @@ def _compute_plots(
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
-    set_progress(0.95, "Rendering plots...")
-    fig_pos = plot_positions(series=[
-        (pnp_times, pnp_positions_in_world, 'pnp'),
-        (gt_times, gt_positions, 'gt'),
-    ])
-    fig_att = plot_attitudes_and_angular_velocities(
-        attitude_series=[
-            (pnp_times, pnp_attitudes, 'pnp'),
-            (imu_attitude_times, imu_attitudes_in_world, 'imu'),
-            (gt_times, gt_attitudes, 'gt'),
-            (pnp_times, optimized_attitudes, 'opt'),
-        ],
-        angular_velocity_series=[
-            (pnp_angular_velocity_times, pnp_angular_velocities_from_rvec, 'pnp'),
-            (imu_times, imu_angular_velocities, 'imu'),
-            (pnp_times, imu_angular_velocities_at_cam_times, 'imu@cam'),
-            (gt_angular_velocity_times, gt_angular_velocities, 'gt'),
-            (pnp_angular_velocity_times, optimized_angular_velocities, 'opt'),
-        ],
-    )
-
-    return SlamPlots(
-        positions=_fig_to_image(fig_pos),
-        attitudes_and_angular_velocities=_fig_to_image(fig_att),
+    set_progress(0.95, "Finishing...")
+    return SlamResults(
+        pnp_times=pnp_times,
+        pnp_positions=pnp_positions_in_world,
+        pnp_attitudes=pnp_attitudes,
+        pnp_angular_velocity_times=pnp_angular_velocity_times,
+        pnp_angular_velocities=pnp_angular_velocities_from_rvec,
+        imu_attitude_times=imu_attitude_times,
+        imu_attitudes=imu_attitudes_in_world,
+        imu_times=imu_times,
+        imu_angular_velocities=imu_angular_velocities,
+        imu_angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
+        gt_times=gt_times,
+        gt_positions=gt_positions,
+        gt_attitudes=gt_attitudes,
+        gt_angular_velocity_times=gt_angular_velocity_times,
+        gt_angular_velocities=gt_angular_velocities,
+        optimized_attitudes=optimized_attitudes,
+        optimized_angular_velocities=optimized_angular_velocities,
     )
 
 
@@ -243,7 +237,7 @@ class SlamSolver:
     def __init__(self, data: DataFolder, duration_s: float = 20.0) -> None:
         self._data = data
         self._duration_s = duration_s
-        self.plots: Optional[SlamPlots] = None
+        self.plots: Optional[SlamResults] = None
         self.loading: bool = False
         self.error: Optional[str] = None
         self.progress: float = 0.0

@@ -1,8 +1,49 @@
+import io
+
+import cv2
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
 from nicegui import ui
 
 from slam.data import DataFolder
-from slam.slam_solver import SlamSolver
+from slam.plot import plot_positions, plot_attitudes_and_angular_velocities
+from slam.slam_solver import SlamResults, SlamSolver
 from ui._utils import array_to_data_uri
+
+
+def _fig_to_image(fig: plt.Figure) -> np.ndarray:
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    arr = np.frombuffer(buf.read(), dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    plt.close(fig)
+    return img
+
+
+def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray]:
+    fig_pos = plot_positions(series=[
+        (results.pnp_times, results.pnp_positions, 'pnp'),
+        (results.gt_times, results.gt_positions, 'gt'),
+    ])
+    fig_att = plot_attitudes_and_angular_velocities(
+        attitude_series=[
+            (results.pnp_times, results.pnp_attitudes, 'pnp'),
+            (results.imu_attitude_times, results.imu_attitudes, 'imu'),
+            (results.gt_times, results.gt_attitudes, 'gt'),
+            (results.pnp_times, results.optimized_attitudes, 'opt'),
+        ],
+        angular_velocity_series=[
+            (results.pnp_angular_velocity_times, results.pnp_angular_velocities, 'pnp'),
+            (results.imu_times, results.imu_angular_velocities, 'imu'),
+            (results.pnp_times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
+            (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
+            (results.pnp_angular_velocity_times, results.optimized_angular_velocities, 'opt'),
+        ],
+    )
+    return _fig_to_image(fig_pos), _fig_to_image(fig_att)
 
 
 class SlamTabState:
@@ -47,8 +88,9 @@ def slam_tab(state: SlamTabState) -> None:
             elif solver.plots is not None:
                 progress_label.set_visibility(False)
                 progress_bar.set_visibility(False)
-                img_positions.source = array_to_data_uri(solver.plots.positions)
-                img_attitudes.source = array_to_data_uri(solver.plots.attitudes_and_angular_velocities)
+                pos_img, att_img = _render_plots(solver.plots)
+                img_positions.source = array_to_data_uri(pos_img)
+                img_attitudes.source = array_to_data_uri(att_img)
                 img_positions.set_visibility(True)
                 img_attitudes.set_visibility(True)
                 timer.deactivate()
