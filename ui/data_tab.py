@@ -17,7 +17,7 @@ def _matrix_table(m: np.ndarray) -> None:
 
 
 def data_tab(data: DataFolder) -> None:
-    with ui.scroll_area().classes('w-full h-full'):
+    with ui.scroll_area().classes('w-full'):
         ui.label(f'path: {data.path}')
         ui.separator()
 
