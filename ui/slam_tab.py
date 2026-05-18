@@ -49,6 +49,7 @@ class SlamTabState:
         self._solver = solver
         self._on_restart = on_restart
         self.duration_s: float = 20.0
+        self.on_run_again: Callable[[], None] = lambda: None
 
 
 def slam_tab(state: SlamTabState) -> None:
@@ -96,8 +97,5 @@ def slam_tab(state: SlamTabState) -> None:
             state._on_restart()
             timer.activate()
 
+        state.on_run_again = on_run_again
         timer = ui.timer(0.5, poll)
-        with ui.row().classes('items-center'):
-            ui.number('End time (s)', value=state.duration_s, min=1, step=1,
-                      on_change=lambda e: setattr(state, 'duration_s', float(e.value)))
-            ui.button('Run Again', on_click=on_run_again)

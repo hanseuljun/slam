@@ -33,6 +33,11 @@ class App:
             tab_slam = ui.tab('SLAM')
             tab_triangulation = ui.tab('Triangulation')
 
+        with ui.row().classes('items-center'):
+            ui.number('End time (s)', value=self.slam_tab_state.duration_s, min=1, step=1,
+                        on_change=lambda e: setattr(self.slam_tab_state, 'duration_s', float(e.value)))
+            ui.button('Run Again', on_click=lambda: self.slam_tab_state.on_run_again())
+
         with ui.tab_panels(tabs, value=tab_camera_frames).classes('w-full'):
             with ui.tab_panel(tab_camera_frames):
                 camera_frames_tab(self.camera_frames_tab_state)
