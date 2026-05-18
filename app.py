@@ -38,11 +38,7 @@ class App:
 def main() -> None:
     data = DataFolder.load(Path('data/machine_hall/MH_01_easy/mav0'))
     instance = App(data)
-
-    @ui.page('/')
-    def index() -> None:
-        instance.setup_ui()
-
+    instance.setup_ui()
     ui.run(title='slam')
 
 if __name__ in {"__main__", "__mp_main__"}:

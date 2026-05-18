@@ -234,7 +234,7 @@ def _compute_plots(
 
 
 class SlamSolver:
-    def __init__(self, data: DataFolder, duration_s: float = 20.0) -> None:
+    def __init__(self, data: DataFolder, duration_s: float) -> None:
         self._data = data
         self._duration_s = duration_s
         self.plots: Optional[SlamResults] = None
