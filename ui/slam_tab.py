@@ -50,50 +50,51 @@ class SlamTabState:
         self._on_restart = on_restart
 
 
-def slam_tab(state: SlamTabState) -> Callable[[], None]:
-    with ui.column().classes('w-full'):
-        progress_label = ui.label('')
-        progress_bar = ui.linear_progress(value=0).classes('w-full')
-        error_label = ui.label('').classes('text-red-500').set_visibility(False)
-        img_positions = ui.image('').classes('w-full').set_visibility(False)
-        img_attitudes = ui.image('').classes('w-full').set_visibility(False)
-        img_angular_velocities = ui.image('').classes('w-full').set_visibility(False)
+def slam_tab(
+    state: SlamTabState,
+    progress_label: ui.label,
+    progress_bar: ui.linear_progress,
+    error_label: ui.label,
+) -> Callable[[], None]:
+    img_positions = ui.image('').classes('w-full').set_visibility(False)
+    img_attitudes = ui.image('').classes('w-full').set_visibility(False)
+    img_angular_velocities = ui.image('').classes('w-full').set_visibility(False)
 
-        def show_progress() -> None:
-            progress_label.set_visibility(True)
-            progress_bar.set_visibility(True)
-            error_label.set_visibility(False)
-            img_positions.set_visibility(False)
-            img_attitudes.set_visibility(False)
-            img_angular_velocities.set_visibility(False)
+    def show_progress() -> None:
+        progress_label.set_visibility(True)
+        progress_bar.set_visibility(True)
+        error_label.set_visibility(False)
+        img_positions.set_visibility(False)
+        img_attitudes.set_visibility(False)
+        img_angular_velocities.set_visibility(False)
 
-        def poll() -> None:
-            solver = state._solver
-            if solver.loading:
-                progress_label.text = solver.progress_label
-                progress_bar.value = solver.progress
-            elif solver.error:
-                progress_label.set_visibility(False)
-                progress_bar.set_visibility(False)
-                error_label.text = f'Error: {solver.error}'
-                error_label.set_visibility(True)
-                timer.deactivate()
-            elif solver.plots is not None:
-                progress_label.set_visibility(False)
-                progress_bar.set_visibility(False)
-                pos_img, att_img, omega_img = _render_plots(solver.plots)
-                img_positions.source = array_to_data_uri(pos_img)
-                img_attitudes.source = array_to_data_uri(att_img)
-                img_angular_velocities.source = array_to_data_uri(omega_img)
-                img_positions.set_visibility(True)
-                img_attitudes.set_visibility(True)
-                img_angular_velocities.set_visibility(True)
-                timer.deactivate()
+    def poll() -> None:
+        solver = state._solver
+        if solver.loading:
+            progress_label.text = solver.progress_label
+            progress_bar.value = solver.progress
+        elif solver.error:
+            progress_label.set_visibility(False)
+            progress_bar.set_visibility(False)
+            error_label.text = f'Error: {solver.error}'
+            error_label.set_visibility(True)
+            timer.deactivate()
+        elif solver.plots is not None:
+            progress_label.set_visibility(False)
+            progress_bar.set_visibility(False)
+            pos_img, att_img, omega_img = _render_plots(solver.plots)
+            img_positions.source = array_to_data_uri(pos_img)
+            img_attitudes.source = array_to_data_uri(att_img)
+            img_angular_velocities.source = array_to_data_uri(omega_img)
+            img_positions.set_visibility(True)
+            img_attitudes.set_visibility(True)
+            img_angular_velocities.set_visibility(True)
+            timer.deactivate()
 
-        def on_run_again() -> None:
-            show_progress()
-            state._on_restart()
-            timer.activate()
+    def on_run_again() -> None:
+        show_progress()
+        state._on_restart()
+        timer.activate()
 
-        timer = ui.timer(0.5, poll)
-        return on_run_again
+    timer = ui.timer(0.5, poll)
+    return on_run_again

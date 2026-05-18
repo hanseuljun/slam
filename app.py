@@ -17,7 +17,7 @@ class App:
         self.slam_solver.start()
         self.slam_tab_state = SlamTabState(self.slam_solver, on_restart=self.restart_slam)
         self.start_s: float = 0.0
-        self.duration_s: float = 20.0
+        self.duration_s: float = 5.0
         self.on_run_again = lambda: None
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
@@ -41,11 +41,15 @@ class App:
                       on_change=lambda e: setattr(self, 'duration_s', float(e.value)))
             ui.button('Run Again', on_click=lambda: self.on_run_again())
 
+        progress_label = ui.label('')
+        progress_bar = ui.linear_progress(value=0).classes('w-full')
+        error_label = ui.label('').classes('text-red-500').set_visibility(False)
+
         with ui.tab_panels(tabs, value=tab_camera_frames).classes('w-full'):
             with ui.tab_panel(tab_camera_frames):
                 camera_frames_tab(self.camera_frames_tab_state)
             with ui.tab_panel(tab_slam):
-                self.on_run_again = slam_tab(self.slam_tab_state)
+                self.on_run_again = slam_tab(self.slam_tab_state, progress_label, progress_bar, error_label)
             with ui.tab_panel(tab_triangulation):
                 triangulation_tab(self.triangulation_tab_state)
 
