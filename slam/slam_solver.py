@@ -117,12 +117,14 @@ def _compute_plots(
     data: DataFolder,
     set_progress: Callable[[float, str], None],
     stop_event: threading.Event,
+    start_s: float,
     duration_s: float,
 ) -> SlamResults:
     orb = cv2.ORB_create(nfeatures=2000)
-    min_ts = data.cam_timestamps_ns[0]
+    first_ts = data.cam_timestamps_ns[0]
+    min_ts = first_ts + int(start_s * 1e9)
     max_ts = min_ts + int(duration_s * 1e9)
-    indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if t <= max_ts]
+    indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if min_ts <= t <= max_ts]
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
@@ -234,8 +236,9 @@ def _compute_plots(
 
 
 class SlamSolver:
-    def __init__(self, data: DataFolder, duration_s: float = 20.0) -> None:
+    def __init__(self, data: DataFolder, start_s: float = 0.0, duration_s: float = 20.0) -> None:
         self._data = data
+        self._start_s = start_s
         self._duration_s = duration_s
         self.plots: Optional[SlamResults] = None
         self.loading: bool = False
@@ -251,7 +254,7 @@ class SlamSolver:
 
     def _compute(self, stop_event: threading.Event) -> None:
         try:
-            self.plots = _compute_plots(self._data, self._set_progress, stop_event, self._duration_s)
+            self.plots = _compute_plots(self._data, self._set_progress, stop_event, self._start_s, self._duration_s)
         except _Cancelled:
             pass
         except Exception as e:

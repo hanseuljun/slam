@@ -22,7 +22,7 @@ class App:
 
     def restart_slam(self) -> None:
         self.slam_solver._stop_event.set()
-        self.slam_solver = SlamSolver(self.data, self.slam_tab_state.duration_s)
+        self.slam_solver = SlamSolver(self.data, self.slam_tab_state.start_s, self.slam_tab_state.duration_s)
         self.slam_solver.start()
         self.slam_tab_state._solver = self.slam_solver
 
@@ -34,8 +34,10 @@ class App:
             tab_triangulation = ui.tab('Triangulation')
 
         with ui.row().classes('items-center'):
+            ui.number('Start time (s)', value=self.slam_tab_state.start_s, min=0, step=1,
+                      on_change=lambda e: setattr(self.slam_tab_state, 'start_s', float(e.value)))
             ui.number('End time (s)', value=self.slam_tab_state.duration_s, min=1, step=1,
-                        on_change=lambda e: setattr(self.slam_tab_state, 'duration_s', float(e.value)))
+                      on_change=lambda e: setattr(self.slam_tab_state, 'duration_s', float(e.value)))
             ui.button('Run Again', on_click=lambda: self.slam_tab_state.on_run_again())
 
         with ui.tab_panels(tabs, value=tab_camera_frames).classes('w-full'):

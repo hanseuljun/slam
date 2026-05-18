@@ -48,6 +48,7 @@ class SlamTabState:
     def __init__(self, solver: SlamSolver, on_restart: Callable[[], None]) -> None:
         self._solver = solver
         self._on_restart = on_restart
+        self.start_s: float = 0.0
         self.duration_s: float = 20.0
         self.on_run_again: Callable[[], None] = lambda: None
 
