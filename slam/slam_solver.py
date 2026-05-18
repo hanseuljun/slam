@@ -52,11 +52,16 @@ def _optimize_angular_velocities(
     return result.x.reshape(N - 1, 3), accumulate(result.x)
 
 
+class _Cancelled(Exception):
+    pass
+
+
 def _run_pnp(
     data: DataFolder,
     orb: cv2.ORB,
     indices_in_range: list[int],
     on_progress: Callable[[float], None],
+    stop_event: threading.Event,
 ) -> tuple[np.ndarray, np.ndarray]:
     keyframe_indices: list[int] = [0]
     keyframe_num_temporal_matches: Optional[int] = None
@@ -64,6 +69,8 @@ def _run_pnp(
     pnp_angular_velocities: list[np.ndarray] = []
     n = len(indices_in_range)
     for i in range(1, n):
+        if stop_event.is_set():
+            raise _Cancelled
         on_progress(i / n)
         try:
             rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(
@@ -110,6 +117,7 @@ class SlamPlots:
 def _compute_plots(
     data: DataFolder,
     set_progress: Callable[[float, str], None],
+    stop_event: threading.Event,
 ) -> SlamPlots:
     orb = cv2.ORB_create(nfeatures=2000)
     min_ts = data.cam_timestamps_ns[0]
@@ -120,6 +128,7 @@ def _compute_plots(
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
         data, orb, indices_in_range,
         on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
+        stop_event=stop_event,
     )
 
     set_progress(0.8, "Transforming poses...")
@@ -238,22 +247,29 @@ class SlamSolver:
         self.progress: float = 0.0
         self.progress_label: str = ""
         self._started: bool = False
+        self._stop_event: threading.Event = threading.Event()
 
     def _set_progress(self, value: float, label: str) -> None:
         self.progress = value
         self.progress_label = label
 
-    def _compute(self) -> None:
+    def _compute(self, stop_event: threading.Event) -> None:
         try:
-            self.plots = _compute_plots(self._data, self._set_progress)
+            self.plots = _compute_plots(self._data, self._set_progress, stop_event)
+        except _Cancelled:
+            pass
         except Exception as e:
             self.error = str(e)
         finally:
             self.loading = False
+
+    def _start_thread(self) -> None:
+        self._stop_event = threading.Event()
+        threading.Thread(target=self._compute, args=(self._stop_event,), daemon=True).start()
 
     def start(self) -> None:
         if self._started:
             return
         self._started = True
         self.loading = True
-        threading.Thread(target=self._compute, daemon=True).start()
+        self._start_thread()
