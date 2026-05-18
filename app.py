@@ -16,12 +16,15 @@ class App:
         self.slam_solver = SlamSolver(data)
         self.slam_solver.start()
         self.slam_tab_state = SlamTabState(self.slam_solver, on_restart=self.restart_slam)
+        self.start_s: float = 0.0
+        self.duration_s: float = 20.0
+        self.on_run_again = lambda: None
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
 
     def restart_slam(self) -> None:
         self.slam_solver._stop_event.set()
-        self.slam_solver = SlamSolver(self.data, self.slam_tab_state.start_s, self.slam_tab_state.duration_s)
+        self.slam_solver = SlamSolver(self.data, self.start_s, self.duration_s)
         self.slam_solver.start()
         self.slam_tab_state._solver = self.slam_solver
 
@@ -32,17 +35,17 @@ class App:
             tab_triangulation = ui.tab('Triangulation')
 
         with ui.row().classes('items-center'):
-            ui.number('Start time (s)', value=self.slam_tab_state.start_s, min=0, step=1,
-                      on_change=lambda e: setattr(self.slam_tab_state, 'start_s', float(e.value)))
-            ui.number('Duration (s)', value=self.slam_tab_state.duration_s, min=1, step=1,
-                      on_change=lambda e: setattr(self.slam_tab_state, 'duration_s', float(e.value)))
-            ui.button('Run Again', on_click=lambda: self.slam_tab_state.on_run_again())
+            ui.number('Start time (s)', value=self.start_s, min=0, step=1,
+                      on_change=lambda e: setattr(self, 'start_s', float(e.value)))
+            ui.number('Duration (s)', value=self.duration_s, min=1, step=1,
+                      on_change=lambda e: setattr(self, 'duration_s', float(e.value)))
+            ui.button('Run Again', on_click=lambda: self.on_run_again())
 
         with ui.tab_panels(tabs, value=tab_camera_frames).classes('w-full'):
             with ui.tab_panel(tab_camera_frames):
                 camera_frames_tab(self.camera_frames_tab_state)
             with ui.tab_panel(tab_slam):
-                slam_tab(self.slam_tab_state)
+                self.on_run_again = slam_tab(self.slam_tab_state)
             with ui.tab_panel(tab_triangulation):
                 triangulation_tab(self.triangulation_tab_state)
 

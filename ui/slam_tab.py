@@ -48,12 +48,9 @@ class SlamTabState:
     def __init__(self, solver: SlamSolver, on_restart: Callable[[], None]) -> None:
         self._solver = solver
         self._on_restart = on_restart
-        self.start_s: float = 0.0
-        self.duration_s: float = 20.0
-        self.on_run_again: Callable[[], None] = lambda: None
 
 
-def slam_tab(state: SlamTabState) -> None:
+def slam_tab(state: SlamTabState) -> Callable[[], None]:
     with ui.column().classes('w-full'):
         progress_label = ui.label('')
         progress_bar = ui.linear_progress(value=0).classes('w-full')
@@ -98,5 +95,5 @@ def slam_tab(state: SlamTabState) -> None:
             state._on_restart()
             timer.activate()
 
-        state.on_run_again = on_run_again
         timer = ui.timer(0.5, poll)
+        return on_run_again
