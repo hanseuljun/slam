@@ -20,24 +20,6 @@ def plot_positions(
     return fig
 
 
-def plot_angular_velocities(
-    series: list[tuple[np.ndarray, np.ndarray, str]],
-) -> plt.Figure:
-    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
-    fig.suptitle('Angular Velocity in Body Frame')
-
-    labels = ['wx', 'wy', 'wz']
-    for ax, i in zip([ax_wx, ax_wy, ax_wz], range(3)):
-        for times, angular_velocities, label in series:
-            ax.plot(times, angular_velocities[:, i], label=label)
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel(f'{labels[i]} [rad/s]')
-        ax.legend()
-
-    plt.tight_layout()
-    return fig
-
-
 def plot_attitudes(
     series: list[tuple[np.ndarray, np.ndarray, str]],
 ) -> plt.Figure:
@@ -60,33 +42,19 @@ def plot_attitudes(
     return fig
 
 
-def plot_attitudes_and_angular_velocities(
-    attitude_series: list[tuple[np.ndarray, np.ndarray, str]],
-    angular_velocity_series: list[tuple[np.ndarray, np.ndarray, str]],
+def plot_angular_velocities(
+    series: list[tuple[np.ndarray, np.ndarray, str]],
 ) -> plt.Figure:
-    fig = plt.figure(figsize=(18, 9))
-    fig.suptitle('Rotation Axes & Angular Velocity')
-    gs = fig.add_gridspec(3, 4)
+    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
+    fig.suptitle('Angular Velocity in Body Frame')
 
-    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
-    component_names = ['X', 'Y', 'Z']
-    omega_labels = ['wx', 'wy', 'wz']
-
-    for row in range(3):
-        for col in range(3):
-            ax = fig.add_subplot(gs[row, col])
-            for times, attitudes, label in attitude_series:
-                ax.plot(times, attitudes[:, col, row], label=label)
-            ax.set_xlabel('Time [s]')
-            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
-            ax.legend()
-
-        ax_omega = fig.add_subplot(gs[row, 3])
-        for times, angular_velocities, label in angular_velocity_series:
-            ax_omega.plot(times, angular_velocities[:, row], label=label)
-        ax_omega.set_xlabel('Time [s]')
-        ax_omega.set_ylabel(f'{omega_labels[row]} [rad/s]')
-        ax_omega.legend()
+    labels = ['wx', 'wy', 'wz']
+    for ax, i in zip([ax_wx, ax_wy, ax_wz], range(3)):
+        for times, angular_velocities, label in series:
+            ax.plot(times, angular_velocities[:, i], label=label)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{labels[i]} [rad/s]')
+        ax.legend()
 
     plt.tight_layout()
     return fig
