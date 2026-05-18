@@ -151,19 +151,19 @@ def _compute_plots(
     ])
 
     pnp_times = np.array([
-        (data.cam_timestamps_ns[indices_in_range[i]] - min_ts) / 1e9
+        (data.cam_timestamps_ns[indices_in_range[i]] - first_ts) / 1e9
         for i in range(len(pnp_poses_in_world))
     ])
     pnp_positions_in_world = pnp_poses_in_world[:, :3, 3]
     pnp_attitudes = pnp_poses_in_world[:, :3, :3]
     pnp_angular_velocity_times = np.array([
-        (data.cam_timestamps_ns[indices_in_range[i]] - min_ts) / 1e9
+        (data.cam_timestamps_ns[indices_in_range[i]] - first_ts) / 1e9
         for i in range(len(pnp_angular_velocities_from_rvec))
     ])
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
     gt_positions = np.array([s.position for s in gt_samples])
-    gt_times = np.array([(s.timestamp_ns - min_ts) / 1e9 for s in gt_samples])
+    gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
     gt_attitudes = np.array([_quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
@@ -174,7 +174,7 @@ def _compute_plots(
         R, _ = cv2.Rodrigues(rot)
         imu_attitudes.append(imu_attitudes[-1] @ R)
     imu_attitudes = np.array(imu_attitudes)
-    imu_times = np.array([(s.timestamp_ns - min_ts) / 1e9 for s in imu_samples])
+    imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
     imu_attitude_times = np.concatenate([[0.0], imu_times])
 
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -209,7 +209,7 @@ def _compute_plots(
         rvec_gt, _ = cv2.Rodrigues(R_rel)
         dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
         gt_angular_velocities.append(rvec_gt.flatten() / dt)
-        gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - min_ts) / 1e9)
+        gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - first_ts) / 1e9)
     gt_angular_velocities = np.array(gt_angular_velocities)
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
