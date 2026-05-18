@@ -29,13 +29,20 @@ def camera_frames_tab(state: CameraFramesTabState) -> None:
     n = len(state.data.cam_timestamps_ns)
     img = ui.image(source='').classes('w-full')
 
+    def frame_label_text() -> str:
+        ts_ns = state.data.cam_timestamps_ns[state.frame_index]
+        return f'frame {state.frame_index}  |  {ts_ns / 1e9:.3f} s'
+
     def on_slide(e) -> None:
         state.frame_index = int(e.value)
+        label.text = frame_label_text()
         image = state.current_image()
         if image is not None:
             img.source = array_to_data_uri(image)
 
-    ui.slider(min=0, max=n - 1, step=1, value=0, on_change=on_slide)
+    with ui.row().classes('w-full items-center'):
+        ui.slider(min=0, max=n - 1, step=1, value=0, on_change=on_slide).classes('flex-grow')
+        label = ui.label(frame_label_text())
 
     image = state.current_image()
     if image is not None:

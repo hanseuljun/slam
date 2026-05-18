@@ -22,19 +22,19 @@ class App:
 
     def setup_ui(self) -> None:
         with ui.tabs().classes('w-full') as tabs:
-            tab_camera = ui.tab('Camera Frames')
+            tab_camera_frames = ui.tab('Camera Frames')
             tab_data = ui.tab('Data')
             tab_slam = ui.tab('SLAM')
-            tab_tri = ui.tab('Triangulation')
+            tab_triangulation = ui.tab('Triangulation')
 
-        with ui.tab_panels(tabs, value=tab_camera).classes('w-full'):
-            with ui.tab_panel(tab_camera):
+        with ui.tab_panels(tabs, value=tab_camera_frames).classes('w-full'):
+            with ui.tab_panel(tab_camera_frames):
                 camera_frames_tab(self.camera_frames_tab_state)
             with ui.tab_panel(tab_data):
                 data_tab(self.data)
             with ui.tab_panel(tab_slam):
                 slam_tab(self.slam_tab_state)
-            with ui.tab_panel(tab_tri):
+            with ui.tab_panel(tab_triangulation):
                 triangulation_tab(self.triangulation_tab_state)
 
 
