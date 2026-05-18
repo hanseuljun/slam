@@ -3,6 +3,7 @@ from pathlib import Path
 from nicegui import ui
 
 from slam import DataFolder
+from slam.slam_solver import SlamSolver
 from ui.camera_frames_tab import CameraFramesTabState, camera_frames_tab
 from ui.data_tab import data_tab
 from ui.slam_tab import SlamTabState, slam_tab
@@ -13,9 +14,17 @@ class App:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.camera_frames_tab_state = CameraFramesTabState(data)
-        self.slam_tab_state = SlamTabState(data)
+        self.slam_solver = SlamSolver(data)
+        self.slam_solver.start()
+        self.slam_tab_state = SlamTabState(self.slam_solver, on_restart=self.restart_slam)
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
+
+    def restart_slam(self) -> None:
+        self.slam_solver._stop_event.set()
+        self.slam_solver = SlamSolver(self.data, self.slam_tab_state.duration_s)
+        self.slam_solver.start()
+        self.slam_tab_state._solver = self.slam_solver
 
     def setup_ui(self) -> None:
         with ui.tabs().classes('w-full') as tabs:
