@@ -1,3 +1,5 @@
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import cv2
@@ -23,17 +25,29 @@ class FeatureDetectionSolver:
         self._data = data
         self.progress: float = 0.0
 
-    def run(self) -> FeatureDetectionResult:
+    def _process_frame(self, ts: int) -> FeatureDetectionFrame:
         orb = cv2.ORB_create(nfeatures=2000)
-        frames = []
-        n = len(self._data.cam_timestamps_ns)
-        for i, ts in enumerate(self._data.cam_timestamps_ns):
-            img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-            keypoints, descriptors = orb.detectAndCompute(img, None)
-            frames.append(FeatureDetectionFrame(
-                timestamp_ns=ts,
-                keypoints=list(keypoints),
-                descriptors=descriptors,
-            ))
-            self.progress = (i + 1) / n
+        img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        keypoints, descriptors = orb.detectAndCompute(img, None)
+        return FeatureDetectionFrame(
+            timestamp_ns=ts,
+            keypoints=list(keypoints),
+            descriptors=descriptors,
+        )
+
+    def run(self) -> FeatureDetectionResult:
+        timestamps = self._data.cam_timestamps_ns
+        n = len(timestamps)
+        frames: list[FeatureDetectionFrame | None] = [None] * n
+        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            future_to_index = {
+                executor.submit(self._process_frame, ts): i
+                for i, ts in enumerate(timestamps)
+            }
+            completed = 0
+            for future in as_completed(future_to_index):
+                i = future_to_index[future]
+                frames[i] = future.result()
+                completed += 1
+                self.progress = completed / n
         return FeatureDetectionResult(frames=frames)
