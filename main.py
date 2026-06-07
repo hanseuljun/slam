@@ -5,6 +5,7 @@ from imgui_bundle import imgui, hello_imgui, immapp
 from slam import DataFolder
 from slam.slam_solver import SlamSolver
 from ui.data_view import DataViewModel, data_view
+from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
 from ui.slam_view import SlamViewModel, slam_view
 from ui.time_range_view import TimeRangeModel, time_range_view
 from ui.triangulation_view import TriangulationViewModel, triangulation_view
@@ -18,6 +19,8 @@ class RootViewModel:
         self.slam_solver.start()
         self.slam_view_model = SlamViewModel(self.slam_solver)
         self.time_range_model = TimeRangeModel()
+        self.feature_detection_view_model = FeatureDetectionViewModel(data)
+        self.feature_detection_view_model.start()
         self.triangulation_view_model = TriangulationViewModel(data)
         self.triangulation_view_model.start()
 
@@ -51,12 +54,16 @@ def root_view(model: RootViewModel) -> None:
             data_view(model.data_view_model)
             imgui.end_tab_item()
 
-        if imgui.begin_tab_item("SLAM")[0]:
-            slam_view(model.slam_view_model)
+        if imgui.begin_tab_item("Feature Detection")[0]:
+            feature_detection_view(model.feature_detection_view_model)
             imgui.end_tab_item()
 
         if imgui.begin_tab_item("Triangulation")[0]:
             triangulation_view(model.triangulation_view_model)
+            imgui.end_tab_item()
+
+        if imgui.begin_tab_item("SLAM")[0]:
+            slam_view(model.slam_view_model)
             imgui.end_tab_item()
 
         imgui.end_tab_bar()
