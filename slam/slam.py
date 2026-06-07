@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import cv2
+import gtsam
 import numpy as np
 from scipy.optimize import least_squares
 
@@ -181,7 +182,6 @@ def _optimize_with_gtsam(
     pnp_poses_in_world: np.ndarray,
     imu_angular_velocities_at_cam_times: np.ndarray,
 ) -> SlamGtsamResult:
-    import gtsam
     from gtsam.symbol_shorthand import L, P
 
     N = len(pnp_poses_in_world)

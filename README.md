@@ -2,8 +2,7 @@
 
 ## setup
 
-- `source venv/bin/activate`
-- `python main.py`
+- `uv run python main.py`
 
 ## data
 
