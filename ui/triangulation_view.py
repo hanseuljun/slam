@@ -40,7 +40,7 @@ class _Results:
     points_3d_plot: np.ndarray
 
 
-class TriangulationViewState:
+class TriangulationViewModel:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._results: Optional[_Results] = None
@@ -136,20 +136,20 @@ class TriangulationViewState:
         threading.Thread(target=self._compute, daemon=True).start()
 
 
-def triangulation_view(state: TriangulationViewState) -> None:
-    if state._loading:
+def triangulation_view(model: TriangulationViewModel) -> None:
+    if model._loading:
         imgui.text("Computing triangulation...")
         return
-    if state._error:
-        imgui.text(f"Error: {state._error}")
+    if model._error:
+        imgui.text(f"Error: {model._error}")
         return
-    if state._results is None:
+    if model._results is None:
         return
 
-    r = state._results
-    if state._tex_keypoints is None:
-        state._tex_keypoints = _to_texture(r.keypoints_plot)
-        state._tex_3d = _to_texture(r.points_3d_plot)
+    r = model._results
+    if model._tex_keypoints is None:
+        model._tex_keypoints = _to_texture(r.keypoints_plot)
+        model._tex_3d = _to_texture(r.points_3d_plot)
 
     imgui.begin_child("##tri_scroll", (0, 0), False)
     imgui.text(f"cam0 keypoints: {r.n_cam0_keypoints}")
@@ -161,8 +161,8 @@ def triangulation_view(state: TriangulationViewState) -> None:
     imgui.text(f"Median reprojection error: {r.median_reprojection_error:.2f} px")
     imgui.text(f"Mean reprojection error: {r.mean_reprojection_error:.2f} px")
     imgui.separator()
-    tex = state._tex_keypoints
+    tex = model._tex_keypoints
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-    tex = state._tex_3d
+    tex = model._tex_3d
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
     imgui.end_child()

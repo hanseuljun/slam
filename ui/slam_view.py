@@ -48,7 +48,7 @@ def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndar
     return _fig_to_image(fig_pos), _fig_to_image(fig_att), _fig_to_image(fig_omega)
 
 
-class SlamViewState:
+class SlamViewModel:
     def __init__(self, solver: SlamSolver) -> None:
         self._solver = solver
         self._last_solver: Optional[SlamSolver] = None
@@ -57,14 +57,14 @@ class SlamViewState:
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
 
 
-def slam_view(state: SlamViewState) -> None:
-    if state._last_solver is not state._solver:
-        state._tex_positions = None
-        state._tex_attitudes = None
-        state._tex_angular_velocities = None
-        state._last_solver = state._solver
+def slam_view(model: SlamViewModel) -> None:
+    if model._last_solver is not model._solver:
+        model._tex_positions = None
+        model._tex_attitudes = None
+        model._tex_angular_velocities = None
+        model._last_solver = model._solver
 
-    solver = state._solver
+    solver = model._solver
     if solver.loading:
         imgui.text(solver.progress_label)
         imgui.progress_bar(solver.progress, (-1, 0))
@@ -75,17 +75,17 @@ def slam_view(state: SlamViewState) -> None:
     if solver.plots is None:
         return
 
-    if state._tex_positions is None:
+    if model._tex_positions is None:
         pos_img, att_img, omega_img = _render_plots(solver.plots)
-        state._tex_positions = _to_texture(pos_img)
-        state._tex_attitudes = _to_texture(att_img)
-        state._tex_angular_velocities = _to_texture(omega_img)
+        model._tex_positions = _to_texture(pos_img)
+        model._tex_attitudes = _to_texture(att_img)
+        model._tex_angular_velocities = _to_texture(omega_img)
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
-    tex = state._tex_positions
+    tex = model._tex_positions
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-    tex = state._tex_attitudes
+    tex = model._tex_attitudes
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-    tex = state._tex_angular_velocities
+    tex = model._tex_angular_velocities
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
     imgui.end_child()
