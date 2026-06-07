@@ -10,6 +10,44 @@ from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 
 
+@dataclass
+class SlamPnpResult:
+    times: np.ndarray
+    positions: np.ndarray
+    attitudes: np.ndarray
+    angular_velocity_times: np.ndarray
+    angular_velocities: np.ndarray
+
+
+@dataclass
+class SlamScipyResult:
+    attitudes: np.ndarray
+    angular_velocities: np.ndarray
+
+
+@dataclass
+class SlamGtsamResult:
+    attitudes: np.ndarray  # (N, 3, 3)
+    positions: np.ndarray  # (N, 3)
+
+
+@dataclass
+class SlamResult:
+    gt_times: np.ndarray
+    gt_positions: np.ndarray
+    gt_attitudes: np.ndarray
+    gt_angular_velocity_times: np.ndarray
+    gt_angular_velocities: np.ndarray
+    imu_attitude_times: np.ndarray
+    imu_attitudes: np.ndarray
+    imu_times: np.ndarray
+    imu_angular_velocities: np.ndarray
+    imu_angular_velocities_at_cam_times: np.ndarray
+    pnp: SlamPnpResult
+    scipy: SlamScipyResult
+    gtsam: SlamGtsamResult
+
+
 def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
     w, x, y, z = q
     return np.array([
@@ -110,7 +148,7 @@ def _optimize_angular_velocities(
     imu_angular_velocities_at_cam_times: np.ndarray,
     pnp_attitudes: np.ndarray,
     cam_rate_hz: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> SlamScipyResult:
     N = len(pnp_attitudes)
     x0 = imu_angular_velocities_at_cam_times[:-1].flatten()
 
@@ -130,7 +168,10 @@ def _optimize_angular_velocities(
         return np.concatenate([omega_res, attitude_res])
 
     result = least_squares(residuals, x0, method='lm')
-    return result.x.reshape(N - 1, 3), accumulate(result.x)
+    return SlamScipyResult(
+        attitudes=accumulate(result.x),
+        angular_velocities=result.x.reshape(N - 1, 3),
+    )
 
 
 def _optimize_with_gtsam(
@@ -139,7 +180,7 @@ def _optimize_with_gtsam(
     stereo_matching_result: StereoMatchingResult,
     pnp_poses_in_world: np.ndarray,
     imu_angular_velocities_at_cam_times: np.ndarray,
-) -> 'SlamGtsamResult':
+) -> SlamGtsamResult:
     import gtsam
     from gtsam.symbol_shorthand import L, P
 
@@ -210,44 +251,6 @@ def _optimize_with_gtsam(
     result = gtsam.LevenbergMarquardtOptimizer(graph, initial).optimize()
     poses = np.array([result.atPose3(P(i)).matrix() for i in range(N)])
     return SlamGtsamResult(attitudes=poses[:, :3, :3], positions=poses[:, :3, 3])
-
-
-@dataclass
-class SlamPnpResult:
-    times: np.ndarray
-    positions: np.ndarray
-    attitudes: np.ndarray
-    angular_velocity_times: np.ndarray
-    angular_velocities: np.ndarray
-
-
-@dataclass
-class SlamAngularVelocityOptimizationResult:
-    attitudes: np.ndarray
-    angular_velocities: np.ndarray
-
-
-@dataclass
-class SlamGtsamResult:
-    attitudes: np.ndarray  # (N, 3, 3)
-    positions: np.ndarray  # (N, 3)
-
-
-@dataclass
-class SlamResult:
-    gt_times: np.ndarray
-    gt_positions: np.ndarray
-    gt_attitudes: np.ndarray
-    gt_angular_velocity_times: np.ndarray
-    gt_angular_velocities: np.ndarray
-    imu_attitude_times: np.ndarray
-    imu_attitudes: np.ndarray
-    imu_times: np.ndarray
-    imu_angular_velocities: np.ndarray
-    imu_angular_velocities_at_cam_times: np.ndarray
-    pnp: SlamPnpResult
-    optimization: SlamAngularVelocityOptimizationResult
-    gtsam: SlamGtsamResult
 
 
 def _compute(
@@ -340,7 +343,7 @@ def _compute(
         np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in pnp_cam_timestamps_ns
     ])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
-    optimized_angular_velocities, optimized_attitudes = _optimize_angular_velocities(
+    optimization = _optimize_angular_velocities(
         imu_angular_velocities_at_cam_times, pnp_attitudes, data.cam0_rate_hz
     )
 
@@ -369,10 +372,7 @@ def _compute(
             angular_velocity_times=pnp_angular_velocity_times,
             angular_velocities=pnp_angular_velocities_from_rvec,
         ),
-        optimization=SlamAngularVelocityOptimizationResult(
-            attitudes=optimized_attitudes,
-            angular_velocities=optimized_angular_velocities,
-        ),
+        scipy=optimization,
         gtsam=gtsam_result,
     )
 
