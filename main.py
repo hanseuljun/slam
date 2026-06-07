@@ -3,11 +3,12 @@ from typing import Optional
 
 from imgui_bundle import imgui, hello_imgui, immapp
 
-from slam import DataFolder, FeatureDetectionResult
+from slam import DataFolder, FeatureDetectionResult, StereoMatchingResult
 from slam.slam_solver import SlamSolver
 from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
 from ui.slam_view import SlamViewModel, slam_view
+from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
 from ui.time_range_view import TimeRangeModel, time_range_view
 from ui.triangulation_view import TriangulationViewModel, triangulation_view
 
@@ -24,11 +25,17 @@ class RootViewModel:
             on_result=self._on_feature_detection_result,
         )
         self.feature_detection_view_model.start()
+        self.stereo_matching_result: Optional[StereoMatchingResult] = None
+        self.stereo_matching_view_model = StereoMatchingViewModel(
+            data,
+            on_result=lambda result: setattr(self, "stereo_matching_result", result),
+        )
         self.triangulation_view_model = TriangulationViewModel(data)
         self.triangulation_view_model.start()
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
+        self.stereo_matching_view_model.start(result)
         slam_solver = SlamSolver(
             self.data,
             result,
@@ -68,6 +75,10 @@ def root_view(model: RootViewModel) -> None:
 
         if imgui.begin_tab_item("Feature Detection")[0]:
             feature_detection_view(model.feature_detection_view_model)
+            imgui.end_tab_item()
+
+        if imgui.begin_tab_item("Stereo Matching")[0]:
+            stereo_matching_view(model.stereo_matching_view_model)
             imgui.end_tab_item()
 
         if imgui.begin_tab_item("Triangulation")[0]:
