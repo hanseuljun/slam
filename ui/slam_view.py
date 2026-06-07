@@ -135,31 +135,31 @@ def slam_view(model: SlamViewModel) -> None:
     if solver.error:
         imgui.text(f"Error: {solver.error}")
         return
-    if solver.plots is None:
+    if solver.result is None:
         return
 
-    results = solver.plots
+    result = solver.result
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
     if _checkboxes(model.pos_enabled, "pos"):
         model._tex_positions = None
     if model._tex_positions is None:
-        model._tex_positions = image_to_texture(_render_positions(results, model.pos_enabled))
+        model._tex_positions = image_to_texture(_render_positions(result, model.pos_enabled))
     tex = model._tex_positions
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.att_enabled, "att"):
         model._tex_attitudes = None
     if model._tex_attitudes is None:
-        model._tex_attitudes = image_to_texture(_render_attitudes(results, model.att_enabled))
+        model._tex_attitudes = image_to_texture(_render_attitudes(result, model.att_enabled))
     tex = model._tex_attitudes
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.omega_enabled, "omega"):
         model._tex_angular_velocities = None
     if model._tex_angular_velocities is None:
-        model._tex_angular_velocities = image_to_texture(_render_angular_velocities(results, model.omega_enabled))
+        model._tex_angular_velocities = image_to_texture(_render_angular_velocities(result, model.omega_enabled))
     tex = model._tex_angular_velocities
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 

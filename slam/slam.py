@@ -10,7 +10,16 @@ from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 
 
-def solve_pnp(
+def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
+    w, x, y, z = q
+    return np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)],
+    ])
+
+
+def _solve_pnp(
     data: DataFolder,
     points_3d: np.ndarray,
     stereo_matches: list,
@@ -53,13 +62,48 @@ def solve_pnp(
     return rvec, tvec, len(temporal_good_matches), reprojection_error
 
 
-def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
-    w, x, y, z = q
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)],
-    ])
+def _run_pnp(
+    data: DataFolder,
+    feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
+    on_progress: Callable[[float], None],
+) -> tuple[np.ndarray, np.ndarray]:
+    keyframe_indices: list[int] = [0]
+    keyframe_num_temporal_matches: Optional[int] = None
+    pnp_poses: list[np.ndarray] = [np.eye(4)]
+    pnp_angular_velocities: list[np.ndarray] = []
+    n = len(stereo_matching_result.frames)
+    for i in range(1, n):
+        on_progress(i / n)
+        try:
+            kf_idx = keyframe_indices[-1]
+            kf_fd = feature_detection_result.frames[kf_idx]
+            kf_sm = stereo_matching_result.frames[kf_idx]
+            cf_fd = feature_detection_result.frames[i]
+            rvec, tvec, num_temporal_matches, _ = _solve_pnp(
+                data,
+                kf_sm.points_3d, kf_sm.matches,
+                kf_fd.cam0_descriptors,
+                cf_fd.cam0_keypoints, cf_fd.cam0_descriptors,
+            )
+        except Exception as e:
+            print(f"_solve_pnp failed at i={i}: {e}")
+            continue
+        if keyframe_num_temporal_matches is None:
+            keyframe_num_temporal_matches = num_temporal_matches
+        M = np.linalg.inv(data.cam0_extrinsics)
+        rvec = M[:3, :3] @ rvec
+        tvec = M[:3, :3] @ tvec
+        pnp_angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
+        R, _ = cv2.Rodrigues(rvec)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = tvec.flatten()
+        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ T)
+        if num_temporal_matches < keyframe_num_temporal_matches / 2:
+            keyframe_indices.append(i)
+            keyframe_num_temporal_matches = None
+    return np.array(pnp_poses), np.array(pnp_angular_velocities)
 
 
 def _optimize_angular_velocities(
@@ -87,50 +131,6 @@ def _optimize_angular_velocities(
 
     result = least_squares(residuals, x0, method='lm')
     return result.x.reshape(N - 1, 3), accumulate(result.x)
-
-
-def _run_pnp(
-    data: DataFolder,
-    feature_detection_result: FeatureDetectionResult,
-    stereo_matching_result: StereoMatchingResult,
-    on_progress: Callable[[float], None],
-) -> tuple[np.ndarray, np.ndarray]:
-    keyframe_indices: list[int] = [0]
-    keyframe_num_temporal_matches: Optional[int] = None
-    pnp_poses: list[np.ndarray] = [np.eye(4)]
-    pnp_angular_velocities: list[np.ndarray] = []
-    n = len(stereo_matching_result.frames)
-    for i in range(1, n):
-        on_progress(i / n)
-        try:
-            kf_idx = keyframe_indices[-1]
-            kf_fd = feature_detection_result.frames[kf_idx]
-            kf_sm = stereo_matching_result.frames[kf_idx]
-            cf_fd = feature_detection_result.frames[i]
-            rvec, tvec, num_temporal_matches, _ = solve_pnp(
-                data,
-                kf_sm.points_3d, kf_sm.matches,
-                kf_fd.cam0_descriptors,
-                cf_fd.cam0_keypoints, cf_fd.cam0_descriptors,
-            )
-        except Exception as e:
-            print(f"solve_pnp failed at i={i}: {e}")
-            continue
-        if keyframe_num_temporal_matches is None:
-            keyframe_num_temporal_matches = num_temporal_matches
-        M = np.linalg.inv(data.cam0_extrinsics)
-        rvec = M[:3, :3] @ rvec
-        tvec = M[:3, :3] @ tvec
-        pnp_angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
-        R, _ = cv2.Rodrigues(rvec)
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = tvec.flatten()
-        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ T)
-        if num_temporal_matches < keyframe_num_temporal_matches / 2:
-            keyframe_indices.append(i)
-            keyframe_num_temporal_matches = None
-    return np.array(pnp_poses), np.array(pnp_angular_velocities)
 
 
 @dataclass
@@ -164,7 +164,7 @@ class SlamResult:
     optimization: SlamAngularVelocityOptimizationResult
 
 
-def _compute_plots(
+def _compute(
     data: DataFolder,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
@@ -290,7 +290,7 @@ class SlamSolver:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
-        self.plots: Optional[SlamResult] = None
+        self.result: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
         self.progress: float = 0.0
@@ -302,7 +302,7 @@ class SlamSolver:
 
     def run(self) -> None:
         try:
-            self.plots = _compute_plots(
+            self.result = _compute(
                 self._data, self._feature_detection_result,
                 self._stereo_matching_result, self._set_progress,
             )
