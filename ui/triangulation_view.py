@@ -9,21 +9,7 @@ import matplotlib.pyplot as plt
 from imgui_bundle import imgui, hello_imgui
 
 from slam import DataFolder, triangulate_stereo_matches
-
-
-def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
-    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
-    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
-
-
-def _fig_to_image(fig: plt.Figure) -> np.ndarray:
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    arr = np.frombuffer(buf.read(), dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    plt.close(fig)
-    return img
+from ui.utils import figure_to_image, image_to_texture
 
 
 @dataclass
@@ -99,7 +85,7 @@ class TriangulationViewModel:
             ax3.set_title(f'Reprojected 3D points ({len(projected_points)})')
             ax3.axis('off')
             plt.tight_layout()
-            keypoints_plot = _fig_to_image(fig)
+            keypoints_plot = figure_to_image(fig)
 
             fig = plt.figure(figsize=(10, 8))
             ax = fig.add_subplot(111, projection='3d')
@@ -109,7 +95,7 @@ class TriangulationViewModel:
             ax.set_zlabel('Z [m]')
             ax.set_title('Triangulated 3D points')
             plt.tight_layout()
-            points_3d_plot = _fig_to_image(fig)
+            points_3d_plot = figure_to_image(fig)
 
             self._results = _Results(
                 n_cam0_keypoints=len(cam0_keypoints),
@@ -148,8 +134,8 @@ def triangulation_view(model: TriangulationViewModel) -> None:
 
     r = model._results
     if model._tex_keypoints is None:
-        model._tex_keypoints = _to_texture(r.keypoints_plot)
-        model._tex_3d = _to_texture(r.points_3d_plot)
+        model._tex_keypoints = image_to_texture(r.keypoints_plot)
+        model._tex_3d = image_to_texture(r.points_3d_plot)
 
     imgui.begin_child("##tri_scroll", (0, 0), False)
     imgui.text(f"cam0 keypoints: {r.n_cam0_keypoints}")

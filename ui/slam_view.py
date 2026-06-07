@@ -1,30 +1,13 @@
-import io
 from typing import Optional
 
-import cv2
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
 from slam.plot import plot_angular_velocities, plot_attitudes, plot_positions
 from slam.slam_solver import SlamResults, SlamSolver
-
-
-def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
-    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
-    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
-
-
-def _fig_to_image(fig: plt.Figure) -> np.ndarray:
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    arr = np.frombuffer(buf.read(), dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    plt.close(fig)
-    return img
+from ui.utils import figure_to_image, image_to_texture
 
 
 def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -45,7 +28,7 @@ def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndar
         (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
         (results.pnp_angular_velocity_times, results.optimized_angular_velocities, 'opt'),
     ])
-    return _fig_to_image(fig_pos), _fig_to_image(fig_att), _fig_to_image(fig_omega)
+    return figure_to_image(fig_pos), figure_to_image(fig_att), figure_to_image(fig_omega)
 
 
 class SlamViewModel:
@@ -77,9 +60,9 @@ def slam_view(model: SlamViewModel) -> None:
 
     if model._tex_positions is None:
         pos_img, att_img, omega_img = _render_plots(solver.plots)
-        model._tex_positions = _to_texture(pos_img)
-        model._tex_attitudes = _to_texture(att_img)
-        model._tex_angular_velocities = _to_texture(omega_img)
+        model._tex_positions = image_to_texture(pos_img)
+        model._tex_attitudes = image_to_texture(att_img)
+        model._tex_angular_velocities = image_to_texture(omega_img)
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
     tex = model._tex_positions

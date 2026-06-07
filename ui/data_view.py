@@ -5,14 +5,7 @@ import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
 from slam import DataFolder
-
-
-def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
-    if image.ndim == 2:
-        rgba = np.stack([image, image, image, np.full_like(image, 255)], axis=-1)
-    else:
-        rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
-    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
+from ui.utils import image_to_texture
 
 
 class DataViewModel:
@@ -32,7 +25,7 @@ class DataViewModel:
             )
             self._cached_index = self.frame_index
         if self._cached_image is not None and self._texture is None:
-            self._texture = _to_texture(self._cached_image)
+            self._texture = image_to_texture(self._cached_image)
         return self._texture
 
 
