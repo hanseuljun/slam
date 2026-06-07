@@ -143,8 +143,15 @@ class SlamPnpResult:
 
 
 @dataclass
+class SlamAngularVelocityOptimizationResult:
+    attitudes: np.ndarray
+    angular_velocities: np.ndarray
+
+
+@dataclass
 class SlamResult:
     pnp: SlamPnpResult
+    optimization: SlamAngularVelocityOptimizationResult
     imu_attitude_times: np.ndarray
     imu_attitudes: np.ndarray
     imu_times: np.ndarray
@@ -155,8 +162,6 @@ class SlamResult:
     gt_attitudes: np.ndarray
     gt_angular_velocity_times: np.ndarray
     gt_angular_velocities: np.ndarray
-    optimized_attitudes: np.ndarray
-    optimized_angular_velocities: np.ndarray
 
 
 def _compute_plots(
@@ -268,13 +273,15 @@ def _compute_plots(
         imu_times=imu_times,
         imu_angular_velocities=imu_angular_velocities,
         imu_angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
+        optimization=SlamAngularVelocityOptimizationResult(
+            attitudes=optimized_attitudes,
+            angular_velocities=optimized_angular_velocities,
+        ),
         gt_times=gt_times,
         gt_positions=gt_positions,
         gt_attitudes=gt_attitudes,
         gt_angular_velocity_times=gt_angular_velocity_times,
         gt_angular_velocities=gt_angular_velocities,
-        optimized_attitudes=optimized_attitudes,
-        optimized_angular_velocities=optimized_angular_velocities,
     )
 
 

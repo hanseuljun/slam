@@ -70,7 +70,7 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
         (results.pnp.times, results.pnp.attitudes, 'pnp'),
         (results.imu_attitude_times, results.imu_attitudes, 'imu'),
         (results.gt_times, results.gt_attitudes, 'gt'),
-        (results.pnp.times, results.optimized_attitudes, 'opt'),
+        (results.pnp.times, results.optimization.attitudes, 'opt'),
     ]
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
@@ -81,7 +81,7 @@ def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) ->
         (results.imu_times, results.imu_angular_velocities, 'imu'),
         (results.pnp.times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
         (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
-        (results.pnp.angular_velocity_times, results.optimized_angular_velocities, 'opt'),
+        (results.pnp.angular_velocity_times, results.optimization.angular_velocities, 'opt'),
     ]
     return figure_to_image(_plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
 
