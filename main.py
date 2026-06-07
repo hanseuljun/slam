@@ -29,7 +29,7 @@ class RootViewModel:
         self.triangulation_view_model = TriangulationViewModel(data)
         self.triangulation_view_model.start()
 
-    def restart_slam(self) -> None:
+    def restart(self) -> None:
         self.slam_solver._stop_event.set()
         self.slam_solver = SlamSolver(
             self.data,
@@ -38,6 +38,13 @@ class RootViewModel:
         )
         self.slam_solver.start()
         self.slam_view_model._solver = self.slam_solver
+
+        self.feature_detection_result = None
+        self.feature_detection_view_model = FeatureDetectionViewModel(
+            self.data,
+            on_result=lambda result: setattr(self, "feature_detection_result", result),
+        )
+        self.feature_detection_view_model.start()
 
 
 def root_view(model: RootViewModel) -> None:
@@ -52,7 +59,7 @@ def root_view(model: RootViewModel) -> None:
         | imgui.WindowFlags_.no_scrollbar,
     )
 
-    time_range_view(model.time_range_model, model.restart_slam)
+    time_range_view(model.time_range_model, model.restart)
 
     if imgui.begin_tab_bar("##tabs"):
         if imgui.begin_tab_item("Data")[0]:
