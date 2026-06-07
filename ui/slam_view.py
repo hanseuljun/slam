@@ -90,8 +90,6 @@ class SlamViewModel:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._solver: Optional[SlamSolver] = None
-        self._last_solver: Optional[SlamSolver] = None
-        self._stop_event: Optional[threading.Event] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
@@ -104,16 +102,13 @@ class SlamViewModel:
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
     ) -> None:
-        if self._stop_event is not None:
-            self._stop_event.set()
-        self._stop_event = threading.Event()
         self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result)
-        threading.Thread(target=self._solver.run, args=(self._stop_event,), daemon=True).start()
+        self._tex_positions = None
+        self._tex_attitudes = None
+        self._tex_angular_velocities = None
+        threading.Thread(target=self._solver.run, daemon=True).start()
 
     def stop(self) -> None:
-        if self._stop_event is not None:
-            self._stop_event.set()
-        self._stop_event = None
         self._solver = None
 
 
@@ -129,12 +124,6 @@ def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
 
 
 def slam_view(model: SlamViewModel) -> None:
-    if model._last_solver is not model._solver:
-        model._tex_positions = None
-        model._tex_attitudes = None
-        model._tex_angular_velocities = None
-        model._last_solver = model._solver
-
     solver = model._solver
     if solver is None:
         imgui.text("Waiting for stereo matching...")

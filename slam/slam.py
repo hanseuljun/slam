@@ -1,4 +1,3 @@
-import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -90,16 +89,11 @@ def _optimize_angular_velocities(
     return result.x.reshape(N - 1, 3), accumulate(result.x)
 
 
-class _Cancelled(Exception):
-    pass
-
-
 def _run_pnp(
     data: DataFolder,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     on_progress: Callable[[float], None],
-    stop_event: threading.Event,
 ) -> tuple[np.ndarray, np.ndarray]:
     keyframe_indices: list[int] = [0]
     keyframe_num_temporal_matches: Optional[int] = None
@@ -107,8 +101,6 @@ def _run_pnp(
     pnp_angular_velocities: list[np.ndarray] = []
     n = len(stereo_matching_result.frames)
     for i in range(1, n):
-        if stop_event.is_set():
-            raise _Cancelled
         on_progress(i / n)
         try:
             kf_idx = keyframe_indices[-1]
@@ -172,7 +164,6 @@ def _compute_plots(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     set_progress: Callable[[float, str], None],
-    stop_event: threading.Event,
 ) -> SlamResult:
     first_ts = data.cam_timestamps_ns[0]
     max_ts = stereo_matching_result.frames[-1].timestamp_ns
@@ -181,7 +172,6 @@ def _compute_plots(
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
         data, feature_detection_result, stereo_matching_result,
         on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
-        stop_event=stop_event,
     )
 
     set_progress(0.8, "Transforming poses...")
@@ -303,14 +293,12 @@ class SlamSolver:
         self.progress = value
         self.progress_label = label
 
-    def run(self, stop_event: threading.Event) -> None:
+    def run(self) -> None:
         try:
             self.plots = _compute_plots(
                 self._data, self._feature_detection_result,
-                self._stereo_matching_result, self._set_progress, stop_event,
+                self._stereo_matching_result, self._set_progress,
             )
-        except _Cancelled:
-            pass
         except Exception as e:
             self.error = str(e)
         finally:
