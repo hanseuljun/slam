@@ -4,7 +4,7 @@ from typing import Optional
 from imgui_bundle import imgui, hello_imgui, immapp
 
 from slam import DataFolder, FeatureDetectionResult, StereoMatchingResult
-from ui.coordinate_mapping_check_view import CoordinateMappingCheckViewModel, coordinate_mapping_check_view
+from ui.coordinate_mapping_view import CoordinateMappingViewModel, coordinate_mapping_view
 from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
 from ui.slam_view import SlamViewModel, slam_view
@@ -31,7 +31,7 @@ class RootViewModel:
             data,
             on_result=self._on_stereo_matching_result,
         )
-        self.coordinate_mapping_check_view_model = CoordinateMappingCheckViewModel(data)
+        self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
 
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
@@ -40,14 +40,14 @@ class RootViewModel:
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
-        self.coordinate_mapping_check_view_model.start(self.feature_detection_result, result)
+        self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
         self.slam_view_model.start(self.feature_detection_result, result)
 
     def restart(self) -> None:
         self.slam_view_model.stop()
         self.stereo_matching_result = None
         self.feature_detection_result = None
-        self.coordinate_mapping_check_view_model = CoordinateMappingCheckViewModel(self.data)
+        self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
         self.stereo_matching_view_model = StereoMatchingViewModel(
             self.data,
             on_result=self._on_stereo_matching_result,
@@ -89,7 +89,7 @@ def root_view(model: RootViewModel) -> None:
             imgui.end_tab_item()
 
         if imgui.begin_tab_item("Coordinate Mapping")[0]:
-            coordinate_mapping_check_view(model.coordinate_mapping_check_view_model)
+            coordinate_mapping_view(model.coordinate_mapping_view_model)
             imgui.end_tab_item()
 
         if imgui.begin_tab_item("SLAM")[0]:

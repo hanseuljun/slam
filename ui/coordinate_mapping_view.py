@@ -39,7 +39,7 @@ def _plot_result(result: CoordinateMappingCheckResult) -> plt.Figure:
     return fig
 
 
-class CoordinateMappingCheckViewModel:
+class CoordinateMappingViewModel:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._checker: Optional[CoordinateMappingChecker] = None
@@ -71,7 +71,7 @@ class CoordinateMappingCheckViewModel:
             self._loading = False
 
 
-def coordinate_mapping_check_view(model: CoordinateMappingCheckViewModel) -> None:
+def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     if model._checker is None:
         imgui.text("Waiting for stereo matching...")
         return
