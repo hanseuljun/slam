@@ -1,3 +1,4 @@
+import threading
 from typing import Optional
 
 import matplotlib
@@ -90,6 +91,7 @@ class SlamViewModel:
         self._data = data
         self._solver: Optional[SlamSolver] = None
         self._last_solver: Optional[SlamSolver] = None
+        self._stop_event: Optional[threading.Event] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
@@ -102,14 +104,16 @@ class SlamViewModel:
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
     ) -> None:
-        if self._solver is not None:
-            self._solver._stop_event.set()
+        if self._stop_event is not None:
+            self._stop_event.set()
+        self._stop_event = threading.Event()
         self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result)
-        self._solver.start()
+        threading.Thread(target=self._solver.run, args=(self._stop_event,), daemon=True).start()
 
     def stop(self) -> None:
-        if self._solver is not None:
-            self._solver._stop_event.set()
+        if self._stop_event is not None:
+            self._stop_event.set()
+        self._stop_event = None
         self._solver = None
 
 

@@ -323,18 +323,16 @@ class SlamSolver:
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
         self.plots: Optional[SlamResults] = None
-        self.loading: bool = False
+        self.loading: bool = True
         self.error: Optional[str] = None
         self.progress: float = 0.0
         self.progress_label: str = ""
-        self._started: bool = False
-        self._stop_event: threading.Event = threading.Event()
 
     def _set_progress(self, value: float, label: str) -> None:
         self.progress = value
         self.progress_label = label
 
-    def _compute(self, stop_event: threading.Event) -> None:
+    def run(self, stop_event: threading.Event) -> None:
         try:
             self.plots = _compute_plots(
                 self._data, self._feature_detection_result,
@@ -346,14 +344,3 @@ class SlamSolver:
             self.error = str(e)
         finally:
             self.loading = False
-
-    def _start_thread(self) -> None:
-        self._stop_event = threading.Event()
-        threading.Thread(target=self._compute, args=(self._stop_event,), daemon=True).start()
-
-    def start(self) -> None:
-        if self._started:
-            return
-        self._started = True
-        self.loading = True
-        self._start_thread()
