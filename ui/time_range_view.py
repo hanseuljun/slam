@@ -7,7 +7,7 @@ from imgui_bundle import imgui
 @dataclass
 class TimeRangeModel:
     start_s: float = 0.0
-    duration_s: float = 20.0
+    duration_s: float = 5.0
 
 
 def time_range_view(model: TimeRangeModel, on_run: Callable[[], None]) -> None:

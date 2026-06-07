@@ -6,7 +6,17 @@ import numpy as np
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
+from slam.data import GroundTruthSample
 from slam.util import quaternion_to_rotation_matrix
+
+
+def _get_ground_truth_sample(
+    ground_truth_samples: list[GroundTruthSample],
+    gt_timestamps: np.ndarray,
+    timestamp_ns: int,
+) -> GroundTruthSample:
+    idx = int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
+    return ground_truth_samples[idx]
 
 
 @dataclass
@@ -48,8 +58,7 @@ class CoordinateMappingChecker:
         gt_timestamps = np.array([s.timestamp_ns for s in data.ground_truth_samples])
 
         def gt_world_T_cam0(timestamp_ns: int) -> np.ndarray:
-            idx = int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
-            s = data.ground_truth_samples[idx]
+            s = _get_ground_truth_sample(data.ground_truth_samples, gt_timestamps, timestamp_ns)
             R = quaternion_to_rotation_matrix(s.quaternion)
             world_T_body = np.eye(4)
             world_T_body[:3, :3] = R
