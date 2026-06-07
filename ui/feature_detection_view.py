@@ -54,7 +54,7 @@ class FeatureDetectionViewModel:
                 cv2.IMREAD_GRAYSCALE,
             )
             img_with_kp = cv2.drawKeypoints(
-                img, frame.keypoints, None,
+                img, frame.cam0_keypoints, None,
                 flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS,
             )
             self._texture = image_to_texture(img_with_kp)
@@ -93,6 +93,7 @@ def feature_detection_view(model: FeatureDetectionViewModel) -> None:
         model.frame_index = max(0, min(n - 1, new_index))
 
     frame = model._result.frames[model.frame_index]
-    imgui.text(f"Keypoints: {len(frame.keypoints)}")
+    imgui.text(f"cam0 keypoints: {len(frame.cam0_keypoints)}")
+    imgui.text(f"cam1 keypoints: {len(frame.cam1_keypoints)}")
     imgui.text(f"Timestamp: {frame.timestamp_ns} ns")
     imgui.text(f"Time since first frame: {(frame.timestamp_ns - first_ts_ns) / 1e9:.3f} s")

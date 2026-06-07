@@ -32,7 +32,7 @@ def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndar
 
 
 class SlamViewModel:
-    def __init__(self, solver: SlamSolver) -> None:
+    def __init__(self, solver: Optional[SlamSolver]) -> None:
         self._solver = solver
         self._last_solver: Optional[SlamSolver] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
@@ -48,6 +48,9 @@ def slam_view(model: SlamViewModel) -> None:
         model._last_solver = model._solver
 
     solver = model._solver
+    if solver is None:
+        imgui.text("Waiting for feature detection...")
+        return
     if solver.loading:
         imgui.text(solver.progress_label)
         imgui.progress_bar(solver.progress, (-1, 0))

@@ -11,8 +11,10 @@ from slam.data import DataFolder
 @dataclass
 class FeatureDetectionFrame:
     timestamp_ns: int
-    keypoints: list  # list[cv2.KeyPoint]
-    descriptors: np.ndarray  # shape (N, 32), ORB binary descriptors
+    cam0_keypoints: list  # list[cv2.KeyPoint]
+    cam0_descriptors: np.ndarray  # shape (N, 32), ORB binary descriptors
+    cam1_keypoints: list  # list[cv2.KeyPoint]
+    cam1_descriptors: np.ndarray  # shape (N, 32), ORB binary descriptors
 
 
 @dataclass
@@ -27,12 +29,16 @@ class FeatureDetectionSolver:
 
     def _process_frame(self, ts: int) -> FeatureDetectionFrame:
         orb = cv2.ORB_create(nfeatures=2000)
-        img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        keypoints, descriptors = orb.detectAndCompute(img, None)
+        cam0_img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        cam1_img = cv2.imread(str(self._data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        cam0_keypoints, cam0_descriptors = orb.detectAndCompute(cam0_img, None)
+        cam1_keypoints, cam1_descriptors = orb.detectAndCompute(cam1_img, None)
         return FeatureDetectionFrame(
             timestamp_ns=ts,
-            keypoints=list(keypoints),
-            descriptors=descriptors,
+            cam0_keypoints=list(cam0_keypoints),
+            cam0_descriptors=cam0_descriptors,
+            cam1_keypoints=list(cam1_keypoints),
+            cam1_descriptors=cam1_descriptors,
         )
 
     def run(self) -> FeatureDetectionResult:

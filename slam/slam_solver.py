@@ -7,6 +7,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from slam.data import DataFolder
+from slam.feature_detection import FeatureDetectionResult
 from slam.solve import solve_stereo_pnp
 
 
@@ -52,7 +53,7 @@ class _Cancelled(Exception):
 
 def _run_pnp(
     data: DataFolder,
-    orb: cv2.ORB,
+    feature_detection_result: FeatureDetectionResult,
     indices_in_range: list[int],
     on_progress: Callable[[float], None],
     stop_event: threading.Event,
@@ -67,10 +68,13 @@ def _run_pnp(
             raise _Cancelled
         on_progress(i / n)
         try:
+            kf = feature_detection_result.frames[indices_in_range[keyframe_indices[-1]]]
+            cf = feature_detection_result.frames[indices_in_range[i]]
             rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(
-                data, orb,
-                data.cam_timestamps_ns[indices_in_range[keyframe_indices[-1]]],
-                data.cam_timestamps_ns[indices_in_range[i]],
+                data,
+                kf.cam0_keypoints, kf.cam0_descriptors,
+                kf.cam1_keypoints, kf.cam1_descriptors,
+                cf.cam0_keypoints, cf.cam0_descriptors,
             )
         except Exception as e:
             print(f"solve_stereo_pnp failed at i={i}: {e}")
@@ -115,12 +119,12 @@ class SlamResults:
 
 def _compute_plots(
     data: DataFolder,
+    feature_detection_result: FeatureDetectionResult,
     set_progress: Callable[[float, str], None],
     stop_event: threading.Event,
     start_s: float,
     duration_s: float,
 ) -> SlamResults:
-    orb = cv2.ORB_create(nfeatures=2000)
     first_ts = data.cam_timestamps_ns[0]
     min_ts = first_ts + int(start_s * 1e9)
     max_ts = min_ts + int(duration_s * 1e9)
@@ -128,7 +132,7 @@ def _compute_plots(
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
-        data, orb, indices_in_range,
+        data, feature_detection_result, indices_in_range,
         on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
         stop_event=stop_event,
     )
@@ -236,8 +240,9 @@ def _compute_plots(
 
 
 class SlamSolver:
-    def __init__(self, data: DataFolder, start_s: float = 0.0, duration_s: float = 20.0) -> None:
+    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult, start_s: float = 0.0, duration_s: float = 20.0) -> None:
         self._data = data
+        self._feature_detection_result = feature_detection_result
         self._start_s = start_s
         self._duration_s = duration_s
         self.plots: Optional[SlamResults] = None
@@ -254,7 +259,7 @@ class SlamSolver:
 
     def _compute(self, stop_event: threading.Event) -> None:
         try:
-            self.plots = _compute_plots(self._data, self._set_progress, stop_event, self._start_s, self._duration_s)
+            self.plots = _compute_plots(self._data, self._feature_detection_result, self._set_progress, stop_event, self._start_s, self._duration_s)
         except _Cancelled:
             pass
         except Exception as e:

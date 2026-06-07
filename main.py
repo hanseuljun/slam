@@ -16,33 +16,37 @@ class RootViewModel:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.data_view_model = DataViewModel(data)
-        self.slam_solver = SlamSolver(data)
-        self.slam_solver.start()
-        self.slam_view_model = SlamViewModel(self.slam_solver)
+        self.slam_view_model = SlamViewModel(None)
         self.time_range_model = TimeRangeModel()
         self.feature_detection_result: Optional[FeatureDetectionResult] = None
         self.feature_detection_view_model = FeatureDetectionViewModel(
             data,
-            on_result=lambda result: setattr(self, "feature_detection_result", result),
+            on_result=self._on_feature_detection_result,
         )
         self.feature_detection_view_model.start()
         self.triangulation_view_model = TriangulationViewModel(data)
         self.triangulation_view_model.start()
 
-    def restart(self) -> None:
-        self.slam_solver._stop_event.set()
-        self.slam_solver = SlamSolver(
+    def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
+        self.feature_detection_result = result
+        slam_solver = SlamSolver(
             self.data,
+            result,
             self.time_range_model.start_s,
             self.time_range_model.duration_s,
         )
-        self.slam_solver.start()
-        self.slam_view_model._solver = self.slam_solver
+        slam_solver.start()
+        self.slam_view_model._solver = slam_solver
+
+    def restart(self) -> None:
+        if self.slam_view_model._solver is not None:
+            self.slam_view_model._solver._stop_event.set()
+        self.slam_view_model._solver = None
 
         self.feature_detection_result = None
         self.feature_detection_view_model = FeatureDetectionViewModel(
             self.data,
-            on_result=lambda result: setattr(self, "feature_detection_result", result),
+            on_result=self._on_feature_detection_result,
         )
         self.feature_detection_view_model.start()
 

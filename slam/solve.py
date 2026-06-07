@@ -125,19 +125,13 @@ def solve_pnp(
 
 def solve_stereo_pnp(
     data: DataFolder,
-    sift,
-    timestamp0_ns: int,
-    timestamp1_ns: int,
+    cam0_keypoints0,
+    cam0_descriptors0: np.ndarray,
+    cam1_keypoints0,
+    cam1_descriptors0: np.ndarray,
+    cam0_keypoints1,
+    cam0_descriptors1: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, int, float]:
-    # Load first frame from left and right cameras, and the second frame from left camera
-    cam0_img0 = cv2.imread(str(data.get_cam0_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
-    cam1_img0 = cv2.imread(str(data.get_cam1_image_path(timestamp0_ns)), cv2.IMREAD_GRAYSCALE)
-    cam0_img1 = cv2.imread(str(data.get_cam0_image_path(timestamp1_ns)), cv2.IMREAD_GRAYSCALE)
-
-    cam0_keypoints0, cam0_descriptors0 = sift.detectAndCompute(cam0_img0, None)
-    cam1_keypoints0, cam1_descriptors0 = sift.detectAndCompute(cam1_img0, None)
-    cam0_keypoints1, cam0_descriptors1 = sift.detectAndCompute(cam0_img1, None)
-
     points_3d = triangulate_stereo_matches(
         data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
     )
