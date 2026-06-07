@@ -51,7 +51,10 @@ class CoordinateMappingViewModel:
         self._error: Optional[str] = None
         self._plot_texture: Optional[hello_imgui.TextureGpu] = None
         self.frame_index: int = 0
+        self.match_index_min: int = 0
+        self.match_index_max: int = 0
         self._cached_frame_index: int = -1
+        self._cached_match_range: tuple[int, int] = (-1, -1)
         self._match_texture: Optional[hello_imgui.TextureGpu] = None
 
     def start(
@@ -69,13 +72,17 @@ class CoordinateMappingViewModel:
         self._error = None
         self._plot_texture = None
         self.frame_index = 0
+        self.match_index_min = 0
+        self.match_index_max = 0
         self._cached_frame_index = -1
+        self._cached_match_range = (-1, -1)
         self._match_texture = None
         threading.Thread(target=self._compute, daemon=True).start()
 
     def _compute(self) -> None:
         try:
             self._result = self._checker.run()
+            self.match_index_max = max(0, len(self._result.frames[0].matches) - 1)
         except Exception as e:
             self._error = str(e)
         finally:
@@ -84,7 +91,8 @@ class CoordinateMappingViewModel:
     def current_match_texture(self) -> Optional[hello_imgui.TextureGpu]:
         if self._result is None or self._feature_detection_result is None or self._stereo_matching_result is None:
             return None
-        if self._cached_frame_index != self.frame_index:
+        match_range = (self.match_index_min, self.match_index_max)
+        if self._cached_frame_index != self.frame_index or self._cached_match_range != match_range:
             self._match_texture = None
             frame = self._result.frames[self.frame_index]
             sm_k = self._stereo_matching_result.frames[self.frame_index]
@@ -101,14 +109,16 @@ class CoordinateMappingViewModel:
                 cv2.IMREAD_GRAYSCALE,
             )
             kps_k = [fd_k.cam0_keypoints[m.queryIdx] for m in sm_k.matches]
+            matches = frame.matches[self.match_index_min:self.match_index_max + 1]
             img_matches = cv2.drawMatches(
                 cam0_img_k, kps_k,
                 cam0_img_k1, fd_k1.cam0_keypoints,
-                frame.matches, None,
+                matches, None,
                 flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
             )
             self._match_texture = image_to_texture(img_matches)
             self._cached_frame_index = self.frame_index
+            self._cached_match_range = match_range
         return self._match_texture
 
 
@@ -129,6 +139,9 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     n = len(model._result.frames)
     first_ts_ns = model._data.cam_timestamps_ns[0]
 
+    frame = model._result.frames[model.frame_index]
+    num_matches = len(frame.matches)
+
     tex = model.current_match_texture()
     if tex is not None:
         imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
@@ -136,6 +149,8 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
         changed, new_index = imgui.slider_int("##cm_slider", model.frame_index, 0, n - 1)
         if changed:
             model.frame_index = new_index
+            model.match_index_min = 0
+            model.match_index_max = max(0, len(model._result.frames[new_index].matches) - 1)
 
     imgui.text("Frame")
     imgui.same_line()
@@ -143,9 +158,26 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     changed, new_index = imgui.input_int("##cm_frame_input", model.frame_index, step=1)
     if changed:
         model.frame_index = max(0, min(n - 1, new_index))
+        model.match_index_min = 0
+        model.match_index_max = max(0, len(model._result.frames[model.frame_index].matches) - 1)
 
-    frame = model._result.frames[model.frame_index]
-    imgui.text(f"Matches: {len(frame.matches)}")
+    if num_matches > 0:
+        max_idx = num_matches - 1
+        imgui.text("Match range")
+        imgui.same_line()
+        imgui.set_next_item_width(150)
+        changed_min, new_min = imgui.input_int("##cm_match_min", model.match_index_min, step=1)
+        if changed_min:
+            model.match_index_min = max(0, min(model.match_index_max, new_min))
+        imgui.same_line()
+        imgui.text("to")
+        imgui.same_line()
+        imgui.set_next_item_width(150)
+        changed_max, new_max = imgui.input_int("##cm_match_max", model.match_index_max, step=1)
+        if changed_max:
+            model.match_index_max = max(model.match_index_min, min(max_idx, new_max))
+
+    imgui.text(f"Matches: {num_matches}")
     mean_err = np.mean(frame.projection_errors) if frame.projection_errors else float('nan')
     imgui.text(f"Mean projection error: {mean_err:.2f} px")
     imgui.text(f"Timestamp: {frame.timestamp_ns} ns")
