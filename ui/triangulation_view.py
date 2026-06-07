@@ -40,7 +40,7 @@ class _Results:
     points_3d_plot: np.ndarray
 
 
-class TriangulationTabState:
+class TriangulationViewState:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._results: Optional[_Results] = None
@@ -136,7 +136,7 @@ class TriangulationTabState:
         threading.Thread(target=self._compute, daemon=True).start()
 
 
-def triangulation_tab(state: TriangulationTabState) -> None:
+def triangulation_view(state: TriangulationViewState) -> None:
     if state._loading:
         imgui.text("Computing triangulation...")
         return

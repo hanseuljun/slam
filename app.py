@@ -5,9 +5,9 @@ from imgui_bundle import imgui, hello_imgui, immapp
 from slam import DataFolder
 from slam.slam_solver import SlamSolver
 from ui.data_view import DataViewState, data_view
-from ui.slam_tab import SlamTabState, slam_tab
+from ui.slam_view import SlamViewState, slam_view
 from ui.time_range_view import TimeRangeState, time_range_view
-from ui.triangulation_tab import TriangulationTabState, triangulation_tab
+from ui.triangulation_view import TriangulationViewState, triangulation_view
 
 
 class App:
@@ -16,10 +16,10 @@ class App:
         self.data_view_state = DataViewState(data)
         self.slam_solver = SlamSolver(data)
         self.slam_solver.start()
-        self.slam_tab_state = SlamTabState(self.slam_solver)
+        self.slam_view_state = SlamViewState(self.slam_solver)
         self.time_range_state = TimeRangeState()
-        self.triangulation_tab_state = TriangulationTabState(data)
-        self.triangulation_tab_state.start()
+        self.triangulation_view_state = TriangulationViewState(data)
+        self.triangulation_view_state.start()
 
     def restart_slam(self) -> None:
         self.slam_solver._stop_event.set()
@@ -29,7 +29,7 @@ class App:
             self.time_range_state.duration_s,
         )
         self.slam_solver.start()
-        self.slam_tab_state._solver = self.slam_solver
+        self.slam_view_state._solver = self.slam_solver
 
     def render(self) -> None:
         viewport = imgui.get_main_viewport()
@@ -51,11 +51,11 @@ class App:
                 imgui.end_tab_item()
 
             if imgui.begin_tab_item("SLAM")[0]:
-                slam_tab(self.slam_tab_state)
+                slam_view(self.slam_view_state)
                 imgui.end_tab_item()
 
             if imgui.begin_tab_item("Triangulation")[0]:
-                triangulation_tab(self.triangulation_tab_state)
+                triangulation_view(self.triangulation_view_state)
                 imgui.end_tab_item()
 
             imgui.end_tab_bar()

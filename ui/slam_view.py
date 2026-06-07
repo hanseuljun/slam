@@ -48,7 +48,7 @@ def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndar
     return _fig_to_image(fig_pos), _fig_to_image(fig_att), _fig_to_image(fig_omega)
 
 
-class SlamTabState:
+class SlamViewState:
     def __init__(self, solver: SlamSolver) -> None:
         self._solver = solver
         self._last_solver: Optional[SlamSolver] = None
@@ -57,7 +57,7 @@ class SlamTabState:
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
 
 
-def slam_tab(state: SlamTabState) -> None:
+def slam_view(state: SlamViewState) -> None:
     if state._last_solver is not state._solver:
         state._tex_positions = None
         state._tex_attitudes = None
