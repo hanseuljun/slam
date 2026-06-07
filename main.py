@@ -9,7 +9,6 @@ from ui.feature_detection_view import FeatureDetectionViewModel, feature_detecti
 from ui.slam_view import SlamViewModel, slam_view
 from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
 from ui.time_range_view import TimeRangeModel, time_range_view
-from ui.triangulation_view import TriangulationViewModel, triangulation_view
 
 
 class RootViewModel:
@@ -31,8 +30,7 @@ class RootViewModel:
             data,
             on_result=self._on_stereo_matching_result,
         )
-        self.triangulation_view_model = TriangulationViewModel(data)
-        self.triangulation_view_model.start()
+
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
@@ -84,10 +82,6 @@ def root_view(model: RootViewModel) -> None:
 
         if imgui.begin_tab_item("Stereo Matching")[0]:
             stereo_matching_view(model.stereo_matching_view_model)
-            imgui.end_tab_item()
-
-        if imgui.begin_tab_item("Triangulation")[0]:
-            triangulation_view(model.triangulation_view_model)
             imgui.end_tab_item()
 
         if imgui.begin_tab_item("SLAM")[0]:

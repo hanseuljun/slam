@@ -13,25 +13,33 @@ from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
 
-def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    fig_pos = plot_positions(series=[
+def _render_positions(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
+    all_series = [
         (results.pnp_times, results.pnp_positions, 'pnp'),
         (results.gt_times, results.gt_positions, 'gt'),
-    ])
-    fig_att = plot_attitudes(series=[
+    ]
+    return figure_to_image(plot_positions([s for s in all_series if enabled[s[2]]]))
+
+
+def _render_attitudes(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
+    all_series = [
         (results.pnp_times, results.pnp_attitudes, 'pnp'),
         (results.imu_attitude_times, results.imu_attitudes, 'imu'),
         (results.gt_times, results.gt_attitudes, 'gt'),
         (results.pnp_times, results.optimized_attitudes, 'opt'),
-    ])
-    fig_omega = plot_angular_velocities(series=[
+    ]
+    return figure_to_image(plot_attitudes([s for s in all_series if enabled[s[2]]]))
+
+
+def _render_angular_velocities(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
+    all_series = [
         (results.pnp_angular_velocity_times, results.pnp_angular_velocities, 'pnp'),
         (results.imu_times, results.imu_angular_velocities, 'imu'),
         (results.pnp_times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
         (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
         (results.pnp_angular_velocity_times, results.optimized_angular_velocities, 'opt'),
-    ])
-    return figure_to_image(fig_pos), figure_to_image(fig_att), figure_to_image(fig_omega)
+    ]
+    return figure_to_image(plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
 
 
 class SlamViewModel:
@@ -42,6 +50,9 @@ class SlamViewModel:
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
+        self.pos_enabled: dict[str, bool] = {'pnp': True, 'gt': True}
+        self.att_enabled: dict[str, bool] = {'pnp': True, 'imu': True, 'gt': True, 'opt': True}
+        self.omega_enabled: dict[str, bool] = {'pnp': True, 'imu': True, 'imu@cam': True, 'gt': True, 'opt': True}
 
     def start(
         self,
@@ -57,6 +68,17 @@ class SlamViewModel:
         if self._solver is not None:
             self._solver._stop_event.set()
         self._solver = None
+
+
+def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
+    changed = False
+    labels = list(enabled)
+    for i, label in enumerate(labels):
+        c, enabled[label] = imgui.checkbox(f"{label}##{id_suffix}", enabled[label])
+        changed = changed or c
+        if i < len(labels) - 1:
+            imgui.same_line()
+    return changed
 
 
 def slam_view(model: SlamViewModel) -> None:
@@ -80,17 +102,29 @@ def slam_view(model: SlamViewModel) -> None:
     if solver.plots is None:
         return
 
-    if model._tex_positions is None:
-        pos_img, att_img, omega_img = _render_plots(solver.plots)
-        model._tex_positions = image_to_texture(pos_img)
-        model._tex_attitudes = image_to_texture(att_img)
-        model._tex_angular_velocities = image_to_texture(omega_img)
+    results = solver.plots
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
+
+    if _checkboxes(model.pos_enabled, "pos"):
+        model._tex_positions = None
+    if model._tex_positions is None:
+        model._tex_positions = image_to_texture(_render_positions(results, model.pos_enabled))
     tex = model._tex_positions
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
+    if _checkboxes(model.att_enabled, "att"):
+        model._tex_attitudes = None
+    if model._tex_attitudes is None:
+        model._tex_attitudes = image_to_texture(_render_attitudes(results, model.att_enabled))
     tex = model._tex_attitudes
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
+    if _checkboxes(model.omega_enabled, "omega"):
+        model._tex_angular_velocities = None
+    if model._tex_angular_velocities is None:
+        model._tex_angular_velocities = image_to_texture(_render_angular_velocities(results, model.omega_enabled))
     tex = model._tex_angular_velocities
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
     imgui.end_child()
