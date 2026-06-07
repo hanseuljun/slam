@@ -43,12 +43,8 @@ class RootViewModel:
             self.slam_view_model._solver._stop_event.set()
         self.slam_view_model._solver = None
 
-        self.feature_detection_result = None
-        self.feature_detection_view_model = FeatureDetectionViewModel(
-            self.data,
-            on_result=self._on_feature_detection_result,
-        )
-        self.feature_detection_view_model.start()
+        if self.feature_detection_result is not None:
+            self._on_feature_detection_result(self.feature_detection_result)
 
 
 def root_view(model: RootViewModel) -> None:
