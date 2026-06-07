@@ -8,8 +8,86 @@ from scipy.optimize import least_squares
 
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
-from slam.solve import solve_stereo_pnp
 from slam.stereo_matching import StereoMatchingResult
+
+
+def triangulate_stereo_matches(
+    data: DataFolder,
+    cam0_keypoints,
+    cam0_descriptors: np.ndarray,
+    cam1_keypoints,
+    cam1_descriptors: np.ndarray,
+) -> np.ndarray:
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2)
+    good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
+
+    K0 = data.cam0_intrinsics.to_matrix()
+    K1 = data.cam1_intrinsics.to_matrix()
+    dist_coeffs0 = np.array([
+        data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
+        data.cam0_intrinsics.p1, data.cam0_intrinsics.p2,
+    ])
+    dist_coeffs1 = np.array([
+        data.cam1_intrinsics.k1, data.cam1_intrinsics.k2,
+        data.cam1_intrinsics.p1, data.cam1_intrinsics.p2,
+    ])
+
+    points0 = np.array([cam0_keypoints[m.queryIdx].pt for m in good_matches])
+    points1 = np.array([cam1_keypoints[m.trainIdx].pt for m in good_matches])
+
+    points0 = cv2.undistortPoints(points0, K0, dist_coeffs0, P=K0).reshape(-1, 2)
+    points1 = cv2.undistortPoints(points1, K1, dist_coeffs1, P=K1).reshape(-1, 2)
+
+    P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
+    T_cam0_to_cam1 = np.linalg.inv(data.cam1_extrinsics) @ data.cam0_extrinsics
+    P1 = K1 @ T_cam0_to_cam1[:3, :]
+
+    points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
+    return points_4d[:3, :] / points_4d[3, :]
+
+
+def solve_pnp(
+    data: DataFolder,
+    points_3d: np.ndarray,
+    stereo_matches: list,
+    cam0_descriptors0: np.ndarray,
+    cam0_keypoints1,
+    cam0_descriptors1: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int, float]:
+    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_matches)}
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    temporal_matches = bf.knnMatch(cam0_descriptors0, cam0_descriptors1, k=2)
+    temporal_good_matches = [m for m, n in temporal_matches if m.distance < 0.75 * n.distance]
+
+    object_points = []
+    image_points = []
+    for m in temporal_good_matches:
+        if m.queryIdx in cam0_idx_to_3d_idx:
+            idx_3d = cam0_idx_to_3d_idx[m.queryIdx]
+            object_points.append(points_3d[:, idx_3d])
+            image_points.append(cam0_keypoints1[m.trainIdx].pt)
+
+    object_points = np.array(object_points, dtype=np.float64)
+    image_points = np.array(image_points, dtype=np.float64)
+
+    K0 = data.cam0_intrinsics.to_matrix()
+    dist_coeffs = np.array([
+        data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
+        data.cam0_intrinsics.p1, data.cam0_intrinsics.p2,
+    ])
+
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(object_points, image_points, K0, dist_coeffs)
+    if not success:
+        raise RuntimeError(f"cv2.solvePnPRansac failed. len(object_points): {len(object_points)}")
+
+    inlier_object_points = object_points[inliers.flatten()]
+    inlier_image_points = image_points[inliers.flatten()]
+    projected, _ = cv2.projectPoints(inlier_object_points, rvec, tvec, K0, dist_coeffs)
+    reprojection_error = np.mean(np.linalg.norm(inlier_image_points - projected.reshape(-1, 2), axis=1))
+
+    return rvec, tvec, len(temporal_good_matches), reprojection_error
 
 
 def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
@@ -73,14 +151,14 @@ def _run_pnp(
             kf_fd = feature_detection_result.frames[kf_idx]
             kf_sm = stereo_matching_result.frames[kf_idx]
             cf_fd = feature_detection_result.frames[i]
-            rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(
+            rvec, tvec, num_temporal_matches, _ = solve_pnp(
                 data,
+                kf_sm.points_3d, kf_sm.matches,
                 kf_fd.cam0_descriptors,
-                kf_sm.matches, kf_sm.points_3d,
                 cf_fd.cam0_keypoints, cf_fd.cam0_descriptors,
             )
         except Exception as e:
-            print(f"solve_stereo_pnp failed at i={i}: {e}")
+            print(f"solve_pnp failed at i={i}: {e}")
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
@@ -258,7 +336,10 @@ class SlamSolver:
 
     def _compute(self, stop_event: threading.Event) -> None:
         try:
-            self.plots = _compute_plots(self._data, self._feature_detection_result, self._stereo_matching_result, self._set_progress, stop_event)
+            self.plots = _compute_plots(
+                self._data, self._feature_detection_result,
+                self._stereo_matching_result, self._set_progress, stop_event,
+            )
         except _Cancelled:
             pass
         except Exception as e:

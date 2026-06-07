@@ -8,7 +8,7 @@ from imgui_bundle import imgui, hello_imgui
 
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
-from slam.slam_solver import SlamResults, SlamSolver
+from slam.slam import SlamResults, SlamSolver
 from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
