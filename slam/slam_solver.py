@@ -56,7 +56,6 @@ def _run_pnp(
     data: DataFolder,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    indices_in_range: list[int],
     on_progress: Callable[[float], None],
     stop_event: threading.Event,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -64,17 +63,16 @@ def _run_pnp(
     keyframe_num_temporal_matches: Optional[int] = None
     pnp_poses: list[np.ndarray] = [np.eye(4)]
     pnp_angular_velocities: list[np.ndarray] = []
-    n = len(indices_in_range)
+    n = len(stereo_matching_result.frames)
     for i in range(1, n):
         if stop_event.is_set():
             raise _Cancelled
         on_progress(i / n)
         try:
-            kf_idx = indices_in_range[keyframe_indices[-1]]
-            cf_idx = indices_in_range[i]
+            kf_idx = keyframe_indices[-1]
             kf_fd = feature_detection_result.frames[kf_idx]
             kf_sm = stereo_matching_result.frames[kf_idx]
-            cf_fd = feature_detection_result.frames[cf_idx]
+            cf_fd = feature_detection_result.frames[i]
             rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(
                 data,
                 kf_fd.cam0_descriptors,
@@ -128,17 +126,13 @@ def _compute_plots(
     stereo_matching_result: StereoMatchingResult,
     set_progress: Callable[[float, str], None],
     stop_event: threading.Event,
-    start_s: float,
-    duration_s: float,
 ) -> SlamResults:
     first_ts = data.cam_timestamps_ns[0]
-    min_ts = first_ts + int(start_s * 1e9)
-    max_ts = min_ts + int(duration_s * 1e9)
-    indices_in_range = [i for i, t in enumerate(data.cam_timestamps_ns) if min_ts <= t <= max_ts]
+    max_ts = stereo_matching_result.frames[-1].timestamp_ns
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
-        data, feature_detection_result, stereo_matching_result, indices_in_range,
+        data, feature_detection_result, stereo_matching_result,
         on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
         stop_event=stop_event,
     )
@@ -149,7 +143,7 @@ def _compute_plots(
     first_gt_pose[:3, :3] = _quaternion_to_rotation_matrix(first_gt.quaternion)
     first_gt_pose[:3, 3] = first_gt.position
 
-    cam_timestamps_ns = np.array([data.cam_timestamps_ns[i] for i in indices_in_range])
+    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt.timestamp_ns))
 
     pnp_poses_in_world = np.array([
@@ -161,13 +155,13 @@ def _compute_plots(
     ])
 
     pnp_times = np.array([
-        (data.cam_timestamps_ns[indices_in_range[i]] - first_ts) / 1e9
+        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
         for i in range(len(pnp_poses_in_world))
     ])
     pnp_positions_in_world = pnp_poses_in_world[:, :3, 3]
     pnp_attitudes = pnp_poses_in_world[:, :3, :3]
     pnp_angular_velocity_times = np.array([
-        (data.cam_timestamps_ns[indices_in_range[i]] - first_ts) / 1e9
+        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
         for i in range(len(pnp_angular_velocities_from_rvec))
     ])
 
@@ -189,7 +183,7 @@ def _compute_plots(
 
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     pnp_cam_timestamps_ns = np.array([
-        data.cam_timestamps_ns[indices_in_range[i]]
+        stereo_matching_result.frames[i].timestamp_ns
         for i in range(len(pnp_poses_without_initial))
     ])
     nearest_imu_indices = np.array([
@@ -246,12 +240,10 @@ def _compute_plots(
 
 
 class SlamSolver:
-    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult, start_s: float = 0.0, duration_s: float = 20.0) -> None:
+    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
-        self._start_s = start_s
-        self._duration_s = duration_s
         self.plots: Optional[SlamResults] = None
         self.loading: bool = False
         self.error: Optional[str] = None
@@ -266,7 +258,7 @@ class SlamSolver:
 
     def _compute(self, stop_event: threading.Event) -> None:
         try:
-            self.plots = _compute_plots(self._data, self._feature_detection_result, self._stereo_matching_result, self._set_progress, stop_event, self._start_s, self._duration_s)
+            self.plots = _compute_plots(self._data, self._feature_detection_result, self._stereo_matching_result, self._set_progress, stop_event)
         except _Cancelled:
             pass
         except Exception as e:

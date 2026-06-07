@@ -14,10 +14,12 @@ class FeatureDetectionViewModel:
         self,
         data: DataFolder,
         on_result: Callable[[FeatureDetectionResult], None],
+        start_s: float = 0.0,
+        duration_s: float = 5.0,
     ) -> None:
         self._data = data
         self._on_result = on_result
-        self._solver = FeatureDetectionSolver(data)
+        self._solver = FeatureDetectionSolver(data, start_s, duration_s)
         self._result: Optional[FeatureDetectionResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None

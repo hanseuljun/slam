@@ -23,8 +23,10 @@ class FeatureDetectionResult:
 
 
 class FeatureDetectionSolver:
-    def __init__(self, data: DataFolder) -> None:
+    def __init__(self, data: DataFolder, start_s: float = 0.0, duration_s: float = 5.0) -> None:
         self._data = data
+        self._start_s = start_s
+        self._duration_s = duration_s
         self.progress: float = 0.0
 
     def _process_frame(self, ts: int) -> FeatureDetectionFrame:
@@ -42,7 +44,10 @@ class FeatureDetectionSolver:
         )
 
     def run(self) -> FeatureDetectionResult:
-        timestamps = self._data.cam_timestamps_ns
+        first_ts = self._data.cam_timestamps_ns[0]
+        min_ts = first_ts + int(self._start_s * 1e9)
+        max_ts = min_ts + int(self._duration_s * 1e9)
+        timestamps = [t for t in self._data.cam_timestamps_ns if min_ts <= t <= max_ts]
         n = len(timestamps)
         frames: list[FeatureDetectionFrame | None] = [None] * n
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:

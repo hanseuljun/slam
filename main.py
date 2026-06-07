@@ -23,6 +23,8 @@ class RootViewModel:
         self.feature_detection_view_model = FeatureDetectionViewModel(
             data,
             on_result=self._on_feature_detection_result,
+            start_s=self.time_range_model.start_s,
+            duration_s=self.time_range_model.duration_s,
         )
         self.feature_detection_view_model.start()
         self.stereo_matching_result: Optional[StereoMatchingResult] = None
@@ -39,13 +41,7 @@ class RootViewModel:
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
-        slam_solver = SlamSolver(
-            self.data,
-            self.feature_detection_result,
-            result,
-            self.time_range_model.start_s,
-            self.time_range_model.duration_s,
-        )
+        slam_solver = SlamSolver(self.data, self.feature_detection_result, result)
         slam_solver.start()
         self.slam_view_model._solver = slam_solver
 
@@ -53,9 +49,19 @@ class RootViewModel:
         if self.slam_view_model._solver is not None:
             self.slam_view_model._solver._stop_event.set()
         self.slam_view_model._solver = None
-
-        if self.stereo_matching_result is not None:
-            self._on_stereo_matching_result(self.stereo_matching_result)
+        self.stereo_matching_result = None
+        self.feature_detection_result = None
+        self.stereo_matching_view_model = StereoMatchingViewModel(
+            self.data,
+            on_result=self._on_stereo_matching_result,
+        )
+        self.feature_detection_view_model = FeatureDetectionViewModel(
+            self.data,
+            on_result=self._on_feature_detection_result,
+            start_s=self.time_range_model.start_s,
+            duration_s=self.time_range_model.duration_s,
+        )
+        self.feature_detection_view_model.start()
 
 
 def root_view(model: RootViewModel) -> None:
