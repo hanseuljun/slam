@@ -4,7 +4,7 @@ from imgui_bundle import imgui, hello_imgui, immapp
 
 from slam import DataFolder
 from slam.slam_solver import SlamSolver
-from ui.camera_frames_tab import CameraFramesTabState, camera_frames_tab
+from ui.data_view import DataViewState, data_view
 from ui.slam_tab import SlamTabState, slam_tab
 from ui.time_range_view import TimeRangeState, time_range_view
 from ui.triangulation_tab import TriangulationTabState, triangulation_tab
@@ -13,7 +13,7 @@ from ui.triangulation_tab import TriangulationTabState, triangulation_tab
 class App:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
-        self.camera_frames_tab_state = CameraFramesTabState(data)
+        self.data_view_state = DataViewState(data)
         self.slam_solver = SlamSolver(data)
         self.slam_solver.start()
         self.slam_tab_state = SlamTabState(self.slam_solver)
@@ -46,8 +46,8 @@ class App:
         time_range_view(self.time_range_state, self.restart_slam)
 
         if imgui.begin_tab_bar("##tabs"):
-            if imgui.begin_tab_item("Camera Frames")[0]:
-                camera_frames_tab(self.camera_frames_tab_state)
+            if imgui.begin_tab_item("Data")[0]:
+                data_view(self.data_view_state)
                 imgui.end_tab_item()
 
             if imgui.begin_tab_item("SLAM")[0]:

@@ -15,7 +15,7 @@ def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
     return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
-class CameraFramesTabState:
+class DataViewState:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.frame_index: int = 0
@@ -36,7 +36,7 @@ class CameraFramesTabState:
         return self._texture
 
 
-def camera_frames_tab(state: CameraFramesTabState) -> None:
+def data_view(state: DataViewState) -> None:
     data = state.data
     n = len(data.cam_timestamps_ns)
     first_ts_ns = data.cam_timestamps_ns[0]
