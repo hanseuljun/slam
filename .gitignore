@@ -1,2 +1,3 @@
+*.egg-info/
 __pycache__/
 .claude/settings.local.json
