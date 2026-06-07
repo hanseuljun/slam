@@ -4,7 +4,6 @@ from typing import Optional
 from imgui_bundle import imgui, hello_imgui, immapp
 
 from slam import DataFolder, FeatureDetectionResult, StereoMatchingResult
-from slam.slam_solver import SlamSolver
 from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
 from ui.slam_view import SlamViewModel, slam_view
@@ -17,7 +16,7 @@ class RootViewModel:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.data_view_model = DataViewModel(data)
-        self.slam_view_model = SlamViewModel(None)
+        self.slam_view_model = SlamViewModel(data)
         self.time_range_model = TimeRangeModel()
         self.feature_detection_result: Optional[FeatureDetectionResult] = None
         self.feature_detection_view_model = FeatureDetectionViewModel(
@@ -41,14 +40,10 @@ class RootViewModel:
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
-        slam_solver = SlamSolver(self.data, self.feature_detection_result, result)
-        slam_solver.start()
-        self.slam_view_model._solver = slam_solver
+        self.slam_view_model.start(self.feature_detection_result, result)
 
     def restart(self) -> None:
-        if self.slam_view_model._solver is not None:
-            self.slam_view_model._solver._stop_event.set()
-        self.slam_view_model._solver = None
+        self.slam_view_model.stop()
         self.stereo_matching_result = None
         self.feature_detection_result = None
         self.stereo_matching_view_model = StereoMatchingViewModel(

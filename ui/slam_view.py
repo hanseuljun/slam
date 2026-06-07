@@ -5,8 +5,11 @@ matplotlib.use('Agg')
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
+from slam.data import DataFolder
+from slam.feature_detection import FeatureDetectionResult
 from slam.plot import plot_angular_velocities, plot_attitudes, plot_positions
 from slam.slam_solver import SlamResults, SlamSolver
+from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
 
@@ -32,12 +35,28 @@ def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndar
 
 
 class SlamViewModel:
-    def __init__(self, solver: Optional[SlamSolver]) -> None:
-        self._solver = solver
+    def __init__(self, data: DataFolder) -> None:
+        self._data = data
+        self._solver: Optional[SlamSolver] = None
         self._last_solver: Optional[SlamSolver] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
+
+    def start(
+        self,
+        feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult,
+    ) -> None:
+        if self._solver is not None:
+            self._solver._stop_event.set()
+        self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result)
+        self._solver.start()
+
+    def stop(self) -> None:
+        if self._solver is not None:
+            self._solver._stop_event.set()
+        self._solver = None
 
 
 def slam_view(model: SlamViewModel) -> None:
