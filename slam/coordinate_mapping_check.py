@@ -15,11 +15,11 @@ def _get_closest_ground_truth_pose(
     timestamp_ns: int,
 ) -> np.ndarray:
     idx = int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
-    s = ground_truth_samples[idx]
-    world_T_body = np.eye(4)
-    world_T_body[:3, :3] = quaternion_to_rotation_matrix(s.quaternion)
-    world_T_body[:3, 3] = np.array(s.position)
-    return world_T_body
+    sample = ground_truth_samples[idx]
+    pose = np.eye(4)
+    pose[:3, :3] = quaternion_to_rotation_matrix(sample.quaternion)
+    pose[:3, 3] = np.array(sample.position)
+    return pose
 
 
 @dataclass
@@ -61,8 +61,8 @@ class CoordinateMappingChecker:
         gt_timestamps = np.array([s.timestamp_ns for s in data.ground_truth_samples])
 
         def gt_world_T_cam0(timestamp_ns: int) -> np.ndarray:
-            world_T_body = _get_closest_ground_truth_pose(data.ground_truth_samples, gt_timestamps, timestamp_ns)
-            return data.leica_extrinsics @ np.linalg.inv(data.cam0_extrinsics) @ world_T_body
+            pose = _get_closest_ground_truth_pose(data.ground_truth_samples, gt_timestamps, timestamp_ns)
+            return pose
 
         n = len(sm_result.frames)
         first_ts = data.cam_timestamps_ns[0]
