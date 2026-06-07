@@ -59,17 +59,17 @@ def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -
 
 def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.pnp.times, results.pnp.positions, 'pnp'),
         (results.gt_times, results.gt_positions, 'gt'),
+        (results.pnp.times, results.pnp.positions, 'pnp'),
     ]
     return figure_to_image(_plot_positions([s for s in all_series if enabled[s[2]]]))
 
 
 def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.pnp.times, results.pnp.attitudes, 'pnp'),
-        (results.imu_attitude_times, results.imu_attitudes, 'imu'),
         (results.gt_times, results.gt_attitudes, 'gt'),
+        (results.imu_attitude_times, results.imu_attitudes, 'imu'),
+        (results.pnp.times, results.pnp.attitudes, 'pnp'),
         (results.pnp.times, results.optimization.attitudes, 'opt'),
     ]
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
@@ -77,10 +77,10 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
 
 def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.pnp.angular_velocity_times, results.pnp.angular_velocities, 'pnp'),
+        (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
         (results.imu_times, results.imu_angular_velocities, 'imu'),
         (results.pnp.times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
-        (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
+        (results.pnp.angular_velocity_times, results.pnp.angular_velocities, 'pnp'),
         (results.pnp.angular_velocity_times, results.optimization.angular_velocities, 'opt'),
     ]
     return figure_to_image(_plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
@@ -93,9 +93,9 @@ class SlamViewModel:
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
-        self.pos_enabled: dict[str, bool] = {'pnp': True, 'gt': True}
-        self.att_enabled: dict[str, bool] = {'pnp': True, 'imu': True, 'gt': True, 'opt': True}
-        self.omega_enabled: dict[str, bool] = {'pnp': True, 'imu': True, 'imu@cam': True, 'gt': True, 'opt': True}
+        self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True}
+        self.att_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'opt': True}
+        self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'imu@cam': True, 'pnp': True, 'opt': True}
 
     def start(
         self,

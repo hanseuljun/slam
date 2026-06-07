@@ -150,18 +150,18 @@ class SlamAngularVelocityOptimizationResult:
 
 @dataclass
 class SlamResult:
-    pnp: SlamPnpResult
-    optimization: SlamAngularVelocityOptimizationResult
-    imu_attitude_times: np.ndarray
-    imu_attitudes: np.ndarray
-    imu_times: np.ndarray
-    imu_angular_velocities: np.ndarray
-    imu_angular_velocities_at_cam_times: np.ndarray
     gt_times: np.ndarray
     gt_positions: np.ndarray
     gt_attitudes: np.ndarray
     gt_angular_velocity_times: np.ndarray
     gt_angular_velocities: np.ndarray
+    imu_attitude_times: np.ndarray
+    imu_attitudes: np.ndarray
+    imu_times: np.ndarray
+    imu_angular_velocities: np.ndarray
+    imu_angular_velocities_at_cam_times: np.ndarray
+    pnp: SlamPnpResult
+    optimization: SlamAngularVelocityOptimizationResult
 
 
 def _compute_plots(
@@ -261,6 +261,16 @@ def _compute_plots(
 
     set_progress(0.95, "Finishing...")
     return SlamResult(
+        gt_times=gt_times,
+        gt_positions=gt_positions,
+        gt_attitudes=gt_attitudes,
+        gt_angular_velocity_times=gt_angular_velocity_times,
+        gt_angular_velocities=gt_angular_velocities,
+        imu_attitude_times=imu_attitude_times,
+        imu_attitudes=imu_attitudes_in_world,
+        imu_times=imu_times,
+        imu_angular_velocities=imu_angular_velocities,
+        imu_angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
         pnp=SlamPnpResult(
             times=pnp_times,
             positions=pnp_positions_in_world,
@@ -268,20 +278,10 @@ def _compute_plots(
             angular_velocity_times=pnp_angular_velocity_times,
             angular_velocities=pnp_angular_velocities_from_rvec,
         ),
-        imu_attitude_times=imu_attitude_times,
-        imu_attitudes=imu_attitudes_in_world,
-        imu_times=imu_times,
-        imu_angular_velocities=imu_angular_velocities,
-        imu_angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
         optimization=SlamAngularVelocityOptimizationResult(
             attitudes=optimized_attitudes,
             angular_velocities=optimized_angular_velocities,
         ),
-        gt_times=gt_times,
-        gt_positions=gt_positions,
-        gt_attitudes=gt_attitudes,
-        gt_angular_velocity_times=gt_angular_velocity_times,
-        gt_angular_velocities=gt_angular_velocities,
     )
 
 
