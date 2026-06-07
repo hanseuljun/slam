@@ -173,6 +173,49 @@ def _compute(
     first_ts = data.cam_timestamps_ns[0]
     max_ts = stereo_matching_result.frames[-1].timestamp_ns
 
+    first_gt = data.ground_truth_samples[0]
+    first_gt_pose = np.eye(4)
+    first_gt_pose[:3, :3] = _quaternion_to_rotation_matrix(first_gt.quaternion)
+    first_gt_pose[:3, 3] = first_gt.position
+
+    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
+    gt_positions = np.array([s.position for s in gt_samples])
+    gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
+    gt_attitudes = np.array([_quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
+
+    gt_angular_velocities = []
+    gt_angular_velocity_times = []
+    for j in range(len(gt_samples) - 1):
+        R0 = _quaternion_to_rotation_matrix(gt_samples[j].quaternion)
+        R1 = _quaternion_to_rotation_matrix(gt_samples[j + 1].quaternion)
+        R_rel = R0.T @ R1
+        rvec_gt, _ = cv2.Rodrigues(R_rel)
+        dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
+        gt_angular_velocities.append(rvec_gt.flatten() / dt)
+        gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - first_ts) / 1e9)
+    gt_angular_velocities = np.array(gt_angular_velocities)
+    gt_angular_velocity_times = np.array(gt_angular_velocity_times)
+
+    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
+    imu_rotations = imu_angular_velocities / data.imu0_rate_hz
+    imu_attitudes = [np.eye(3)]
+    for rot in imu_rotations:
+        R, _ = cv2.Rodrigues(rot)
+        imu_attitudes.append(imu_attitudes[-1] @ R)
+    imu_attitudes = np.array(imu_attitudes)
+    imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
+    imu_attitude_times = np.concatenate([[0.0], imu_times])
+
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
+    R_gt = first_gt_pose[:3, :3]
+    R_leica = data.leica_extrinsics[:3, :3]
+    imu_attitudes_in_world = np.array([
+        R_gt @ R_leica @ imu_attitudes[closest_imu_index + 1].T @ att @ R_leica.T
+        for att in imu_attitudes
+    ])
+
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
         data, feature_detection_result, stereo_matching_result,
@@ -180,11 +223,6 @@ def _compute(
     )
 
     set_progress(0.8, "Transforming poses...")
-    first_gt = data.ground_truth_samples[0]
-    first_gt_pose = np.eye(4)
-    first_gt_pose[:3, :3] = _quaternion_to_rotation_matrix(first_gt.quaternion)
-    first_gt_pose[:3, 3] = first_gt.position
-
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt.timestamp_ns))
 
@@ -207,23 +245,7 @@ def _compute(
         for i in range(len(pnp_angular_velocities_from_rvec))
     ])
 
-    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
-    gt_positions = np.array([s.position for s in gt_samples])
-    gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
-    gt_attitudes = np.array([_quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
-
-    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
-    imu_rotations = imu_angular_velocities / data.imu0_rate_hz
-    imu_attitudes = [np.eye(3)]
-    for rot in imu_rotations:
-        R, _ = cv2.Rodrigues(rot)
-        imu_attitudes.append(imu_attitudes[-1] @ R)
-    imu_attitudes = np.array(imu_attitudes)
-    imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
-    imu_attitude_times = np.concatenate([[0.0], imu_times])
-
-    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    set_progress(0.85, "Optimizing angular velocities...")
     pnp_cam_timestamps_ns = np.array([
         stereo_matching_result.frames[i].timestamp_ns
         for i in range(len(pnp_poses_without_initial))
@@ -232,32 +254,9 @@ def _compute(
         np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in pnp_cam_timestamps_ns
     ])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
-
-    set_progress(0.85, "Optimizing angular velocities...")
     optimized_angular_velocities, optimized_attitudes = _optimize_angular_velocities(
         imu_angular_velocities_at_cam_times, pnp_attitudes, data.cam0_rate_hz
     )
-
-    closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
-    R_gt = first_gt_pose[:3, :3]
-    R_leica = data.leica_extrinsics[:3, :3]
-    imu_attitudes_in_world = np.array([
-        R_gt @ R_leica @ imu_attitudes[closest_imu_index + 1].T @ att @ R_leica.T
-        for att in imu_attitudes
-    ])
-
-    gt_angular_velocities = []
-    gt_angular_velocity_times = []
-    for j in range(len(gt_samples) - 1):
-        R0 = _quaternion_to_rotation_matrix(gt_samples[j].quaternion)
-        R1 = _quaternion_to_rotation_matrix(gt_samples[j + 1].quaternion)
-        R_rel = R0.T @ R1
-        rvec_gt, _ = cv2.Rodrigues(R_rel)
-        dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
-        gt_angular_velocities.append(rvec_gt.flatten() / dt)
-        gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - first_ts) / 1e9)
-    gt_angular_velocities = np.array(gt_angular_velocities)
-    gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
     set_progress(0.95, "Finishing...")
     return SlamResult(
