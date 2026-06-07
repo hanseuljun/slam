@@ -65,24 +65,14 @@ def triangulate_stereo_matches(
 def solve_pnp(
     data: DataFolder,
     points_3d: np.ndarray,
+    stereo_matches: list,
     cam0_descriptors0: np.ndarray,
-    cam1_descriptors0: np.ndarray,
     cam0_keypoints1,
     cam0_descriptors1: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, int, float]:
-    # Get stereo matches again to know which cam0_keypoints0 indices have 3D points
-    # Use NORM_HAMMING for binary descriptors (ORB, BRIEF, BRISK)
+    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_matches)}
+
     bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    stereo_matches = bf.knnMatch(cam0_descriptors0, cam1_descriptors0, k=2)
-    stereo_good_matches = []
-    for m, n in stereo_matches:
-        if m.distance < 0.75 * n.distance:
-            stereo_good_matches.append(m)
-
-    # Map from cam0_keypoints0 index to 3D point index
-    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_good_matches)}
-
-    # Match cam0_img0 with cam0_img1 (temporal matching)
     temporal_matches = bf.knnMatch(cam0_descriptors0, cam0_descriptors1, k=2)
     temporal_good_matches = []
     for m, n in temporal_matches:
@@ -125,20 +115,13 @@ def solve_pnp(
 
 def solve_stereo_pnp(
     data: DataFolder,
-    cam0_keypoints0,
     cam0_descriptors0: np.ndarray,
-    cam1_keypoints0,
-    cam1_descriptors0: np.ndarray,
+    stereo_matches: list,
+    points_3d: np.ndarray,
     cam0_keypoints1,
     cam0_descriptors1: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, int, float]:
-    points_3d = triangulate_stereo_matches(
-        data, cam0_keypoints0, cam0_descriptors0, cam1_keypoints0, cam1_descriptors0
+    return solve_pnp(
+        data, points_3d, stereo_matches,
+        cam0_descriptors0, cam0_keypoints1, cam0_descriptors1
     )
-
-    rvec, tvec, num_temporal_matches, reprojection_error = solve_pnp(
-        data, points_3d, cam0_descriptors0,
-        cam1_descriptors0, cam0_keypoints1, cam0_descriptors1
-    )
-
-    return rvec, tvec, num_temporal_matches, reprojection_error

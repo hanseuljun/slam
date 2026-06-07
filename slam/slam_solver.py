@@ -9,6 +9,7 @@ from scipy.optimize import least_squares
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.solve import solve_stereo_pnp
+from slam.stereo_matching import StereoMatchingResult
 
 
 def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
@@ -54,6 +55,7 @@ class _Cancelled(Exception):
 def _run_pnp(
     data: DataFolder,
     feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
     indices_in_range: list[int],
     on_progress: Callable[[float], None],
     stop_event: threading.Event,
@@ -68,13 +70,16 @@ def _run_pnp(
             raise _Cancelled
         on_progress(i / n)
         try:
-            kf = feature_detection_result.frames[indices_in_range[keyframe_indices[-1]]]
-            cf = feature_detection_result.frames[indices_in_range[i]]
+            kf_idx = indices_in_range[keyframe_indices[-1]]
+            cf_idx = indices_in_range[i]
+            kf_fd = feature_detection_result.frames[kf_idx]
+            kf_sm = stereo_matching_result.frames[kf_idx]
+            cf_fd = feature_detection_result.frames[cf_idx]
             rvec, tvec, num_temporal_matches, _ = solve_stereo_pnp(
                 data,
-                kf.cam0_keypoints, kf.cam0_descriptors,
-                kf.cam1_keypoints, kf.cam1_descriptors,
-                cf.cam0_keypoints, cf.cam0_descriptors,
+                kf_fd.cam0_descriptors,
+                kf_sm.matches, kf_sm.points_3d,
+                cf_fd.cam0_keypoints, cf_fd.cam0_descriptors,
             )
         except Exception as e:
             print(f"solve_stereo_pnp failed at i={i}: {e}")
@@ -120,6 +125,7 @@ class SlamResults:
 def _compute_plots(
     data: DataFolder,
     feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
     set_progress: Callable[[float, str], None],
     stop_event: threading.Event,
     start_s: float,
@@ -132,7 +138,7 @@ def _compute_plots(
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
-        data, feature_detection_result, indices_in_range,
+        data, feature_detection_result, stereo_matching_result, indices_in_range,
         on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
         stop_event=stop_event,
     )
@@ -240,9 +246,10 @@ def _compute_plots(
 
 
 class SlamSolver:
-    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult, start_s: float = 0.0, duration_s: float = 20.0) -> None:
+    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult, start_s: float = 0.0, duration_s: float = 20.0) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
+        self._stereo_matching_result = stereo_matching_result
         self._start_s = start_s
         self._duration_s = duration_s
         self.plots: Optional[SlamResults] = None
@@ -259,7 +266,7 @@ class SlamSolver:
 
     def _compute(self, stop_event: threading.Event) -> None:
         try:
-            self.plots = _compute_plots(self._data, self._feature_detection_result, self._set_progress, stop_event, self._start_s, self._duration_s)
+            self.plots = _compute_plots(self._data, self._feature_detection_result, self._stereo_matching_result, self._set_progress, stop_event, self._start_s, self._duration_s)
         except _Cancelled:
             pass
         except Exception as e:
