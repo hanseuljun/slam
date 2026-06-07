@@ -1,6 +1,7 @@
 import threading
 from typing import Optional
 
+import cv2
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -43,23 +44,33 @@ class CoordinateMappingViewModel:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._checker: Optional[CoordinateMappingChecker] = None
+        self._feature_detection_result: Optional[FeatureDetectionResult] = None
+        self._stereo_matching_result: Optional[StereoMatchingResult] = None
         self._result: Optional[CoordinateMappingCheckResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None
-        self._texture: Optional[hello_imgui.TextureGpu] = None
+        self._plot_texture: Optional[hello_imgui.TextureGpu] = None
+        self.frame_index: int = 0
+        self._cached_frame_index: int = -1
+        self._match_texture: Optional[hello_imgui.TextureGpu] = None
 
     def start(
         self,
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
     ) -> None:
+        self._feature_detection_result = feature_detection_result
+        self._stereo_matching_result = stereo_matching_result
         self._checker = CoordinateMappingChecker(
             self._data, feature_detection_result, stereo_matching_result,
         )
         self._result = None
         self._loading = True
         self._error = None
-        self._texture = None
+        self._plot_texture = None
+        self.frame_index = 0
+        self._cached_frame_index = -1
+        self._match_texture = None
         threading.Thread(target=self._compute, daemon=True).start()
 
     def _compute(self) -> None:
@@ -69,6 +80,36 @@ class CoordinateMappingViewModel:
             self._error = str(e)
         finally:
             self._loading = False
+
+    def current_match_texture(self) -> Optional[hello_imgui.TextureGpu]:
+        if self._result is None or self._feature_detection_result is None or self._stereo_matching_result is None:
+            return None
+        if self._cached_frame_index != self.frame_index:
+            self._match_texture = None
+            frame = self._result.frames[self.frame_index]
+            sm_k = self._stereo_matching_result.frames[self.frame_index]
+            sm_k1 = self._stereo_matching_result.frames[self.frame_index + 1]
+            fd_k = self._feature_detection_result.frames[self.frame_index]
+            fd_k1 = self._feature_detection_result.frames[self.frame_index + 1]
+
+            cam0_img_k = cv2.imread(
+                str(self._data.get_cam0_image_path(sm_k.timestamp_ns)),
+                cv2.IMREAD_GRAYSCALE,
+            )
+            cam0_img_k1 = cv2.imread(
+                str(self._data.get_cam0_image_path(sm_k1.timestamp_ns)),
+                cv2.IMREAD_GRAYSCALE,
+            )
+            kps_k = [fd_k.cam0_keypoints[m.queryIdx] for m in sm_k.matches]
+            img_matches = cv2.drawMatches(
+                cam0_img_k, kps_k,
+                cam0_img_k1, fd_k1.cam0_keypoints,
+                frame.matches, None,
+                flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+            )
+            self._match_texture = image_to_texture(img_matches)
+            self._cached_frame_index = self.frame_index
+        return self._match_texture
 
 
 def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
@@ -85,10 +126,35 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     if model._result is None:
         return
 
-    if model._texture is None:
-        model._texture = image_to_texture(figure_to_image(_plot_result(model._result)))
+    n = len(model._result.frames)
+    first_ts_ns = model._data.cam_timestamps_ns[0]
 
-    tex = model._texture
-    imgui.begin_child("##cmc_scroll", (0, 0), False)
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-    imgui.end_child()
+    tex = model.current_match_texture()
+    if tex is not None:
+        imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+        imgui.set_next_item_width(tex.width)
+        changed, new_index = imgui.slider_int("##cm_slider", model.frame_index, 0, n - 1)
+        if changed:
+            model.frame_index = new_index
+
+    imgui.text("Frame")
+    imgui.same_line()
+    imgui.set_next_item_width(200)
+    changed, new_index = imgui.input_int("##cm_frame_input", model.frame_index, step=1)
+    if changed:
+        model.frame_index = max(0, min(n - 1, new_index))
+
+    frame = model._result.frames[model.frame_index]
+    imgui.text(f"Matches: {len(frame.matches)}")
+    mean_err = np.mean(frame.projection_errors) if frame.projection_errors else float('nan')
+    imgui.text(f"Mean projection error: {mean_err:.2f} px")
+    imgui.text(f"Timestamp: {frame.timestamp_ns} ns")
+    imgui.text(f"Time since first frame: {(frame.timestamp_ns - first_ts_ns) / 1e9:.3f} s")
+
+    imgui.separator()
+
+    if model._plot_texture is None:
+        model._plot_texture = image_to_texture(figure_to_image(_plot_result(model._result)))
+
+    plot_tex = model._plot_texture
+    imgui.image(imgui.ImTextureRef(plot_tex.texture_id()), (plot_tex.width, plot_tex.height))
