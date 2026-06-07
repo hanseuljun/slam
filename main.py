@@ -1,8 +1,9 @@
 from pathlib import Path
+from typing import Optional
 
 from imgui_bundle import imgui, hello_imgui, immapp
 
-from slam import DataFolder
+from slam import DataFolder, FeatureDetectionResult
 from slam.slam_solver import SlamSolver
 from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
@@ -19,7 +20,11 @@ class RootViewModel:
         self.slam_solver.start()
         self.slam_view_model = SlamViewModel(self.slam_solver)
         self.time_range_model = TimeRangeModel()
-        self.feature_detection_view_model = FeatureDetectionViewModel(data)
+        self.feature_detection_result: Optional[FeatureDetectionResult] = None
+        self.feature_detection_view_model = FeatureDetectionViewModel(
+            data,
+            on_result=lambda result: setattr(self, "feature_detection_result", result),
+        )
         self.feature_detection_view_model.start()
         self.triangulation_view_model = TriangulationViewModel(data)
         self.triangulation_view_model.start()

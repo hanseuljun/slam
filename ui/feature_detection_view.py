@@ -1,17 +1,23 @@
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 from imgui_bundle import hello_imgui, imgui
 
 from slam.data import DataFolder
-from slam.feature_detection import FeatureDetectionResult, detect_features
+from slam.feature_detection import FeatureDetectionResult, FeatureDetectionSolver
 from ui.utils import image_to_texture
 
 
 class FeatureDetectionViewModel:
-    def __init__(self, data: DataFolder) -> None:
+    def __init__(
+        self,
+        data: DataFolder,
+        on_result: Callable[[FeatureDetectionResult], None],
+    ) -> None:
         self._data = data
+        self._on_result = on_result
+        self._solver = FeatureDetectionSolver(data)
         self._result: Optional[FeatureDetectionResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None
@@ -22,7 +28,9 @@ class FeatureDetectionViewModel:
 
     def _compute(self) -> None:
         try:
-            self._result = detect_features(self._data)
+            result = self._solver.run()
+            self._result = result
+            self._on_result(result)
         except Exception as e:
             self._error = str(e)
         finally:
@@ -57,6 +65,7 @@ class FeatureDetectionViewModel:
 def feature_detection_view(model: FeatureDetectionViewModel) -> None:
     if model._loading:
         imgui.text("Detecting features...")
+        imgui.progress_bar(model._solver.progress, (-1, 0))
         return
     if model._error:
         imgui.text(f"Error: {model._error}")
