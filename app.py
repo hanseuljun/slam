@@ -6,6 +6,7 @@ from slam import DataFolder
 from slam.slam_solver import SlamSolver
 from ui.camera_frames_tab import CameraFramesTabState, camera_frames_tab
 from ui.slam_tab import SlamTabState, slam_tab
+from ui.time_range_view import TimeRangeState, time_range_view
 from ui.triangulation_tab import TriangulationTabState, triangulation_tab
 
 
@@ -16,14 +17,17 @@ class App:
         self.slam_solver = SlamSolver(data)
         self.slam_solver.start()
         self.slam_tab_state = SlamTabState(self.slam_solver)
-        self.start_s: float = 0.0
-        self.duration_s: float = 5.0
+        self.time_range_state = TimeRangeState()
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
 
     def restart_slam(self) -> None:
         self.slam_solver._stop_event.set()
-        self.slam_solver = SlamSolver(self.data, self.start_s, self.duration_s)
+        self.slam_solver = SlamSolver(
+            self.data,
+            self.time_range_state.start_s,
+            self.time_range_state.duration_s,
+        )
         self.slam_solver.start()
         self.slam_tab_state._solver = self.slam_solver
 
@@ -39,12 +43,7 @@ class App:
             | imgui.WindowFlags_.no_scrollbar,
         )
 
-        _, self.start_s = imgui.input_float("Start time (s)", self.start_s, step=1.0)
-        imgui.same_line()
-        _, self.duration_s = imgui.input_float("Duration (s)", self.duration_s, step=1.0)
-        imgui.same_line()
-        if imgui.button("Run Again"):
-            self.restart_slam()
+        time_range_view(self.time_range_state, self.restart_slam)
 
         if imgui.begin_tab_bar("##tabs"):
             if imgui.begin_tab_item("Camera Frames")[0]:
