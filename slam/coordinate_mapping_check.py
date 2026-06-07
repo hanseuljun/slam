@@ -3,20 +3,23 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from slam.data import DataFolder
+from slam.data import DataFolder, GroundTruthSample
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
-from slam.data import GroundTruthSample
 from slam.util import quaternion_to_rotation_matrix
 
 
-def _get_ground_truth_sample(
+def _get_closest_ground_truth_pose(
     ground_truth_samples: list[GroundTruthSample],
     gt_timestamps: np.ndarray,
     timestamp_ns: int,
-) -> GroundTruthSample:
+) -> np.ndarray:
     idx = int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
-    return ground_truth_samples[idx]
+    s = ground_truth_samples[idx]
+    world_T_body = np.eye(4)
+    world_T_body[:3, :3] = quaternion_to_rotation_matrix(s.quaternion)
+    world_T_body[:3, 3] = np.array(s.position)
+    return world_T_body
 
 
 @dataclass
@@ -58,12 +61,8 @@ class CoordinateMappingChecker:
         gt_timestamps = np.array([s.timestamp_ns for s in data.ground_truth_samples])
 
         def gt_world_T_cam0(timestamp_ns: int) -> np.ndarray:
-            s = _get_ground_truth_sample(data.ground_truth_samples, gt_timestamps, timestamp_ns)
-            R = quaternion_to_rotation_matrix(s.quaternion)
-            world_T_body = np.eye(4)
-            world_T_body[:3, :3] = R
-            world_T_body[:3, 3] = np.array(s.position)
-            return world_T_body @ data.cam0_extrinsics
+            world_T_body = _get_closest_ground_truth_pose(data.ground_truth_samples, gt_timestamps, timestamp_ns)
+            return data.leica_extrinsics @ np.linalg.inv(data.cam0_extrinsics) @ world_T_body
 
         n = len(sm_result.frames)
         first_ts = data.cam_timestamps_ns[0]
