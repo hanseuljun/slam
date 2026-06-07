@@ -10,7 +10,7 @@ from ui.time_range_view import TimeRangeState, time_range_view
 from ui.triangulation_view import TriangulationViewState, triangulation_view
 
 
-class App:
+class RootViewModel:
     def __init__(self, data: DataFolder) -> None:
         self.data = data
         self.data_view_state = DataViewState(data)
@@ -31,47 +31,48 @@ class App:
         self.slam_solver.start()
         self.slam_view_state._solver = self.slam_solver
 
-    def render(self) -> None:
-        viewport = imgui.get_main_viewport()
-        imgui.set_next_window_pos(viewport.work_pos)
-        imgui.set_next_window_size(viewport.work_size)
-        imgui.begin(
-            "##main",
-            flags=imgui.WindowFlags_.no_title_bar
-            | imgui.WindowFlags_.no_resize
-            | imgui.WindowFlags_.no_move
-            | imgui.WindowFlags_.no_scrollbar,
-        )
 
-        time_range_view(self.time_range_state, self.restart_slam)
+def root_view(vm: RootViewModel) -> None:
+    viewport = imgui.get_main_viewport()
+    imgui.set_next_window_pos(viewport.work_pos)
+    imgui.set_next_window_size(viewport.work_size)
+    imgui.begin(
+        "##main",
+        flags=imgui.WindowFlags_.no_title_bar
+        | imgui.WindowFlags_.no_resize
+        | imgui.WindowFlags_.no_move
+        | imgui.WindowFlags_.no_scrollbar,
+    )
 
-        if imgui.begin_tab_bar("##tabs"):
-            if imgui.begin_tab_item("Data")[0]:
-                data_view(self.data_view_state)
-                imgui.end_tab_item()
+    time_range_view(vm.time_range_state, vm.restart_slam)
 
-            if imgui.begin_tab_item("SLAM")[0]:
-                slam_view(self.slam_view_state)
-                imgui.end_tab_item()
+    if imgui.begin_tab_bar("##tabs"):
+        if imgui.begin_tab_item("Data")[0]:
+            data_view(vm.data_view_state)
+            imgui.end_tab_item()
 
-            if imgui.begin_tab_item("Triangulation")[0]:
-                triangulation_view(self.triangulation_view_state)
-                imgui.end_tab_item()
+        if imgui.begin_tab_item("SLAM")[0]:
+            slam_view(vm.slam_view_state)
+            imgui.end_tab_item()
 
-            imgui.end_tab_bar()
+        if imgui.begin_tab_item("Triangulation")[0]:
+            triangulation_view(vm.triangulation_view_state)
+            imgui.end_tab_item()
 
-        imgui.end()
+        imgui.end_tab_bar()
+
+    imgui.end()
 
 
 def main():
     data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    app = App(data)
+    vm = RootViewModel(data)
 
     runner_params = hello_imgui.RunnerParams()
     runner_params.app_window_params.window_title = "slam"
     runner_params.app_window_params.window_geometry.size = (1280, 720)
     runner_params.ini_filename = "slam.ini"
-    runner_params.callbacks.show_gui = app.render
+    runner_params.callbacks.show_gui = lambda: root_view(vm)
 
     immapp.run(runner_params)
 

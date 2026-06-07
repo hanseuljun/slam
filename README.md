@@ -3,7 +3,7 @@
 ## setup
 
 - `source venv/bin/activate`
-- `python app.py`
+- `python main.py`
 
 ## data
 
