@@ -25,8 +25,8 @@ def _get_closest_ground_truth_pose(
 @dataclass
 class CoordinateMappingCheckFrame:
     timestamp_ns: int
-    mean_projection_error: float
-    num_matches: int
+    projection_errors: list[float]
+    matches: list  # list[cv2.DMatch]
 
 
 @dataclass
@@ -80,8 +80,8 @@ class CoordinateMappingChecker:
             if len(sm_k.matches) < 2 or len(fd_k1.cam0_descriptors) < 2:
                 frames.append(CoordinateMappingCheckFrame(
                     timestamp_ns=sm_k.timestamp_ns,
-                    mean_projection_error=float('nan'),
-                    num_matches=0,
+                    projection_errors=[],
+                    matches=[],
                 ))
                 continue
 
@@ -96,12 +96,13 @@ class CoordinateMappingChecker:
             if not good:
                 frames.append(CoordinateMappingCheckFrame(
                     timestamp_ns=sm_k.timestamp_ns,
-                    mean_projection_error=float('nan'),
-                    num_matches=0,
+                    projection_errors=[],
+                    matches=[],
                 ))
                 continue
 
             errors = []
+            valid_matches = []
             for m in good:
                 p_cam0_k = sm_k.points_3d[:, m.queryIdx]
                 p_world = world_T_cam0_k[:3, :3] @ p_cam0_k + world_T_cam0_k[:3, 3]
@@ -117,19 +118,13 @@ class CoordinateMappingChecker:
                 projected_pt = projected.reshape(2)
                 actual_pt = np.array(fd_k1.cam0_keypoints[m.trainIdx].pt)
                 errors.append(float(np.linalg.norm(projected_pt - actual_pt)))
+                valid_matches.append(m)
 
-            if errors:
-                frames.append(CoordinateMappingCheckFrame(
-                    timestamp_ns=sm_k.timestamp_ns,
-                    mean_projection_error=float(np.mean(errors)),
-                    num_matches=len(errors),
-                ))
-            else:
-                frames.append(CoordinateMappingCheckFrame(
-                    timestamp_ns=sm_k.timestamp_ns,
-                    mean_projection_error=float('nan'),
-                    num_matches=0,
-                ))
+            frames.append(CoordinateMappingCheckFrame(
+                timestamp_ns=sm_k.timestamp_ns,
+                projection_errors=errors,
+                matches=valid_matches,
+            ))
 
         self.progress = 1.0
         times = np.array([(f.timestamp_ns - first_ts) / 1e9 for f in frames])

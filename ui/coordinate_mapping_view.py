@@ -19,13 +19,13 @@ from ui.utils import figure_to_image, image_to_texture
 
 def _plot_result(result: CoordinateMappingCheckResult) -> plt.Figure:
     times = result.times
-    errors = np.array([f.mean_projection_error for f in result.frames])
-    num_matches = np.array([f.num_matches for f in result.frames])
+    mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
+    num_matches = np.array([len(f.matches) for f in result.frames])
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
     fig.suptitle('Coordinate Mapping Check (Ground Truth Poses)')
 
-    ax1.plot(times, errors)
+    ax1.plot(times, mean_errors)
     ax1.set_xlabel('Time [s]')
     ax1.set_ylabel('Projection Error [px]')
     ax1.set_title('Mean Projection Error per Adjacent Frame Pair')
