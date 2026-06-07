@@ -11,42 +11,6 @@ from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 
 
-def triangulate_stereo_matches(
-    data: DataFolder,
-    cam0_keypoints,
-    cam0_descriptors: np.ndarray,
-    cam1_keypoints,
-    cam1_descriptors: np.ndarray,
-) -> np.ndarray:
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2)
-    good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
-
-    K0 = data.cam0_intrinsics.to_matrix()
-    K1 = data.cam1_intrinsics.to_matrix()
-    dist_coeffs0 = np.array([
-        data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
-        data.cam0_intrinsics.p1, data.cam0_intrinsics.p2,
-    ])
-    dist_coeffs1 = np.array([
-        data.cam1_intrinsics.k1, data.cam1_intrinsics.k2,
-        data.cam1_intrinsics.p1, data.cam1_intrinsics.p2,
-    ])
-
-    points0 = np.array([cam0_keypoints[m.queryIdx].pt for m in good_matches])
-    points1 = np.array([cam1_keypoints[m.trainIdx].pt for m in good_matches])
-
-    points0 = cv2.undistortPoints(points0, K0, dist_coeffs0, P=K0).reshape(-1, 2)
-    points1 = cv2.undistortPoints(points1, K1, dist_coeffs1, P=K1).reshape(-1, 2)
-
-    P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
-    T_cam0_to_cam1 = np.linalg.inv(data.cam1_extrinsics) @ data.cam0_extrinsics
-    P1 = K1 @ T_cam0_to_cam1[:3, :]
-
-    points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
-    return points_4d[:3, :] / points_4d[3, :]
-
-
 def solve_pnp(
     data: DataFolder,
     points_3d: np.ndarray,
