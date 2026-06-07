@@ -142,12 +142,17 @@ def _run_pnp(
 
 
 @dataclass
-class SlamResults:
-    pnp_times: np.ndarray
-    pnp_positions: np.ndarray
-    pnp_attitudes: np.ndarray
-    pnp_angular_velocity_times: np.ndarray
-    pnp_angular_velocities: np.ndarray
+class SlamPnpResult:
+    times: np.ndarray
+    positions: np.ndarray
+    attitudes: np.ndarray
+    angular_velocity_times: np.ndarray
+    angular_velocities: np.ndarray
+
+
+@dataclass
+class SlamResult:
+    pnp: SlamPnpResult
     imu_attitude_times: np.ndarray
     imu_attitudes: np.ndarray
     imu_times: np.ndarray
@@ -168,7 +173,7 @@ def _compute_plots(
     stereo_matching_result: StereoMatchingResult,
     set_progress: Callable[[float, str], None],
     stop_event: threading.Event,
-) -> SlamResults:
+) -> SlamResult:
     first_ts = data.cam_timestamps_ns[0]
     max_ts = stereo_matching_result.frames[-1].timestamp_ns
 
@@ -260,12 +265,14 @@ def _compute_plots(
     gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
     set_progress(0.95, "Finishing...")
-    return SlamResults(
-        pnp_times=pnp_times,
-        pnp_positions=pnp_positions_in_world,
-        pnp_attitudes=pnp_attitudes,
-        pnp_angular_velocity_times=pnp_angular_velocity_times,
-        pnp_angular_velocities=pnp_angular_velocities_from_rvec,
+    return SlamResult(
+        pnp=SlamPnpResult(
+            times=pnp_times,
+            positions=pnp_positions_in_world,
+            attitudes=pnp_attitudes,
+            angular_velocity_times=pnp_angular_velocity_times,
+            angular_velocities=pnp_angular_velocities_from_rvec,
+        ),
         imu_attitude_times=imu_attitude_times,
         imu_attitudes=imu_attitudes_in_world,
         imu_times=imu_times,
@@ -286,7 +293,7 @@ class SlamSolver:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
-        self.plots: Optional[SlamResults] = None
+        self.plots: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
         self.progress: float = 0.0

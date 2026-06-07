@@ -9,7 +9,7 @@ from imgui_bundle import imgui, hello_imgui
 
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
-from slam.slam import SlamResults, SlamSolver
+from slam.slam import SlamResult, SlamSolver
 from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
@@ -57,31 +57,31 @@ def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -
     return fig
 
 
-def _render_positions(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
+def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.pnp_times, results.pnp_positions, 'pnp'),
+        (results.pnp.times, results.pnp.positions, 'pnp'),
         (results.gt_times, results.gt_positions, 'gt'),
     ]
     return figure_to_image(_plot_positions([s for s in all_series if enabled[s[2]]]))
 
 
-def _render_attitudes(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
+def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.pnp_times, results.pnp_attitudes, 'pnp'),
+        (results.pnp.times, results.pnp.attitudes, 'pnp'),
         (results.imu_attitude_times, results.imu_attitudes, 'imu'),
         (results.gt_times, results.gt_attitudes, 'gt'),
-        (results.pnp_times, results.optimized_attitudes, 'opt'),
+        (results.pnp.times, results.optimized_attitudes, 'opt'),
     ]
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
 
-def _render_angular_velocities(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
+def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.pnp_angular_velocity_times, results.pnp_angular_velocities, 'pnp'),
+        (results.pnp.angular_velocity_times, results.pnp.angular_velocities, 'pnp'),
         (results.imu_times, results.imu_angular_velocities, 'imu'),
-        (results.pnp_times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
+        (results.pnp.times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
         (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
-        (results.pnp_angular_velocity_times, results.optimized_angular_velocities, 'opt'),
+        (results.pnp.angular_velocity_times, results.optimized_angular_velocities, 'opt'),
     ]
     return figure_to_image(_plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
 
