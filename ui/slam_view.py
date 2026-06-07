@@ -2,15 +2,58 @@ from typing import Optional
 
 import matplotlib
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
-from slam.plot import plot_angular_velocities, plot_attitudes, plot_positions
 from slam.slam_solver import SlamResults, SlamSolver
 from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
+
+
+def _plot_positions(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
+    fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
+    fig.suptitle('Position')
+    for ax, i, label in zip([ax_x, ax_y, ax_z], range(3), ['X', 'Y', 'Z']):
+        for times, positions, name in series:
+            ax.plot(times, positions[:, i], label=name)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{label} [m]')
+        ax.legend()
+    plt.tight_layout()
+    return fig
+
+
+def _plot_attitudes(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
+    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
+    fig.suptitle('Rotation Axes')
+    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
+    component_names = ['X', 'Y', 'Z']
+    for row in range(3):
+        for col in range(3):
+            ax = axes[row, col]
+            for times, attitudes, name in series:
+                ax.plot(times, attitudes[:, col, row], label=name)
+            ax.set_xlabel('Time [s]')
+            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
+            ax.legend()
+    plt.tight_layout()
+    return fig
+
+
+def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
+    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
+    fig.suptitle('Angular Velocity in Body Frame')
+    for ax, i, label in zip([ax_wx, ax_wy, ax_wz], range(3), ['wx', 'wy', 'wz']):
+        for times, angular_velocities, name in series:
+            ax.plot(times, angular_velocities[:, i], label=name)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{label} [rad/s]')
+        ax.legend()
+    plt.tight_layout()
+    return fig
 
 
 def _render_positions(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
@@ -18,7 +61,7 @@ def _render_positions(results: SlamResults, enabled: dict[str, bool]) -> np.ndar
         (results.pnp_times, results.pnp_positions, 'pnp'),
         (results.gt_times, results.gt_positions, 'gt'),
     ]
-    return figure_to_image(plot_positions([s for s in all_series if enabled[s[2]]]))
+    return figure_to_image(_plot_positions([s for s in all_series if enabled[s[2]]]))
 
 
 def _render_attitudes(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
@@ -28,7 +71,7 @@ def _render_attitudes(results: SlamResults, enabled: dict[str, bool]) -> np.ndar
         (results.gt_times, results.gt_attitudes, 'gt'),
         (results.pnp_times, results.optimized_attitudes, 'opt'),
     ]
-    return figure_to_image(plot_attitudes([s for s in all_series if enabled[s[2]]]))
+    return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
 
 def _render_angular_velocities(results: SlamResults, enabled: dict[str, bool]) -> np.ndarray:
@@ -39,7 +82,7 @@ def _render_angular_velocities(results: SlamResults, enabled: dict[str, bool]) -
         (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
         (results.pnp_angular_velocity_times, results.optimized_angular_velocities, 'opt'),
     ]
-    return figure_to_image(plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
+    return figure_to_image(_plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
 
 
 class SlamViewModel:
@@ -90,7 +133,7 @@ def slam_view(model: SlamViewModel) -> None:
 
     solver = model._solver
     if solver is None:
-        imgui.text("Waiting for feature detection...")
+        imgui.text("Waiting for stereo matching...")
         return
     if solver.loading:
         imgui.text(solver.progress_label)
