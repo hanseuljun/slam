@@ -61,6 +61,7 @@ def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
     all_series = [
         (results.gt_times, results.gt_positions, 'gt'),
         (results.pnp.times, results.pnp.positions, 'pnp'),
+        (results.pnp.times, results.gtsam.positions, 'gtsam'),
     ]
     return figure_to_image(_plot_positions([s for s in all_series if enabled[s[2]]]))
 
@@ -71,6 +72,7 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
         (results.imu_attitude_times, results.imu_attitudes, 'imu'),
         (results.pnp.times, results.pnp.attitudes, 'pnp'),
         (results.pnp.times, results.optimization.attitudes, 'opt'),
+        (results.pnp.times, results.gtsam.attitudes, 'gtsam'),
     ]
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
@@ -93,8 +95,8 @@ class SlamViewModel:
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
-        self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True}
-        self.att_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'opt': True}
+        self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
+        self.att_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'opt': True, 'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'imu@cam': True, 'pnp': True, 'opt': True}
 
     def start(

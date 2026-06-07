@@ -9,6 +9,7 @@ dependencies = [
     "opencv-python",
     "pyyaml",
     "scipy",
+    "gtsam",
 ]
 
 [build-system]
