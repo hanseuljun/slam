@@ -318,10 +318,10 @@ def _compute(
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
         data, feature_detection_result, stereo_matching_result,
-        on_progress=lambda p: set_progress(p * 0.8, "Running PnP..."),
+        on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
 
-    set_progress(0.8, "Transforming poses...")
+    set_progress(1.0 / 4.0, "Transforming poses...")
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt.timestamp_ns))
 
@@ -344,7 +344,7 @@ def _compute(
         for i in range(len(pnp_angular_velocities_from_rvec))
     ])
 
-    set_progress(0.85, "Optimizing angular velocities...")
+    set_progress(2.0 / 4.0, "Optimizing angular velocities...")
     pnp_cam_timestamps_ns = np.array([
         stereo_matching_result.frames[i].timestamp_ns
         for i in range(len(pnp_poses_without_initial))
@@ -357,7 +357,7 @@ def _compute(
         imu_angular_velocities_at_cam_times, pnp_attitudes, data.cam0_rate_hz
     )
 
-    set_progress(0.90, "Running GTSAM optimization...")
+    set_progress(3.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
         data, feature_detection_result, stereo_matching_result,
         pnp_poses_in_world, imu_angular_velocities_at_cam_times,
