@@ -18,6 +18,13 @@ from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
 
+def _match_color(i: int, total: int) -> tuple[int, int, int]:
+    hue = int(i * 180 / max(total, 1)) % 180
+    color_hsv = np.array([[[hue, 220, 220]]], dtype=np.uint8)
+    color_bgr = cv2.cvtColor(color_hsv, cv2.COLOR_HSV2BGR)[0, 0]
+    return (int(color_bgr[0]), int(color_bgr[1]), int(color_bgr[2]))
+
+
 def _plot_result(result: CoordinateMappingCheckResult) -> plt.Figure:
     times = result.times
     mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
@@ -53,8 +60,8 @@ class CoordinateMappingViewModel:
         self.frame_index: int = 0
         self.match_index_min: int = 0
         self.match_index_max: int = 0
-        self._cached_frame_index: int = -1
-        self._cached_match_range: tuple[int, int] = (-1, -1)
+        self.show_projected: bool = True
+        self._cache_key: tuple = ()
         self._match_texture: Optional[hello_imgui.TextureGpu] = None
 
     def start(
@@ -74,8 +81,8 @@ class CoordinateMappingViewModel:
         self.frame_index = 0
         self.match_index_min = 0
         self.match_index_max = 0
-        self._cached_frame_index = -1
-        self._cached_match_range = (-1, -1)
+        self.show_projected = True
+        self._cache_key = ()
         self._match_texture = None
         threading.Thread(target=self._compute, daemon=True).start()
 
@@ -91,8 +98,8 @@ class CoordinateMappingViewModel:
     def current_match_texture(self) -> Optional[hello_imgui.TextureGpu]:
         if self._result is None or self._feature_detection_result is None or self._stereo_matching_result is None:
             return None
-        match_range = (self.match_index_min, self.match_index_max)
-        if self._cached_frame_index != self.frame_index or self._cached_match_range != match_range:
+        cache_key = (self.frame_index, self.match_index_min, self.match_index_max, self.show_projected)
+        if self._cache_key != cache_key:
             self._match_texture = None
             frame = self._result.frames[self.frame_index]
             sm_k = self._stereo_matching_result.frames[self.frame_index]
@@ -111,19 +118,37 @@ class CoordinateMappingViewModel:
             kps_k = [fd_k.cam0_keypoints[m.queryIdx] for m in sm_k.matches]
             matches = frame.matches[self.match_index_min:self.match_index_max + 1]
             projected = frame.projected_points[self.match_index_min:self.match_index_max + 1]
-            img_matches = cv2.drawMatches(
-                cam0_img_k, kps_k,
-                cam0_img_k1, fd_k1.cam0_keypoints,
-                matches, None,
-                flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-            )
-            offset_x = cam0_img_k.shape[1]
-            for pt in projected:
-                x, y = int(round(pt[0])) + offset_x, int(round(pt[1]))
-                cv2.drawMarker(img_matches, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2)
+
+            total = len(matches)
+            img_matches = None
+            for i, m in enumerate(matches):
+                color = _match_color(i, total)
+                flags = cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+                if img_matches is not None:
+                    flags |= cv2.DrawMatchesFlags_DRAW_OVER_OUTIMG
+                img_matches = cv2.drawMatches(
+                    cam0_img_k, kps_k,
+                    cam0_img_k1, fd_k1.cam0_keypoints,
+                    [m], img_matches,
+                    matchColor=color,
+                    flags=flags,
+                )
+
+            if img_matches is None:
+                h = max(cam0_img_k.shape[0], cam0_img_k1.shape[0])
+                img_matches = np.zeros((h, cam0_img_k.shape[1] + cam0_img_k1.shape[1], 3), dtype=np.uint8)
+                img_matches[:cam0_img_k.shape[0], :cam0_img_k.shape[1]] = cv2.cvtColor(cam0_img_k, cv2.COLOR_GRAY2BGR)
+                img_matches[:cam0_img_k1.shape[0], cam0_img_k.shape[1]:] = cv2.cvtColor(cam0_img_k1, cv2.COLOR_GRAY2BGR)
+
+            if self.show_projected:
+                offset_x = cam0_img_k.shape[1]
+                for i, pt in enumerate(projected):
+                    color = _match_color(i, total)
+                    x, y = int(round(pt[0])) + offset_x, int(round(pt[1]))
+                    cv2.drawMarker(img_matches, (x, y), color, cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=1)
+
             self._match_texture = image_to_texture(img_matches)
-            self._cached_frame_index = self.frame_index
-            self._cached_match_range = match_range
+            self._cache_key = cache_key
         return self._match_texture
 
 
@@ -181,6 +206,8 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
         changed_max, new_max = imgui.input_int("##cm_match_max", model.match_index_max, step=1)
         if changed_max:
             model.match_index_max = max(model.match_index_min, min(max_idx, new_max))
+        imgui.same_line()
+        _, model.show_projected = imgui.checkbox("Show projected", model.show_projected)
 
     imgui.text(f"Matches: {num_matches}")
     mean_err = np.mean(frame.projection_errors) if frame.projection_errors else float('nan')
