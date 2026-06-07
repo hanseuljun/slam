@@ -110,12 +110,17 @@ class CoordinateMappingViewModel:
             )
             kps_k = [fd_k.cam0_keypoints[m.queryIdx] for m in sm_k.matches]
             matches = frame.matches[self.match_index_min:self.match_index_max + 1]
+            projected = frame.projected_points[self.match_index_min:self.match_index_max + 1]
             img_matches = cv2.drawMatches(
                 cam0_img_k, kps_k,
                 cam0_img_k1, fd_k1.cam0_keypoints,
                 matches, None,
                 flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
             )
+            offset_x = cam0_img_k.shape[1]
+            for pt in projected:
+                x, y = int(round(pt[0])) + offset_x, int(round(pt[1]))
+                cv2.drawMarker(img_matches, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=2)
             self._match_texture = image_to_texture(img_matches)
             self._cached_frame_index = self.frame_index
             self._cached_match_range = match_range

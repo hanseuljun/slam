@@ -27,6 +27,7 @@ class CoordinateMappingCheckFrame:
     timestamp_ns: int
     projection_errors: list[float]
     matches: list  # list[cv2.DMatch]
+    projected_points: list[tuple[float, float]]  # projected positions in frame k+1 image space
 
 
 @dataclass
@@ -82,6 +83,7 @@ class CoordinateMappingChecker:
                     timestamp_ns=sm_k.timestamp_ns,
                     projection_errors=[],
                     matches=[],
+                    projected_points=[],
                 ))
                 continue
 
@@ -98,11 +100,13 @@ class CoordinateMappingChecker:
                     timestamp_ns=sm_k.timestamp_ns,
                     projection_errors=[],
                     matches=[],
+                    projected_points=[],
                 ))
                 continue
 
             errors = []
             valid_matches = []
+            projected_points = []
             for m in good:
                 p_cam0_k = sm_k.points_3d[:, m.queryIdx]
                 p_world = world_T_cam0_k[:3, :3] @ p_cam0_k + world_T_cam0_k[:3, 3]
@@ -119,11 +123,13 @@ class CoordinateMappingChecker:
                 actual_pt = np.array(fd_k1.cam0_keypoints[m.trainIdx].pt)
                 errors.append(float(np.linalg.norm(projected_pt - actual_pt)))
                 valid_matches.append(m)
+                projected_points.append((float(projected_pt[0]), float(projected_pt[1])))
 
             frames.append(CoordinateMappingCheckFrame(
                 timestamp_ns=sm_k.timestamp_ns,
                 projection_errors=errors,
                 matches=valid_matches,
+                projected_points=projected_points,
             ))
 
         self.progress = 1.0
