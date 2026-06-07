@@ -198,7 +198,7 @@ def _optimize_with_gtsam(
     intr = data.cam0_intrinsics
     K = gtsam.Cal3_S2(intr.fx, intr.fy, 0.0, intr.cx, intr.cy)
     K_mat = intr.to_matrix()
-    dist = np.array([intr.k1, intr.k2, intr.p1, intr.p2])
+    dist_coeffs = np.array([intr.k1, intr.k2, intr.p1, intr.p2])
 
     graph = gtsam.NonlinearFactorGraph()
     initial = gtsam.Values()
@@ -248,7 +248,7 @@ def _optimize_with_gtsam(
             p_world = T_k[:3, :3] @ p_cam + T_k[:3, 3]
 
             pt = np.array([[fd_k1.cam0_keypoints[m.trainIdx].pt]], dtype=np.float64)
-            pt_u = cv2.undistortPoints(pt, K_mat, dist, P=K_mat).reshape(2)
+            pt_u = cv2.undistortPoints(pt, K_mat, dist_coeffs, P=K_mat).reshape(2)
 
             lk = L(lm_id)
             lm_id += 1
