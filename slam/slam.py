@@ -9,6 +9,7 @@ from scipy.optimize import least_squares
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
+from slam.util import quaternion_to_rotation_matrix
 
 
 @dataclass
@@ -58,14 +59,6 @@ class SlamResult:
     scipy: SlamScipyResult
     gtsam: SlamGtsamResult
 
-
-def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
-    w, x, y, z = q
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)],
-    ])
 
 
 def _solve_pnp(
@@ -274,19 +267,19 @@ def _compute(
 
     first_gt = data.ground_truth_samples[0]
     first_gt_pose = np.eye(4)
-    first_gt_pose[:3, :3] = _quaternion_to_rotation_matrix(first_gt.quaternion)
+    first_gt_pose[:3, :3] = quaternion_to_rotation_matrix(first_gt.quaternion)
     first_gt_pose[:3, 3] = first_gt.position
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
     gt_positions = np.array([s.position for s in gt_samples])
     gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
-    gt_attitudes = np.array([_quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
+    gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     gt_angular_velocities = []
     gt_angular_velocity_times = []
     for j in range(len(gt_samples) - 1):
-        R0 = _quaternion_to_rotation_matrix(gt_samples[j].quaternion)
-        R1 = _quaternion_to_rotation_matrix(gt_samples[j + 1].quaternion)
+        R0 = quaternion_to_rotation_matrix(gt_samples[j].quaternion)
+        R1 = quaternion_to_rotation_matrix(gt_samples[j + 1].quaternion)
         R_rel = R0.T @ R1
         rvec_gt, _ = cv2.Rodrigues(R_rel)
         dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9

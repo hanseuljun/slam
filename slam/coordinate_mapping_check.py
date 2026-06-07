@@ -6,15 +6,7 @@ import numpy as np
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
-
-
-def _quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
-    w, x, y, z = q
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)],
-    ])
+from slam.util import quaternion_to_rotation_matrix
 
 
 @dataclass
@@ -58,7 +50,7 @@ class CoordinateMappingChecker:
         def gt_world_T_cam0(timestamp_ns: int) -> np.ndarray:
             idx = int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
             s = data.ground_truth_samples[idx]
-            R = _quaternion_to_rotation_matrix(s.quaternion)
+            R = quaternion_to_rotation_matrix(s.quaternion)
             world_T_body = np.eye(4)
             world_T_body[:3, :3] = R
             world_T_body[:3, 3] = np.array(s.position)
