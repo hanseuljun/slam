@@ -12,6 +12,24 @@ from slam.stereo_matching import StereoMatchingResult
 
 
 @dataclass
+class SlamGroundTruthResult:
+    times: np.ndarray
+    positions: np.ndarray
+    attitudes: np.ndarray
+    angular_velocity_times: np.ndarray
+    angular_velocities: np.ndarray
+
+
+@dataclass
+class SlamImuResult:
+    attitude_times: np.ndarray
+    attitudes: np.ndarray
+    times: np.ndarray
+    angular_velocities: np.ndarray
+    angular_velocities_at_cam_times: np.ndarray
+
+
+@dataclass
 class SlamPnpResult:
     times: np.ndarray
     positions: np.ndarray
@@ -34,16 +52,8 @@ class SlamGtsamResult:
 
 @dataclass
 class SlamResult:
-    gt_times: np.ndarray
-    gt_positions: np.ndarray
-    gt_attitudes: np.ndarray
-    gt_angular_velocity_times: np.ndarray
-    gt_angular_velocities: np.ndarray
-    imu_attitude_times: np.ndarray
-    imu_attitudes: np.ndarray
-    imu_times: np.ndarray
-    imu_angular_velocities: np.ndarray
-    imu_angular_velocities_at_cam_times: np.ndarray
+    gt: SlamGroundTruthResult
+    imu: SlamImuResult
     pnp: SlamPnpResult
     scipy: SlamScipyResult
     gtsam: SlamGtsamResult
@@ -355,16 +365,20 @@ def _compute(
 
     set_progress(0.95, "Finishing...")
     return SlamResult(
-        gt_times=gt_times,
-        gt_positions=gt_positions,
-        gt_attitudes=gt_attitudes,
-        gt_angular_velocity_times=gt_angular_velocity_times,
-        gt_angular_velocities=gt_angular_velocities,
-        imu_attitude_times=imu_attitude_times,
-        imu_attitudes=imu_attitudes_in_world,
-        imu_times=imu_times,
-        imu_angular_velocities=imu_angular_velocities,
-        imu_angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
+        gt=SlamGroundTruthResult(
+            times=gt_times,
+            positions=gt_positions,
+            attitudes=gt_attitudes,
+            angular_velocity_times=gt_angular_velocity_times,
+            angular_velocities=gt_angular_velocities,
+        ),
+        imu=SlamImuResult(
+            attitude_times=imu_attitude_times,
+            attitudes=imu_attitudes_in_world,
+            times=imu_times,
+            angular_velocities=imu_angular_velocities,
+            angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
+        ),
         pnp=SlamPnpResult(
             times=pnp_times,
             positions=pnp_positions_in_world,

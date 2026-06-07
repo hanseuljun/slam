@@ -59,7 +59,7 @@ def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -
 
 def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.gt_times, results.gt_positions, 'gt'),
+        (results.gt.times, results.gt.positions, 'gt'),
         (results.pnp.times, results.pnp.positions, 'pnp'),
         (results.pnp.times, results.gtsam.positions, 'gtsam'),
     ]
@@ -68,8 +68,8 @@ def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
 
 def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.gt_times, results.gt_attitudes, 'gt'),
-        (results.imu_attitude_times, results.imu_attitudes, 'imu'),
+        (results.gt.times, results.gt.attitudes, 'gt'),
+        (results.imu.attitude_times, results.imu.attitudes, 'imu'),
         (results.pnp.times, results.pnp.attitudes, 'pnp'),
         (results.pnp.times, results.scipy.attitudes, 'opt'),
         (results.pnp.times, results.gtsam.attitudes, 'gtsam'),
@@ -79,9 +79,9 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
 
 def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.gt_angular_velocity_times, results.gt_angular_velocities, 'gt'),
-        (results.imu_times, results.imu_angular_velocities, 'imu'),
-        (results.pnp.times, results.imu_angular_velocities_at_cam_times, 'imu@cam'),
+        (results.gt.angular_velocity_times, results.gt.angular_velocities, 'gt'),
+        (results.imu.times, results.imu.angular_velocities, 'imu'),
+        (results.pnp.times, results.imu.angular_velocities_at_cam_times, 'imu@cam'),
         (results.pnp.angular_velocity_times, results.pnp.angular_velocities, 'pnp'),
         (results.pnp.angular_velocity_times, results.scipy.angular_velocities, 'opt'),
     ]
