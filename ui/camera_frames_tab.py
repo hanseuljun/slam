@@ -2,10 +2,17 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from nicegui import ui
+from imgui_bundle import imgui, hello_imgui
 
 from slam import DataFolder
-from ui._utils import array_to_data_uri
+
+
+def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
+    if image.ndim == 2:
+        rgba = np.stack([image, image, image, np.full_like(image, 255)], axis=-1)
+    else:
+        rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
 class CameraFramesTabState:
@@ -14,42 +21,41 @@ class CameraFramesTabState:
         self.frame_index: int = 0
         self._cached_index: int = -1
         self._cached_image: Optional[np.ndarray] = None
+        self._texture: Optional[hello_imgui.TextureGpu] = None
 
-    def current_image(self) -> Optional[np.ndarray]:
+    def current_texture(self) -> Optional[hello_imgui.TextureGpu]:
         if self._cached_index != self.frame_index:
+            self._texture = None
             ts = self.data.cam_timestamps_ns[self.frame_index]
             self._cached_image = cv2.imread(
                 str(self.data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE
             )
             self._cached_index = self.frame_index
-        return self._cached_image
+        if self._cached_image is not None and self._texture is None:
+            self._texture = _to_texture(self._cached_image)
+        return self._texture
 
 
 def camera_frames_tab(state: CameraFramesTabState) -> None:
-    n = len(state.data.cam_timestamps_ns)
-    first_ts_ns = state.data.cam_timestamps_ns[0]
-    img = ui.image(source='').classes('w-full')
+    data = state.data
+    n = len(data.cam_timestamps_ns)
+    first_ts_ns = data.cam_timestamps_ns[0]
 
-    def update(index: int) -> None:
-        state.frame_index = max(0, min(n - 1, index))
-        ts_ns = state.data.cam_timestamps_ns[state.frame_index]
-        slider.value = state.frame_index
-        label_index.text = f'Frame {state.frame_index}'
-        label_ts.text = f'{ts_ns} ns'
-        label_rel.text = f'{(ts_ns - first_ts_ns) / 1e9:.3f} s'
-        image = state.current_image()
-        if image is not None:
-            img.source = array_to_data_uri(image)
+    changed, new_index = imgui.slider_int("Frame", state.frame_index, 0, n - 1)
+    if changed:
+        state.frame_index = new_index
 
-    with ui.row().classes('items-center'):
-        ui.button(icon='keyboard_arrow_up', on_click=lambda: update(state.frame_index + 1))
-        ui.button(icon='keyboard_arrow_down', on_click=lambda: update(state.frame_index - 1))
-        label_index = ui.label()
+    if imgui.button("<"):
+        state.frame_index = max(0, state.frame_index - 1)
+    imgui.same_line()
+    if imgui.button(">"):
+        state.frame_index = min(n - 1, state.frame_index + 1)
 
-    label_ts = ui.label()
-    label_rel = ui.label()
+    ts_ns = data.cam_timestamps_ns[state.frame_index]
+    imgui.text(f"Frame {state.frame_index}")
+    imgui.text(f"{ts_ns} ns")
+    imgui.text(f"{(ts_ns - first_ts_ns) / 1e9:.3f} s")
 
-    slider = ui.slider(min=0, max=n - 1, step=1, value=0,
-                       on_change=lambda e: update(int(e.value))).classes('w-full')
-
-    update(0)
+    tex = state.current_texture()
+    if tex is not None:
+        imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))

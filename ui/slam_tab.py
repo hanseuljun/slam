@@ -1,16 +1,20 @@
 import io
-from typing import Callable
+from typing import Optional
 
 import cv2
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from nicegui import ui
+from imgui_bundle import imgui, hello_imgui
 
 from slam.plot import plot_angular_velocities, plot_attitudes, plot_positions
 from slam.slam_solver import SlamResults, SlamSolver
-from ui._utils import array_to_data_uri
+
+
+def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
+    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
 def _fig_to_image(fig: plt.Figure) -> np.ndarray:
@@ -23,7 +27,7 @@ def _fig_to_image(fig: plt.Figure) -> np.ndarray:
     return img
 
 
-def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray]:
+def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     fig_pos = plot_positions(series=[
         (results.pnp_times, results.pnp_positions, 'pnp'),
         (results.gt_times, results.gt_positions, 'gt'),
@@ -45,56 +49,43 @@ def _render_plots(results: SlamResults) -> tuple[np.ndarray, np.ndarray]:
 
 
 class SlamTabState:
-    def __init__(self, solver: SlamSolver, on_restart: Callable[[], None]) -> None:
+    def __init__(self, solver: SlamSolver) -> None:
         self._solver = solver
-        self._on_restart = on_restart
+        self._last_solver: Optional[SlamSolver] = None
+        self._tex_positions: Optional[hello_imgui.TextureGpu] = None
+        self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
+        self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
 
 
-def slam_tab(
-    state: SlamTabState,
-    progress_label: ui.label,
-    progress_bar: ui.linear_progress,
-    error_label: ui.label,
-) -> Callable[[], None]:
-    img_positions = ui.image('').classes('w-full').set_visibility(False)
-    img_attitudes = ui.image('').classes('w-full').set_visibility(False)
-    img_angular_velocities = ui.image('').classes('w-full').set_visibility(False)
+def slam_tab(state: SlamTabState) -> None:
+    if state._last_solver is not state._solver:
+        state._tex_positions = None
+        state._tex_attitudes = None
+        state._tex_angular_velocities = None
+        state._last_solver = state._solver
 
-    def show_progress() -> None:
-        progress_label.set_visibility(True)
-        progress_bar.set_visibility(True)
-        error_label.set_visibility(False)
-        img_positions.set_visibility(False)
-        img_attitudes.set_visibility(False)
-        img_angular_velocities.set_visibility(False)
+    solver = state._solver
+    if solver.loading:
+        imgui.text(solver.progress_label)
+        imgui.progress_bar(solver.progress, (-1, 0))
+        return
+    if solver.error:
+        imgui.text(f"Error: {solver.error}")
+        return
+    if solver.plots is None:
+        return
 
-    def poll() -> None:
-        solver = state._solver
-        if solver.loading:
-            progress_label.text = solver.progress_label
-            progress_bar.value = solver.progress
-        elif solver.error:
-            progress_label.set_visibility(False)
-            progress_bar.set_visibility(False)
-            error_label.text = f'Error: {solver.error}'
-            error_label.set_visibility(True)
-            timer.deactivate()
-        elif solver.plots is not None:
-            progress_label.set_visibility(False)
-            progress_bar.set_visibility(False)
-            pos_img, att_img, omega_img = _render_plots(solver.plots)
-            img_positions.source = array_to_data_uri(pos_img)
-            img_attitudes.source = array_to_data_uri(att_img)
-            img_angular_velocities.source = array_to_data_uri(omega_img)
-            img_positions.set_visibility(True)
-            img_attitudes.set_visibility(True)
-            img_angular_velocities.set_visibility(True)
-            timer.deactivate()
+    if state._tex_positions is None:
+        pos_img, att_img, omega_img = _render_plots(solver.plots)
+        state._tex_positions = _to_texture(pos_img)
+        state._tex_attitudes = _to_texture(att_img)
+        state._tex_angular_velocities = _to_texture(omega_img)
 
-    def on_run_again() -> None:
-        show_progress()
-        state._on_restart()
-        timer.activate()
-
-    timer = ui.timer(0.5, poll)
-    return on_run_again
+    imgui.begin_child("##slam_scroll", (0, 0), False)
+    tex = state._tex_positions
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    tex = state._tex_attitudes
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    tex = state._tex_angular_velocities
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    imgui.end_child()

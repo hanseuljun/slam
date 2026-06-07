@@ -6,10 +6,14 @@ from typing import Optional
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from nicegui import ui
+from imgui_bundle import imgui, hello_imgui
 
 from slam import DataFolder, triangulate_stereo_matches
-from ui._utils import array_to_data_uri
+
+
+def _to_texture(image: np.ndarray) -> hello_imgui.TextureGpu:
+    rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+    return hello_imgui.create_texture_gpu_from_rgba_data(rgba)
 
 
 def _fig_to_image(fig: plt.Figure) -> np.ndarray:
@@ -40,6 +44,8 @@ class TriangulationTabState:
     def __init__(self, data: DataFolder) -> None:
         self._data = data
         self._results: Optional[_Results] = None
+        self._tex_keypoints: Optional[hello_imgui.TextureGpu] = None
+        self._tex_3d: Optional[hello_imgui.TextureGpu] = None
         self._loading: bool = False
         self._error: Optional[str] = None
         self._started: bool = False
@@ -131,38 +137,32 @@ class TriangulationTabState:
 
 
 def triangulation_tab(state: TriangulationTabState) -> None:
-    with ui.column().classes('w-full'):
-        loading_label = ui.label('Computing triangulation...')
-        error_label = ui.label('').classes('text-red-500').set_visibility(False)
-        stats_col = ui.column().set_visibility(False)
-        img_keypoints = ui.image('').classes('w-full').set_visibility(False)
-        img_3d = ui.image('').classes('w-full').set_visibility(False)
+    if state._loading:
+        imgui.text("Computing triangulation...")
+        return
+    if state._error:
+        imgui.text(f"Error: {state._error}")
+        return
+    if state._results is None:
+        return
 
-        def poll() -> None:
-            if state._loading:
-                return
-            elif state._error:
-                loading_label.set_visibility(False)
-                error_label.text = f'Error: {state._error}'
-                error_label.set_visibility(True)
-                timer.cancel()
-            elif state._results is not None:
-                r = state._results
-                loading_label.set_visibility(False)
-                with stats_col:
-                    ui.label(f'cam0 keypoints: {r.n_cam0_keypoints}')
-                    ui.label(f'cam1 keypoints: {r.n_cam1_keypoints}')
-                    ui.label(f'Triangulated 3D points: {r.n_3d_points}')
-                    ui.label(f'X range: [{r.x_range[0]:.2f}, {r.x_range[1]:.2f}]')
-                    ui.label(f'Y range: [{r.y_range[0]:.2f}, {r.y_range[1]:.2f}]')
-                    ui.label(f'Z range: [{r.z_range[0]:.2f}, {r.z_range[1]:.2f}]')
-                    ui.label(f'Median reprojection error: {r.median_reprojection_error:.2f} px')
-                    ui.label(f'Mean reprojection error: {r.mean_reprojection_error:.2f} px')
-                img_keypoints.source = array_to_data_uri(r.keypoints_plot)
-                img_3d.source = array_to_data_uri(r.points_3d_plot)
-                stats_col.set_visibility(True)
-                img_keypoints.set_visibility(True)
-                img_3d.set_visibility(True)
-                timer.cancel()
+    r = state._results
+    if state._tex_keypoints is None:
+        state._tex_keypoints = _to_texture(r.keypoints_plot)
+        state._tex_3d = _to_texture(r.points_3d_plot)
 
-        timer = ui.timer(0.5, poll)
+    imgui.begin_child("##tri_scroll", (0, 0), False)
+    imgui.text(f"cam0 keypoints: {r.n_cam0_keypoints}")
+    imgui.text(f"cam1 keypoints: {r.n_cam1_keypoints}")
+    imgui.text(f"Triangulated 3D points: {r.n_3d_points}")
+    imgui.text(f"X range: [{r.x_range[0]:.2f}, {r.x_range[1]:.2f}]")
+    imgui.text(f"Y range: [{r.y_range[0]:.2f}, {r.y_range[1]:.2f}]")
+    imgui.text(f"Z range: [{r.z_range[0]:.2f}, {r.z_range[1]:.2f}]")
+    imgui.text(f"Median reprojection error: {r.median_reprojection_error:.2f} px")
+    imgui.text(f"Mean reprojection error: {r.mean_reprojection_error:.2f} px")
+    imgui.separator()
+    tex = state._tex_keypoints
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    tex = state._tex_3d
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    imgui.end_child()

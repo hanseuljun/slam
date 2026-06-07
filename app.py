@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from nicegui import ui
+from imgui_bundle import imgui, hello_imgui, immapp
 
 from slam import DataFolder
 from slam.slam_solver import SlamSolver
@@ -15,10 +15,9 @@ class App:
         self.camera_frames_tab_state = CameraFramesTabState(data)
         self.slam_solver = SlamSolver(data)
         self.slam_solver.start()
-        self.slam_tab_state = SlamTabState(self.slam_solver, on_restart=self.restart_slam)
+        self.slam_tab_state = SlamTabState(self.slam_solver)
         self.start_s: float = 0.0
         self.duration_s: float = 5.0
-        self.on_run_again = lambda: None
         self.triangulation_tab_state = TriangulationTabState(data)
         self.triangulation_tab_state.start()
 
@@ -28,37 +27,55 @@ class App:
         self.slam_solver.start()
         self.slam_tab_state._solver = self.slam_solver
 
-    def setup_ui(self) -> None:
-        with ui.tabs().classes('w-full') as tabs:
-            tab_camera_frames = ui.tab('Camera Frames')
-            tab_slam = ui.tab('SLAM')
-            tab_triangulation = ui.tab('Triangulation')
+    def render(self) -> None:
+        viewport = imgui.get_main_viewport()
+        imgui.set_next_window_pos(viewport.work_pos)
+        imgui.set_next_window_size(viewport.work_size)
+        imgui.begin(
+            "##main",
+            flags=imgui.WindowFlags_.no_title_bar
+            | imgui.WindowFlags_.no_resize
+            | imgui.WindowFlags_.no_move
+            | imgui.WindowFlags_.no_scrollbar,
+        )
 
-        with ui.row().classes('items-center'):
-            ui.number('Start time (s)', value=self.start_s, min=0, step=1,
-                      on_change=lambda e: setattr(self, 'start_s', float(e.value)))
-            ui.number('Duration (s)', value=self.duration_s, min=1, step=1,
-                      on_change=lambda e: setattr(self, 'duration_s', float(e.value)))
-            ui.button('Run Again', on_click=lambda: self.on_run_again())
+        _, self.start_s = imgui.input_float("Start time (s)", self.start_s, step=1.0)
+        imgui.same_line()
+        _, self.duration_s = imgui.input_float("Duration (s)", self.duration_s, step=1.0)
+        imgui.same_line()
+        if imgui.button("Run Again"):
+            self.restart_slam()
 
-        progress_label = ui.label('')
-        progress_bar = ui.linear_progress(value=0).classes('w-full')
-        error_label = ui.label('').classes('text-red-500').set_visibility(False)
-
-        with ui.tab_panels(tabs, value=tab_camera_frames).classes('w-full'):
-            with ui.tab_panel(tab_camera_frames):
+        if imgui.begin_tab_bar("##tabs"):
+            if imgui.begin_tab_item("Camera Frames")[0]:
                 camera_frames_tab(self.camera_frames_tab_state)
-            with ui.tab_panel(tab_slam):
-                self.on_run_again = slam_tab(self.slam_tab_state, progress_label, progress_bar, error_label)
-            with ui.tab_panel(tab_triangulation):
+                imgui.end_tab_item()
+
+            if imgui.begin_tab_item("SLAM")[0]:
+                slam_tab(self.slam_tab_state)
+                imgui.end_tab_item()
+
+            if imgui.begin_tab_item("Triangulation")[0]:
                 triangulation_tab(self.triangulation_tab_state)
+                imgui.end_tab_item()
+
+            imgui.end_tab_bar()
+
+        imgui.end()
 
 
-def main() -> None:
-    data = DataFolder.load(Path('data/machine_hall/MH_01_easy/mav0'))
-    instance = App(data)
-    instance.setup_ui()
-    ui.run(title='slam')
+def main():
+    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    app = App(data)
 
-if __name__ in {"__main__", "__mp_main__"}:
+    runner_params = hello_imgui.RunnerParams()
+    runner_params.app_window_params.window_title = "slam"
+    runner_params.app_window_params.window_geometry.size = (1280, 720)
+    runner_params.ini_filename = "slam.ini"
+    runner_params.callbacks.show_gui = app.render
+
+    immapp.run(runner_params)
+
+
+if __name__ == "__main__":
     main()
