@@ -41,21 +41,21 @@ def data_view(state: DataViewState) -> None:
     n = len(data.cam_timestamps_ns)
     first_ts_ns = data.cam_timestamps_ns[0]
 
-    changed, new_index = imgui.slider_int("Frame", state.frame_index, 0, n - 1)
-    if changed:
-        state.frame_index = new_index
-
-    if imgui.button("<"):
-        state.frame_index = max(0, state.frame_index - 1)
-    imgui.same_line()
-    if imgui.button(">"):
-        state.frame_index = min(n - 1, state.frame_index + 1)
-
-    ts_ns = data.cam_timestamps_ns[state.frame_index]
-    imgui.text(f"Frame {state.frame_index}")
-    imgui.text(f"{ts_ns} ns")
-    imgui.text(f"{(ts_ns - first_ts_ns) / 1e9:.3f} s")
-
     tex = state.current_texture()
     if tex is not None:
         imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+        imgui.set_next_item_width(tex.width)
+        changed, new_index = imgui.slider_int("##frame_slider", state.frame_index, 0, n - 1)
+        if changed:
+            state.frame_index = new_index
+
+    imgui.text("Frame")
+    imgui.same_line()
+    imgui.set_next_item_width(200)
+    changed, new_index = imgui.input_int("##frame_input", state.frame_index, step=1)
+    if changed:
+        state.frame_index = max(0, min(n - 1, new_index))
+
+    ts_ns = data.cam_timestamps_ns[state.frame_index]
+    imgui.text(f"Timestamp: {ts_ns} ns")
+    imgui.text(f"Time since first frame: {(ts_ns - first_ts_ns) / 1e9:.3f} s")
