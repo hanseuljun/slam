@@ -9,7 +9,7 @@ from scipy.optimize import least_squares
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
-from slam.util import quaternion_to_rotation_matrix
+from slam.util import from_body_to_cam0, quaternion_to_rotation_matrix
 
 
 @dataclass
@@ -318,11 +318,16 @@ def _compute(
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt.timestamp_ns))
 
+    # pnp_poses_in_world = np.array([
+    #     first_gt_pose @ data.leica_extrinsics
+    #     @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses_without_initial[closest_cam_index])
+    #     @ data.cam0_extrinsics @ T
+    #     @ np.linalg.inv(data.leica_extrinsics)
+    #     for T in pnp_poses_without_initial
+    # ])
+
     pnp_poses_in_world = np.array([
-        first_gt_pose @ data.leica_extrinsics
-        @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses_without_initial[closest_cam_index])
-        @ data.cam0_extrinsics @ T
-        @ np.linalg.inv(data.leica_extrinsics)
+        first_gt_pose @ from_body_to_cam0(data, T)
         for T in pnp_poses_without_initial
     ])
 

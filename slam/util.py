@@ -3,8 +3,10 @@ import numpy as np
 from slam.data import DataFolder
 
 
-def from_world_to_cam0(data: DataFolder, world_T_body: np.ndarray) -> np.ndarray:
-    return data.cam0_extrinsics @ world_T_body
+def from_body_to_cam0(data: DataFolder, pose: np.ndarray) -> np.ndarray:
+    # return data.cam0_extrinsics @ pose
+    # return pose
+    return np.linalg.inv(data.cam0_extrinsics) @ pose
 
 
 def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
