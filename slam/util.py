@@ -1,5 +1,11 @@
 import numpy as np
 
+from slam.data import DataFolder
+
+
+def from_world_to_cam0(data: DataFolder, world_T_body: np.ndarray) -> np.ndarray:
+    return data.cam0_extrinsics @ world_T_body
+
 
 def quaternion_to_rotation_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
     w, x, y, z = q

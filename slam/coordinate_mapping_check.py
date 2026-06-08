@@ -6,7 +6,7 @@ import numpy as np
 from slam.data import DataFolder, GroundTruthSample
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
-from slam.util import quaternion_to_rotation_matrix
+from slam.util import from_world_to_cam0, quaternion_to_rotation_matrix
 
 
 def _get_closest_ground_truth_pose(
@@ -63,7 +63,7 @@ class CoordinateMappingChecker:
 
         def gt_world_T_cam0(timestamp_ns: int) -> np.ndarray:
             pose = _get_closest_ground_truth_pose(data.ground_truth_samples, gt_timestamps, timestamp_ns)
-            return pose
+            return from_world_to_cam0(data, pose)
 
         n = len(sm_result.frames)
         first_ts = data.cam_timestamps_ns[0]
