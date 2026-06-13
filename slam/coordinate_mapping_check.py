@@ -155,12 +155,15 @@ class CoordinateMappingChecker:
                 projected_points.append((float(projected_pt[0]), float(projected_pt[1])))
 
                 if m.trainIdx in k1_kp_to_3d:
-                    p_world_k = world_T_cam0_k[:3, :3] @ p_cam0_k + world_T_cam0_k[:3, 3]
+                    _MIN_DEPTH, _MAX_DEPTH, _MAX_WORLD_DIST = 0.1, 50.0, 0.5
                     p_stereo_k1 = k1_kp_to_3d[m.trainIdx]
-                    if p_stereo_k1[2] > 0:
+                    if (_MIN_DEPTH < p_cam0_k[2] < _MAX_DEPTH
+                            and _MIN_DEPTH < p_stereo_k1[2] < _MAX_DEPTH):
+                        p_world_k = world_T_cam0_k[:3, :3] @ p_cam0_k + world_T_cam0_k[:3, 3]
                         p_world_k1 = world_T_cam0_k1[:3, :3] @ p_stereo_k1 + world_T_cam0_k1[:3, 3]
-                        icp_src.append(p_world_k)
-                        icp_dst.append(p_world_k1)
+                        if np.linalg.norm(p_world_k - p_world_k1) < _MAX_WORLD_DIST:
+                            icp_src.append(p_world_k)
+                            icp_dst.append(p_world_k1)
 
             icp_transform = None
             if len(icp_src) >= 3:

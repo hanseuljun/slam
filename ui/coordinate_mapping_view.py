@@ -25,35 +25,60 @@ def _match_color(i: int, total: int) -> tuple[int, int, int]:
     return (int(color_bgr[0]), int(color_bgr[1]), int(color_bgr[2]))
 
 
-def _plot_result(result: CoordinateMappingCheckResult) -> plt.Figure:
+def _plot_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool]) -> plt.Figure:
     times = result.times
     mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
     mean_icp_errors = np.array([np.mean(f.icp_projection_errors) if f.icp_projection_errors else float('nan') for f in result.frames])
     num_matches = np.array([len(f.matches) for f in result.frames])
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
+    show_error = enabled.get('gt') or enabled.get('icp')
+    show_matches = enabled.get('matches', False)
+    active = [s for s in ['errors', 'matches']
+              if (s == 'errors' and show_error) or (s == 'matches' and show_matches)]
+
+    if not active:
+        fig, ax = plt.subplots(1, 1, figsize=(12, 2))
+        ax.axis('off')
+        plt.tight_layout()
+        return fig
+
+    fig, axes = plt.subplots(len(active), 1, figsize=(12, 4 * len(active)))
+    if len(active) == 1:
+        axes = [axes]
     fig.suptitle('Coordinate Mapping Check (Ground Truth Poses)')
+    ax_iter = iter(axes)
 
-    ax1.plot(times, mean_errors, label='GT')
-    ax1.plot(times, mean_icp_errors, label='ICP', color='green')
-    ax1.set_xlabel('Time [s]')
-    ax1.set_ylabel('Projection Error [px]')
-    ax1.set_title('Mean Projection Error per Adjacent Frame Pair')
-    ax1.legend()
+    if show_error:
+        ax = next(ax_iter)
+        if enabled.get('gt'):
+            ax.plot(times, mean_errors, label='GT')
+        if enabled.get('icp'):
+            ax.plot(times, mean_icp_errors, label='ICP', color='green')
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Projection Error [px]')
+        ax.set_title('Mean Projection Error per Adjacent Frame Pair')
+        ax.legend()
 
-    ax2.plot(times, mean_errors - mean_icp_errors, color='purple')
-    ax2.axhline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax2.set_xlabel('Time [s]')
-    ax2.set_ylabel('Error Reduction [px]')
-    ax2.set_title('GT − ICP Projection Error (positive = ICP improves)')
-
-    ax3.plot(times, num_matches, color='orange')
-    ax3.set_xlabel('Time [s]')
-    ax3.set_ylabel('Count')
-    ax3.set_title('Number of Matched Features per Adjacent Frame Pair')
+    if show_matches:
+        ax = next(ax_iter)
+        ax.plot(times, num_matches, color='orange')
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Count')
+        ax.set_title('Number of Matched Features per Adjacent Frame Pair')
 
     plt.tight_layout()
     return fig
+
+
+def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
+    changed = False
+    labels = list(enabled)
+    for i, label in enumerate(labels):
+        c, enabled[label] = imgui.checkbox(f"{label}##{id_suffix}", enabled[label])
+        changed = changed or c
+        if i < len(labels) - 1:
+            imgui.same_line()
+    return changed
 
 
 class CoordinateMappingViewModel:
@@ -72,6 +97,7 @@ class CoordinateMappingViewModel:
         self.show_projected: bool = True
         self._cache_key: tuple = ()
         self._match_texture: Optional[hello_imgui.TextureGpu] = None
+        self.plot_enabled: dict[str, bool] = {'gt': True, 'icp': True, 'matches': True}
 
     def start(
         self,
@@ -228,8 +254,10 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
 
     imgui.separator()
 
+    if _checkboxes(model.plot_enabled, "cm_plot"):
+        model._plot_texture = None
     if model._plot_texture is None:
-        model._plot_texture = image_to_texture(figure_to_image(_plot_result(model._result)))
+        model._plot_texture = image_to_texture(figure_to_image(_plot_result(model._result, model.plot_enabled)))
 
     plot_tex = model._plot_texture
     imgui.image(imgui.ImTextureRef(plot_tex.texture_id()), (plot_tex.width, plot_tex.height))
