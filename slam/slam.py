@@ -9,7 +9,7 @@ from scipy.optimize import least_squares
 from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
-from slam.util import from_body_to_cam0, quaternion_to_rotation_matrix
+from slam.util import quaternion_to_rotation_matrix
 
 
 @dataclass
@@ -327,7 +327,7 @@ def _compute(
     # ])
 
     pnp_poses_in_world = np.array([
-        first_gt_pose @ from_body_to_cam0(data, T)
+        first_gt_pose @ np.linalg.inv(data.cam0_extrinsics) @ T
         for T in pnp_poses_without_initial
     ])
 

@@ -28,20 +28,29 @@ def _match_color(i: int, total: int) -> tuple[int, int, int]:
 def _plot_result(result: CoordinateMappingCheckResult) -> plt.Figure:
     times = result.times
     mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
+    mean_icp_errors = np.array([np.mean(f.icp_projection_errors) if f.icp_projection_errors else float('nan') for f in result.frames])
     num_matches = np.array([len(f.matches) for f in result.frames])
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10))
     fig.suptitle('Coordinate Mapping Check (Ground Truth Poses)')
 
-    ax1.plot(times, mean_errors)
+    ax1.plot(times, mean_errors, label='GT')
+    ax1.plot(times, mean_icp_errors, label='ICP', color='green')
     ax1.set_xlabel('Time [s]')
     ax1.set_ylabel('Projection Error [px]')
     ax1.set_title('Mean Projection Error per Adjacent Frame Pair')
+    ax1.legend()
 
-    ax2.plot(times, num_matches, color='orange')
+    ax2.plot(times, mean_errors - mean_icp_errors, color='purple')
+    ax2.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax2.set_xlabel('Time [s]')
-    ax2.set_ylabel('Count')
-    ax2.set_title('Number of Matched Features per Adjacent Frame Pair')
+    ax2.set_ylabel('Error Reduction [px]')
+    ax2.set_title('GT − ICP Projection Error (positive = ICP improves)')
+
+    ax3.plot(times, num_matches, color='orange')
+    ax3.set_xlabel('Time [s]')
+    ax3.set_ylabel('Count')
+    ax3.set_title('Number of Matched Features per Adjacent Frame Pair')
 
     plt.tight_layout()
     return fig
@@ -211,7 +220,9 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
 
     imgui.text(f"Matches: {num_matches}")
     mean_err = np.mean(frame.projection_errors) if frame.projection_errors else float('nan')
-    imgui.text(f"Mean projection error: {mean_err:.2f} px")
+    imgui.text(f"Mean projection error (GT):  {mean_err:.2f} px")
+    mean_icp_err = np.mean(frame.icp_projection_errors) if frame.icp_projection_errors else float('nan')
+    imgui.text(f"Mean projection error (ICP): {mean_icp_err:.2f} px")
     imgui.text(f"Timestamp: {frame.timestamp_ns} ns")
     imgui.text(f"Time since first frame: {(frame.timestamp_ns - first_ts_ns) / 1e9:.3f} s")
 
