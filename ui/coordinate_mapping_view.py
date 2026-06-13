@@ -1,3 +1,4 @@
+import json
 import threading
 from typing import Optional
 
@@ -187,6 +188,20 @@ class CoordinateMappingViewModel:
         return self._match_texture
 
 
+def _download_transforms(result: CoordinateMappingCheckResult) -> None:
+    records = []
+    for f in result.frames:
+        records.append({
+            "timestamp_ns": f.timestamp_ns,
+            "gt_transform": f.gt_transform.tolist(),
+            "icp_transform": f.icp_transform.tolist() if f.icp_transform is not None else None,
+        })
+    path = "inter_frame_transforms.json"
+    with open(path, "w") as fp:
+        json.dump(records, fp, indent=2)
+    print(f"Saved {len(records)} inter-frame transforms to {path}")
+
+
 def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     if model._checker is None:
         imgui.text("Waiting for stereo matching...")
@@ -251,6 +266,11 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     imgui.text(f"Mean projection error (ICP): {mean_icp_err:.2f} px")
     imgui.text(f"Timestamp: {frame.timestamp_ns} ns")
     imgui.text(f"Time since first frame: {(frame.timestamp_ns - first_ts_ns) / 1e9:.3f} s")
+
+    imgui.separator()
+
+    if imgui.button("Download inter-frame transforms"):
+        _download_transforms(model._result)
 
     imgui.separator()
 

@@ -26,6 +26,7 @@ def _get_closest_ground_truth_pose(
 @dataclass
 class CoordinateMappingCheckFrame:
     timestamp_ns: int
+    gt_transform: np.ndarray  # 4x4 cam0_k1_T_cam0_k from ground truth (relative pose, k → k+1)
     projection_errors: list[float]
     matches: list  # list[cv2.DMatch]
     projected_points: list[tuple[float, float]]  # projected positions in frame k+1 image space
@@ -98,9 +99,15 @@ class CoordinateMappingChecker:
             fd_k = fd_result.frames[k]
             fd_k1 = fd_result.frames[k + 1]
 
+            world_T_cam0_k = gt_world_T_cam0(sm_k.timestamp_ns)
+            world_T_cam0_k1 = gt_world_T_cam0(sm_k1.timestamp_ns)
+            cam0_T_world_k1 = np.linalg.inv(world_T_cam0_k1)
+            gt_transform = cam0_T_world_k1 @ world_T_cam0_k
+
             if len(sm_k.matches) < 2 or len(fd_k1.cam0_descriptors) < 2:
                 frames.append(CoordinateMappingCheckFrame(
                     timestamp_ns=sm_k.timestamp_ns,
+                    gt_transform=gt_transform,
                     projection_errors=[],
                     matches=[],
                     projected_points=[],
@@ -109,10 +116,6 @@ class CoordinateMappingChecker:
                 ))
                 continue
 
-            world_T_cam0_k = gt_world_T_cam0(sm_k.timestamp_ns)
-            world_T_cam0_k1 = gt_world_T_cam0(sm_k1.timestamp_ns)
-            cam0_T_world_k1 = np.linalg.inv(world_T_cam0_k1)
-
             stereo_desc_k = fd_k.cam0_descriptors[[m.queryIdx for m in sm_k.matches]]
             raw_matches = bf.knnMatch(stereo_desc_k, fd_k1.cam0_descriptors, k=2)
             good = [ms[0] for ms in raw_matches if len(ms) == 2 and ms[0].distance < 0.75 * ms[1].distance]
@@ -120,6 +123,7 @@ class CoordinateMappingChecker:
             if not good:
                 frames.append(CoordinateMappingCheckFrame(
                     timestamp_ns=sm_k.timestamp_ns,
+                    gt_transform=gt_transform,
                     projection_errors=[],
                     matches=[],
                     projected_points=[],
@@ -188,6 +192,7 @@ class CoordinateMappingChecker:
 
             frames.append(CoordinateMappingCheckFrame(
                 timestamp_ns=sm_k.timestamp_ns,
+                gt_transform=gt_transform,
                 projection_errors=errors,
                 matches=valid_matches,
                 projected_points=projected_points,
