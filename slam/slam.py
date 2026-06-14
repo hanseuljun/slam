@@ -1,6 +1,7 @@
 import copyreg
 from dataclasses import dataclass
 import multiprocessing as mp
+import traceback
 from typing import Any, Callable, Optional
 
 import cv2
@@ -221,7 +222,7 @@ def _get_pnp_result(
     first_ts: int,
     first_gt_sample,
     on_progress: Callable[[float], None],
-) -> tuple[SlamPnpResult, np.ndarray]:
+) -> SlamPnpResult:
     pnp_poses = _run_pnp(
         data, feature_detection_result, stereo_matching_result, on_progress,
     )
@@ -272,14 +273,29 @@ def _run_gtsam(
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
 
-    poses = [np.eye(4)]
+    PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+    ODOMETRY_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+
+    graph = gtsam.NonlinearFactorGraph()
+    initial_estimates = gtsam.Values()
+
+    graph.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), PRIOR_NOISE))
+    initial_estimates.insert(0, gtsam.Pose3())
+
     for i in range(N - 1):
-        R_imu, _ = cv2.Rodrigues(imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz)
-        T_prev = poses[-1]
-        T_next = np.eye(4)
-        T_next[:3, :3] = T_prev[:3, :3] @ R_imu
-        T_next[:3, 3] = T_prev[:3, 3]
-        poses.append(T_next)
+        rotation_vector = imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz
+        odometry_measurement = gtsam.Pose3(gtsam.Rot3.Expmap(rotation_vector), gtsam.Point3(0.0, 0.0, 0.0))
+        graph.add(gtsam.BetweenFactorPose3(i, i + 1, odometry_measurement, ODOMETRY_NOISE))
+        initial_estimates.insert(i + 1, gtsam.Pose3())
+
+    params = gtsam.LevenbergMarquardtParams()
+    optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimates, params)
+    result = optimizer.optimize()
+
+    poses = []
+    for i in range(N):
+        pose = result.atPose3(i).matrix()
+        poses.append(pose)
 
     return poses
 
@@ -290,13 +306,24 @@ def _get_gtsam_result(
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list,
     first_ts: int,
+    first_gt_sample,
 ) -> SlamGtsamResult:
     poses = _run_gtsam(data, stereo_matching_result, imu_samples)
     N = len(poses)
 
-    world_T_cam0_poses = np.array(poses)
-    cam0_T_body = np.linalg.inv(data.cam0_extrinsics)
-    world_T_body_poses = world_T_cam0_poses @ cam0_T_body
+    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
+    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
+
+    body_T_cam0 = data.cam0_extrinsics
+    cam0_T_body = np.linalg.inv(body_T_cam0)
+
+    world_T_body_first = np.eye(4)
+    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
+    world_T_body_first[:3, 3] = first_gt_sample.position
+
+    gtsam_body_poses = [body_T_cam0 @ T @ cam0_T_body for T in poses]
+    T_comp = world_T_body_first @ np.linalg.inv(gtsam_body_poses[closest_cam_index])
+    world_T_body_poses = np.array([T_comp @ T for T in gtsam_body_poses])
 
     times = np.array([(f.timestamp_ns - first_ts) / 1e9 for f in stereo_matching_result.frames[:N]])
 
@@ -337,7 +364,7 @@ def _compute(
 
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, imu_samples, first_ts,
+        data, feature_detection_result, stereo_matching_result, imu_samples, first_ts, first_gt_sample,
     )
 
     set_progress(0.95, "Finishing...")
@@ -364,8 +391,8 @@ def _worker_entry(
     try:
         result = _compute(data, feature_detection_result, stereo_matching_result, set_progress)
         result_queue.put(('ok', result))
-    except Exception as e:
-        result_queue.put(('err', str(e)))
+    except Exception:
+        result_queue.put(('err', traceback.format_exc()))
 
 
 class SlamSolver:
