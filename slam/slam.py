@@ -260,13 +260,11 @@ def _get_pnp_result(
     )
 
 
-def _get_gtsam_result(
+def _run_gtsam(
     data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list,
-    first_ts: int,
-) -> SlamGtsamResult:
+) -> list[np.ndarray]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
@@ -282,6 +280,19 @@ def _get_gtsam_result(
         T_next[:3, :3] = T_prev[:3, :3] @ R_imu
         T_next[:3, 3] = T_prev[:3, 3]
         poses.append(T_next)
+
+    return poses
+
+
+def _get_gtsam_result(
+    data: EuRoCMAVData,
+    feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
+    imu_samples: list,
+    first_ts: int,
+) -> SlamGtsamResult:
+    poses = _run_gtsam(data, stereo_matching_result, imu_samples)
+    N = len(poses)
 
     world_T_cam0_poses = np.array(poses)
     cam0_T_body = np.linalg.inv(data.cam0_extrinsics)
