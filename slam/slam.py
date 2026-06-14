@@ -162,11 +162,12 @@ def _run_pnp(
 
 def _optimize_angular_velocities(
     stereo_matching_result: StereoMatchingResult,
-    imu_timestamps_ns: np.ndarray,
-    imu_angular_velocities: np.ndarray,
+    imu_samples: list,
     pnp_attitudes: np.ndarray,
     cam_rate_hz: int,
 ) -> SlamScipyResult:
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:len(pnp_attitudes)]])
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
@@ -201,12 +202,13 @@ def _optimize_with_gtsam(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     pnp_poses_in_world: np.ndarray,
-    imu_timestamps_ns: np.ndarray,
-    imu_angular_velocities: np.ndarray,
+    imu_samples: list,
 ) -> SlamGtsamResult:
     from gtsam.symbol_shorthand import L, P
 
     N = len(pnp_poses_in_world)
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
@@ -322,14 +324,14 @@ def _compute(
         imu_attitudes.append(prev_attitude)
     imu_attitudes = np.array(imu_attitudes)
 
-    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
-    closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
-    R_gt = first_gt_pose[:3, :3]
-    R_leica = data.leica_extrinsics[:3, :3]
-    imu_attitudes_in_world = np.array([
-        R_gt @ R_leica @ imu_attitudes[closest_imu_index].T @ att @ R_leica.T
-        for att in imu_attitudes
-    ])
+    # imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    # closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
+    # R_gt = first_gt_pose[:3, :3]
+    # R_leica = data.leica_extrinsics[:3, :3]
+    # imu_attitudes_in_world = np.array([
+    #     R_gt @ R_leica @ imu_attitudes[closest_imu_index].T @ att @ R_leica.T
+    #     for att in imu_attitudes
+    # ])
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
@@ -371,14 +373,13 @@ def _compute(
 
     set_progress(2.0 / 4.0, "Optimizing angular velocities...")
     optimization = _optimize_angular_velocities(
-        stereo_matching_result, imu_timestamps_ns, imu_angular_velocities,
-        pnp_attitudes, data.cam0_rate_hz,
+        stereo_matching_result, imu_samples, pnp_attitudes, data.cam0_rate_hz,
     )
 
     set_progress(3.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
         data, feature_detection_result, stereo_matching_result,
-        pnp_poses_in_world, imu_timestamps_ns, imu_angular_velocities,
+        pnp_poses_in_world, imu_samples,
     )
 
     set_progress(0.95, "Finishing...")
@@ -392,7 +393,7 @@ def _compute(
         ),
         imu=SlamImuResult(
             times=imu_times,
-            attitudes=imu_attitudes_in_world,
+            attitudes=imu_attitudes,
             angular_velocities=imu_angular_velocities,
         ),
         pnp=SlamPnpResult(
