@@ -293,11 +293,11 @@ def _compute(
 
     body_T_cam0 = data.cam0_extrinsics
 
-    first_gt = data.ground_truth_samples[0]
+    first_gt_sample = data.ground_truth_samples[0]
     world_T_body_first = np.eye(4)
-    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt.quaternion)
-    world_T_body_first[:3, 3] = first_gt.position
-    first_gt_pose = world_T_body_first
+    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
+    world_T_body_first[:3, 3] = first_gt_sample.position
+    first_gt_sample_pose = world_T_body_first
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
     gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
@@ -322,16 +322,14 @@ def _compute(
         imu_rotation_matrix, _ = cv2.Rodrigues(angular_velocity / data.imu0_rate_hz)
         prev_attitude = prev_attitude @ imu_rotation_matrix
         imu_attitudes.append(prev_attitude)
-    imu_attitudes = np.array(imu_attitudes)
 
-    # imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
-    # closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
-    # R_gt = first_gt_pose[:3, :3]
-    # R_leica = data.leica_extrinsics[:3, :3]
-    # imu_attitudes_in_world = np.array([
-    #     R_gt @ R_leica @ imu_attitudes[closest_imu_index].T @ att @ R_leica.T
-    #     for att in imu_attitudes
-    # ])
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    imu_index_closest_to_first_gt_sample= np.argmin(np.abs(imu_timestamps_ns - first_gt_sample.timestamp_ns))
+    imu_compensation_rotation_matrix = gt_attitudes[0] @ imu_attitudes[imu_index_closest_to_first_gt_sample].T
+    for i in range(len(imu_attitudes)):
+        imu_attitudes[i] = imu_compensation_rotation_matrix @ imu_attitudes[i]
+
+    imu_attitudes = np.array(imu_attitudes)
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
@@ -341,10 +339,10 @@ def _compute(
 
     set_progress(1.0 / 4.0, "Transforming poses...")
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
-    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt.timestamp_ns))
+    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
     # pnp_poses_in_world = np.array([
-    #     first_gt_pose @ data.leica_extrinsics
+    #     first_gt_sample_pose @ data.leica_extrinsics
     #     @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses_without_initial[closest_cam_index])
     #     @ data.cam0_extrinsics @ T
     #     @ np.linalg.inv(data.leica_extrinsics)
