@@ -61,7 +61,7 @@ def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
     all_series = [
         (results.gt.times, results.gt.positions, 'gt'),
         (results.pnp.times, results.pnp.positions, 'pnp'),
-        (results.pnp.times, results.gtsam.positions, 'gtsam'),
+        (results.gtsam.times, results.gtsam.positions, 'gtsam'),
     ]
     return figure_to_image(_plot_positions([s for s in all_series if enabled[s[2]]]))
 
@@ -71,7 +71,7 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
         (results.gt.times, results.gt.attitudes, 'gt'),
         (results.imu.times, results.imu.attitudes, 'imu'),
         (results.pnp.times, results.pnp.attitudes, 'pnp'),
-        (results.pnp.times, results.gtsam.attitudes, 'gtsam'),
+        (results.gtsam.times, results.gtsam.attitudes, 'gtsam'),
     ]
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
@@ -81,6 +81,7 @@ def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) ->
         (results.gt.angular_velocity_times, results.gt.angular_velocities, 'gt'),
         (results.imu.times, results.imu.angular_velocities, 'imu'),
         (results.pnp.angular_velocity_times, results.pnp.angular_velocities, 'pnp'),
+        (results.gtsam.angular_velocity_times, results.gtsam.angular_velocities, 'gtsam'),
     ]
     return figure_to_image(_plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
 
@@ -94,7 +95,7 @@ class SlamViewModel:
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'gtsam': True}
-        self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True}
+        self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'gtsam': True}
 
     def start(
         self,

@@ -52,8 +52,11 @@ class SlamPnpResult:
 
 @dataclass
 class SlamGtsamResult:
-    attitudes: np.ndarray  # (N, 3, 3)
-    positions: np.ndarray  # (N, 3)
+    times: np.ndarray
+    positions: np.ndarray
+    attitudes: np.ndarray
+    angular_velocity_times: np.ndarray
+    angular_velocities: np.ndarray
 
 
 @dataclass
@@ -262,6 +265,7 @@ def _get_gtsam_result(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list,
+    first_ts: int,
 ) -> SlamGtsamResult:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -282,7 +286,22 @@ def _get_gtsam_result(
     world_T_cam0_poses = np.array(poses)
     cam0_T_body = np.linalg.inv(data.cam0_extrinsics)
     world_T_body_poses = world_T_cam0_poses @ cam0_T_body
-    return SlamGtsamResult(attitudes=world_T_body_poses[:, :3, :3], positions=world_T_body_poses[:, :3, 3])
+
+    times = np.array([(f.timestamp_ns - first_ts) / 1e9 for f in stereo_matching_result.frames[:N]])
+
+    angular_velocities = []
+    for i in range(N - 1):
+        R_rel = world_T_body_poses[i, :3, :3].T @ world_T_body_poses[i + 1, :3, :3]
+        rvec, _ = cv2.Rodrigues(R_rel)
+        angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
+
+    return SlamGtsamResult(
+        times=times,
+        positions=world_T_body_poses[:, :3, 3],
+        attitudes=world_T_body_poses[:, :3, :3],
+        angular_velocity_times=times[:-1],
+        angular_velocities=np.array(angular_velocities),
+    )
 
 
 def _compute(
@@ -307,7 +326,7 @@ def _compute(
 
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, imu_samples,
+        data, feature_detection_result, stereo_matching_result, imu_samples, first_ts,
     )
 
     set_progress(0.95, "Finishing...")
