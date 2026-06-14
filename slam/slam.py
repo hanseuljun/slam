@@ -221,6 +221,50 @@ def _run_pnp(
     return pnp_poses, np.array(pnp_angular_velocities)
 
 
+def _get_pnp_result(
+    data: EuRoCMAVData,
+    feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
+    first_ts: int,
+    first_gt_sample,
+    on_progress: Callable[[float], None],
+) -> tuple[SlamPnpResult, np.ndarray]:
+    pnp_poses, pnp_angular_velocities = _run_pnp(
+        data, feature_detection_result, stereo_matching_result, on_progress,
+    )
+
+    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
+    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
+
+    body_T_cam0 = data.cam0_extrinsics
+    cam0_T_body = np.linalg.inv(body_T_cam0)
+
+    world_T_body_first = np.eye(4)
+    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
+    world_T_body_first[:3, 3] = first_gt_sample.position
+
+    pnp_body_poses = [body_T_cam0 @ T @ cam0_T_body for T in pnp_poses]
+    T_comp = world_T_body_first @ np.linalg.inv(pnp_body_poses[closest_cam_index])
+    pnp_world_T_body = np.array([T_comp @ T for T in pnp_body_poses])
+
+    pnp_times = np.array([
+        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
+        for i in range(len(pnp_world_T_body))
+    ])
+    pnp_angular_velocity_times = np.array([
+        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
+        for i in range(len(pnp_angular_velocities))
+    ])
+
+    return SlamPnpResult(
+        times=pnp_times,
+        positions=pnp_world_T_body[:, :3, 3],
+        attitudes=pnp_world_T_body[:, :3, :3],
+        angular_velocity_times=pnp_angular_velocity_times,
+        angular_velocities=pnp_angular_velocities,
+    ), pnp_world_T_body
+
+
 def _optimize_angular_velocities(
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list,
@@ -358,59 +402,27 @@ def _compute(
     imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
-    pnp_poses, pnp_angular_velocities = _run_pnp(
-        data, feature_detection_result, stereo_matching_result,
+    pnp_result, pnp_world_T_body = _get_pnp_result(
+        data, feature_detection_result, stereo_matching_result, first_ts, first_gt_sample,
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
 
-    set_progress(1.0 / 4.0, "Transforming poses...")
-    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
-    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
-
-    body_T_cam0 = data.cam0_extrinsics
-
-    world_T_body_first = np.eye(4)
-    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
-    world_T_body_first[:3, 3] = first_gt_sample.position
-
-    cam0_T_body = np.linalg.inv(body_T_cam0)
-    pnp_poses = [body_T_cam0 @ T @ cam0_T_body for T in pnp_poses]
-    T_comp = world_T_body_first @ np.linalg.inv(pnp_poses[closest_cam_index])
-    pnp_world_T_body = np.array([T_comp @ T for T in pnp_poses])
-
-    pnp_times = np.array([
-        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
-        for i in range(len(pnp_poses))
-    ])
-    pnp_positions_in_world = pnp_world_T_body[:, :3, 3]
-    pnp_attitudes = pnp_world_T_body[:, :3, :3]
-    pnp_angular_velocity_times = np.array([
-        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
-        for i in range(len(pnp_angular_velocities))
-    ])
-
     set_progress(2.0 / 4.0, "Optimizing angular velocities...")
     optimization = _optimize_angular_velocities(
-        stereo_matching_result, imu_samples, pnp_attitudes, data.cam0_rate_hz,
+        stereo_matching_result, imu_samples, pnp_world_T_body[:, :3, :3], data.cam0_rate_hz,
     )
 
     set_progress(3.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
         data, feature_detection_result, stereo_matching_result,
-        pnp_poses, imu_samples,
+        pnp_world_T_body, imu_samples,
     )
 
     set_progress(0.95, "Finishing...")
     return SlamResult(
         gt=gt_result,
         imu=imu_result,
-        pnp=SlamPnpResult(
-            times=pnp_times,
-            positions=pnp_positions_in_world,
-            attitudes=pnp_attitudes,
-            angular_velocity_times=pnp_angular_velocity_times,
-            angular_velocities=pnp_angular_velocities,
-        ),
+        pnp=pnp_result,
         scipy=optimization,
         gtsam=gtsam_result,
     )
