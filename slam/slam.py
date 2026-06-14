@@ -263,6 +263,7 @@ def _get_pnp_result(
 
 def _run_gtsam(
     data: EuRoCMAVData,
+    feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list,
 ) -> list[np.ndarray]:
@@ -275,6 +276,12 @@ def _run_gtsam(
 
     PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
     ODOMETRY_NOISE = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1, 0.1, 0.1, 1e9, 1e9, 1e9]))
+    PROJECTION_NOISE = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
+
+    K = gtsam.Cal3_S2(
+        data.cam0_intrinsics.fx, data.cam0_intrinsics.fy, 0.0,
+        data.cam0_intrinsics.cx, data.cam0_intrinsics.cy,
+    )
 
     graph = gtsam.NonlinearFactorGraph()
     initial_estimates = gtsam.Values()
@@ -287,6 +294,49 @@ def _run_gtsam(
         odometry_measurement = gtsam.Pose3(gtsam.Rot3.Expmap(rotation_vector), gtsam.Point3(0.0, 0.0, 0.0))
         graph.add(gtsam.BetweenFactorPose3(i, i + 1, odometry_measurement, ODOMETRY_NOISE))
         initial_estimates.insert(i + 1, gtsam.Pose3())
+
+    landmark_id = 0
+    landmark_map = {}  # (frame_i, cam0_queryIdx) -> l_key
+    added_observations = set()  # (l_key, pose_key) pairs already in graph
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    for i in range(N - 1):
+        fd_i = feature_detection_result.frames[i]
+        fd_next = feature_detection_result.frames[i + 1]
+        sm_i = stereo_matching_result.frames[i]
+
+        cam0_idx_to_3d = {m.queryIdx: k for k, m in enumerate(sm_i.matches)}
+
+        raw_matches = bf.knnMatch(fd_i.cam0_descriptors, fd_next.cam0_descriptors, k=2)
+        good_matches = [m for m, n in raw_matches if m.distance < 0.75 * n.distance]
+
+        for m in good_matches:
+            if m.queryIdx not in cam0_idx_to_3d:
+                continue
+
+            k_3d = cam0_idx_to_3d[m.queryIdx]
+            p_3d = sm_i.points_3d[:, k_3d]
+
+            key_id = (i, m.queryIdx)
+            if key_id not in landmark_map:
+                l_key = gtsam.symbol('l', landmark_id)
+                landmark_map[key_id] = l_key
+                initial_estimates.insert(l_key, gtsam.Point3(p_3d[0], p_3d[1], p_3d[2]))
+                landmark_id += 1
+
+            l_key = landmark_map[key_id]
+
+            obs_i = (l_key, i)
+            if obs_i not in added_observations:
+                kp_i = np.array(fd_i.cam0_keypoints[m.queryIdx].pt)
+                graph.add(gtsam.GenericProjectionFactorCal3_S2(kp_i, PROJECTION_NOISE, i, l_key, K))
+                added_observations.add(obs_i)
+
+            obs_next = (l_key, i + 1)
+            if obs_next not in added_observations:
+                kp_next = np.array(fd_next.cam0_keypoints[m.trainIdx].pt)
+                graph.add(gtsam.GenericProjectionFactorCal3_S2(kp_next, PROJECTION_NOISE, i + 1, l_key, K))
+                added_observations.add(obs_next)
 
     params = gtsam.LevenbergMarquardtParams()
     optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimates, params)
@@ -308,7 +358,7 @@ def _get_gtsam_result(
     first_ts: int,
     first_gt_sample,
 ) -> SlamGtsamResult:
-    poses = _run_gtsam(data, stereo_matching_result, imu_samples)
+    poses = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples)
     N = len(poses)
 
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
