@@ -37,11 +37,9 @@ class SlamGroundTruthResult:
 
 @dataclass
 class SlamImuResult:
-    attitude_times: np.ndarray
-    attitudes: np.ndarray
     times: np.ndarray
+    attitudes: np.ndarray
     angular_velocities: np.ndarray
-    angular_velocities_at_cam_times: np.ndarray
 
 
 @dataclass
@@ -306,19 +304,20 @@ def _compute(
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
     imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
-    imu_attitudes = [np.eye(3)]
+    imu_attitudes = []
+    prev_attitude = np.eye(3)
     for angular_velocity in imu_angular_velocities:
         imu_rotation_matrix, _ = cv2.Rodrigues(angular_velocity / data.imu0_rate_hz)
-        imu_attitudes.append(imu_attitudes[-1] @ imu_rotation_matrix)
+        prev_attitude = prev_attitude @ imu_rotation_matrix
+        imu_attitudes.append(prev_attitude)
     imu_attitudes = np.array(imu_attitudes)
-    imu_attitude_times = np.concatenate([[0.0], imu_times])
 
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     closest_imu_index = np.argmin(np.abs(imu_timestamps_ns - first_gt.timestamp_ns))
     R_gt = first_gt_pose[:3, :3]
     R_leica = data.leica_extrinsics[:3, :3]
     imu_attitudes_in_world = np.array([
-        R_gt @ R_leica @ imu_attitudes[closest_imu_index + 1].T @ att @ R_leica.T
+        R_gt @ R_leica @ imu_attitudes[closest_imu_index].T @ att @ R_leica.T
         for att in imu_attitudes
     ])
 
@@ -389,11 +388,9 @@ def _compute(
             angular_velocities=gt_angular_velocities,
         ),
         imu=SlamImuResult(
-            attitude_times=imu_attitude_times,
-            attitudes=imu_attitudes_in_world,
             times=imu_times,
+            attitudes=imu_attitudes_in_world,
             angular_velocities=imu_angular_velocities,
-            angular_velocities_at_cam_times=imu_angular_velocities_at_cam_times,
         ),
         pnp=SlamPnpResult(
             times=pnp_times,
