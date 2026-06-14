@@ -182,7 +182,7 @@ def _run_pnp(
 ) -> tuple[np.ndarray, np.ndarray]:
     keyframe_indices: list[int] = [0]
     keyframe_num_temporal_matches: Optional[int] = None
-    pnp_poses_in_body: list[np.ndarray] = [np.eye(4)]
+    pnp_poses: list[np.ndarray] = [np.eye(4)]
     pnp_angular_velocities_in_body: list[np.ndarray] = []
     n = len(stereo_matching_result.frames)
     for i in range(1, n):
@@ -211,11 +211,11 @@ def _run_pnp(
         transform = np.eye(4)
         transform[:3, :3] = rotation_matrix_body_in_body
         transform[:3, 3] = translation_vector_in_body.flatten()
-        pnp_poses_in_body.append(pnp_poses_in_body[keyframe_indices[-1]] @ transform)
+        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ transform)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return pnp_poses_in_body, np.array(pnp_angular_velocities_in_body)
+    return pnp_poses, np.array(pnp_angular_velocities_in_body)
 
 
 def _optimize_angular_velocities(
@@ -362,7 +362,7 @@ def _compute(
     imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
-    pnp_poses_in_body, pnp_angular_velocities_in_body = _run_pnp(
+    pnp_poses, pnp_angular_velocities_in_body = _run_pnp(
         data, feature_detection_result, stereo_matching_result,
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
@@ -371,19 +371,9 @@ def _compute(
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
-    # pnp_poses = np.array([
-    #     first_gt_sample_pose @ data.leica_extrinsics
-    #     @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses[closest_cam_index])
-    #     @ data.cam0_extrinsics @ T
-    #     @ np.linalg.inv(data.leica_extrinsics)
-    #     for T in pnp_poses
-    # ])
-
     world_T_cam0_first = world_T_body_first @ body_T_cam0
-    pnp_poses = np.array([
-        world_T_cam0_first @ T
-        for T in pnp_poses_in_body
-    ])
+    T_comp = world_T_cam0_first @ np.linalg.inv(pnp_poses[closest_cam_index])
+    pnp_poses = np.array([T_comp @ T for T in pnp_poses])
 
     cam0_T_body = np.linalg.inv(body_T_cam0)
     pnp_world_T_body = pnp_poses @ cam0_T_body
