@@ -275,76 +275,45 @@ def _run_gtsam(
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
 
     PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
-    ODOMETRY_NOISE = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1, 0.1, 0.1, 1e9, 1e9, 1e9]))
-    PROJECTION_NOISE = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
-
-    K = gtsam.Cal3_S2(
-        data.cam0_intrinsics.fx, data.cam0_intrinsics.fy, 0.0,
-        data.cam0_intrinsics.cx, data.cam0_intrinsics.cy,
-    )
+    IMU_NOISE   = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1, 0.1, 0.1, 10.0, 10.0, 10.0]))
+    PNP_NOISE   = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]))
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
-    frame0_factors = gtsam.NonlinearFactorGraph()
-    frame0_values = gtsam.Values()
-    frame0_factors.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), PRIOR_NOISE))
-    frame0_values.insert(0, gtsam.Pose3())
-    isam2.update(frame0_factors, frame0_values)
+    f0, v0 = gtsam.NonlinearFactorGraph(), gtsam.Values()
+    f0.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), PRIOR_NOISE))
+    v0.insert(0, gtsam.Pose3())
+    isam2.update(f0, v0)
 
-    landmark_id = 0
-    landmark_map = {}  # (frame_i, cam0_queryIdx) -> l_key
-    added_observations = set()  # (l_key, pose_key) pairs already in graph
-
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
     for i in range(N - 1):
-        estimate = isam2.calculateEstimate()
-        pose_i = estimate.atPose3(i)
-
-        rotation_vector = imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz
-        delta = gtsam.Pose3(gtsam.Rot3.Expmap(rotation_vector), gtsam.Point3(0.0, 0.0, 0.0))
-
-        new_factors = gtsam.NonlinearFactorGraph()
-        new_values = gtsam.Values()
-
-        new_factors.add(gtsam.BetweenFactorPose3(i, i + 1, delta, ODOMETRY_NOISE))
-        new_values.insert(i + 1, pose_i.compose(delta))
-
-        fd_i = feature_detection_result.frames[i]
-        fd_next = feature_detection_result.frames[i + 1]
+        pose_i = isam2.calculateEstimate().atPose3(i)
+        fd_i, fd_next = feature_detection_result.frames[i], feature_detection_result.frames[i + 1]
         sm_i = stereo_matching_result.frames[i]
-        cam0_idx_to_3d = {m.queryIdx: k for k, m in enumerate(sm_i.matches)}
 
-        raw_matches = bf.knnMatch(fd_i.cam0_descriptors, fd_next.cam0_descriptors, k=2)
-        good_matches = [m for m, n in raw_matches if m.distance < 0.75 * n.distance]
+        new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
 
-        for m in good_matches:
-            if m.queryIdx not in cam0_idx_to_3d:
-                continue
+        rv_imu = imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz
+        imu_delta = gtsam.Pose3(gtsam.Rot3.Expmap(rv_imu), gtsam.Point3(0.0, 0.0, 0.0))
+        new_factors.add(gtsam.BetweenFactorPose3(i, i + 1, imu_delta, IMU_NOISE))
 
-            p_3d = sm_i.points_3d[:, cam0_idx_to_3d[m.queryIdx]]
+        pose_init = pose_i.compose(imu_delta)
+        try:
+            rv_pnp, tv_pnp, _, _ = _run_pnp_step(
+                data, sm_i.points_3d, sm_i.matches,
+                fd_i.cam0_descriptors, fd_next.cam0_keypoints, fd_next.cam0_descriptors,
+            )
+            R_pnp, _ = cv2.Rodrigues(rv_pnp)
+            pnp_delta = gtsam.Pose3(gtsam.Rot3(R_pnp), gtsam.Point3(*tv_pnp.flatten()))
+            new_factors.add(gtsam.BetweenFactorPose3(i, i + 1, pnp_delta, PNP_NOISE))
+            pose_init = pose_i.compose(pnp_delta)
+        except Exception:
+            pass
 
-            key_id = (i, m.queryIdx)
-            if key_id not in landmark_map:
-                l_key = gtsam.symbol('l', landmark_id)
-                landmark_map[key_id] = l_key
-                p_world = pose_i.transformFrom(gtsam.Point3(p_3d[0], p_3d[1], p_3d[2]))
-                new_values.insert(l_key, p_world)
-                landmark_id += 1
-
-            l_key = landmark_map[key_id]
-
-            for pose_key, kp in [(i, fd_i.cam0_keypoints[m.queryIdx].pt), (i + 1, fd_next.cam0_keypoints[m.trainIdx].pt)]:
-                obs = (l_key, pose_key)
-                if obs not in added_observations:
-                    new_factors.add(gtsam.GenericProjectionFactorCal3_S2(
-                        np.array(kp), PROJECTION_NOISE, pose_key, l_key, K
-                    ))
-                    added_observations.add(obs)
-
+        new_values.insert(i + 1, pose_init)
         isam2.update(new_factors, new_values)
 
-    final_estimate = isam2.calculateEstimate()
-    return [final_estimate.atPose3(i).matrix() for i in range(N)]
+    final = isam2.calculateEstimate()
+    return [final.atPose3(i).matrix() for i in range(N)]
 
 
 def _get_gtsam_result(
