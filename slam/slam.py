@@ -183,7 +183,7 @@ def _run_pnp(
     keyframe_indices: list[int] = [0]
     keyframe_num_temporal_matches: Optional[int] = None
     pnp_poses: list[np.ndarray] = [np.eye(4)]
-    pnp_angular_velocities_in_body: list[np.ndarray] = []
+    pnp_angular_velocities: list[np.ndarray] = []
     n = len(stereo_matching_result.frames)
     for i in range(1, n):
         on_progress(i / n)
@@ -192,7 +192,7 @@ def _run_pnp(
             kf_fd = feature_detection_result.frames[kf_idx]
             kf_sm = stereo_matching_result.frames[kf_idx]
             cf_fd = feature_detection_result.frames[i]
-            rotation_vector_in_cam0, translation_vector_in_cam0, num_temporal_matches, _ = _run_pnp_step(
+            rotation_vector, translation_vector, num_temporal_matches, _ = _run_pnp_step(
                 data,
                 kf_sm.points_3d, kf_sm.matches,
                 kf_fd.cam0_descriptors,
@@ -203,19 +203,16 @@ def _run_pnp(
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
-        body_T_cam0 = data.cam0_extrinsics
-        rotation_vector_in_body = body_T_cam0[:3, :3] @ rotation_vector_in_cam0
-        translation_vector_in_body = body_T_cam0[:3, :3] @ translation_vector_in_cam0
-        pnp_angular_velocities_in_body.append(rotation_vector_in_body.flatten() * data.cam0_rate_hz)
-        rotation_matrix_body_in_body, _ = cv2.Rodrigues(rotation_vector_in_body)
+        pnp_angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
+        rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
         transform = np.eye(4)
-        transform[:3, :3] = rotation_matrix_body_in_body
-        transform[:3, 3] = translation_vector_in_body.flatten()
+        transform[:3, :3] = rotation_matrix
+        transform[:3, 3] = translation_vector.flatten()
         pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ transform)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return pnp_poses, np.array(pnp_angular_velocities_in_body)
+    return pnp_poses, np.array(pnp_angular_velocities)
 
 
 def _optimize_angular_velocities(
@@ -348,21 +345,14 @@ def _compute(
 ) -> SlamResult:
     first_ts = data.cam_timestamps_ns[0]
     max_ts = stereo_matching_result.frames[-1].timestamp_ns
-
-    body_T_cam0 = data.cam0_extrinsics
-
     first_gt_sample = data.ground_truth_samples[0]
-    world_T_body_first = np.eye(4)
-    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
-    world_T_body_first[:3, 3] = first_gt_sample.position
-    first_gt_sample_pose = world_T_body_first
 
     gt_result = _get_ground_truth_result(data, first_ts, max_ts)
 
     imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
-    pnp_poses, pnp_angular_velocities_in_body = _run_pnp(
+    pnp_poses, pnp_angular_velocities = _run_pnp(
         data, feature_detection_result, stereo_matching_result,
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
@@ -370,6 +360,12 @@ def _compute(
     set_progress(1.0 / 4.0, "Transforming poses...")
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
+
+    body_T_cam0 = data.cam0_extrinsics
+
+    world_T_body_first = np.eye(4)
+    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
+    world_T_body_first[:3, 3] = first_gt_sample.position
 
     world_T_cam0_first = world_T_body_first @ body_T_cam0
     T_comp = world_T_cam0_first @ np.linalg.inv(pnp_poses[closest_cam_index])
@@ -386,7 +382,7 @@ def _compute(
     pnp_attitudes = pnp_world_T_body[:, :3, :3]
     pnp_angular_velocity_times = np.array([
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
-        for i in range(len(pnp_angular_velocities_in_body))
+        for i in range(len(pnp_angular_velocities))
     ])
 
     set_progress(2.0 / 4.0, "Optimizing angular velocities...")
@@ -409,7 +405,7 @@ def _compute(
             positions=pnp_positions_in_world,
             attitudes=pnp_attitudes,
             angular_velocity_times=pnp_angular_velocity_times,
-            angular_velocities=pnp_angular_velocities_in_body,
+            angular_velocities=pnp_angular_velocities,
         ),
         scipy=optimization,
         gtsam=gtsam_result,
