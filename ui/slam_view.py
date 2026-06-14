@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.slam import SlamResult, SlamSolver
 from slam.stereo_matching import StereoMatchingResult
@@ -89,7 +89,7 @@ def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) ->
 
 
 class SlamViewModel:
-    def __init__(self, data: DataFolder) -> None:
+    def __init__(self, data: EuRoCMAVData) -> None:
         self._data = data
         self._solver: Optional[SlamSolver] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None

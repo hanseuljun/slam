@@ -4,14 +4,14 @@ from typing import Callable, Optional
 import cv2
 from imgui_bundle import hello_imgui, imgui
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult, StereoMatchingSolver
 from ui.utils import image_to_texture
 
 
 class StereoMatchingViewModel:
-    def __init__(self, data: DataFolder, on_result: Callable[[StereoMatchingResult], None]) -> None:
+    def __init__(self, data: EuRoCMAVData, on_result: Callable[[StereoMatchingResult], None]) -> None:
         self._data = data
         self._on_result = on_result
         self._solver: Optional[StereoMatchingSolver] = None

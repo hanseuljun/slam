@@ -4,12 +4,12 @@ import cv2
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
-from slam import DataFolder
+from slam import EuRoCMAVData
 from ui.utils import image_to_texture
 
 
 class DataViewModel:
-    def __init__(self, data: DataFolder) -> None:
+    def __init__(self, data: EuRoCMAVData) -> None:
         self.data = data
         self.frame_index: int = 0
         self._cached_index: int = -1

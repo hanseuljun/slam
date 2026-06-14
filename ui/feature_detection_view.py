@@ -4,7 +4,7 @@ from typing import Callable, Optional
 import cv2
 from imgui_bundle import hello_imgui, imgui
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult, FeatureDetectionSolver
 from ui.utils import image_to_texture
 
@@ -12,7 +12,7 @@ from ui.utils import image_to_texture
 class FeatureDetectionViewModel:
     def __init__(
         self,
-        data: DataFolder,
+        data: EuRoCMAVData,
         on_result: Callable[[FeatureDetectionResult], None],
         start_s: float = 0.0,
         duration_s: float = 5.0,

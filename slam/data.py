@@ -135,7 +135,7 @@ def read_imu_samples(data_csv_path: Path) -> list[ImuSample]:
 
 
 @dataclass
-class DataFolder:
+class EuRoCMAVData:
     path: Path
     cam_timestamps_ns: list[int]
     imu_samples: list[ImuSample]

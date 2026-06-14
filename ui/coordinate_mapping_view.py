@@ -13,7 +13,7 @@ from slam.coordinate_mapping_check import (
     CoordinateMappingCheckResult,
     CoordinateMappingChecker,
 )
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
@@ -83,7 +83,7 @@ def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
 
 
 class CoordinateMappingViewModel:
-    def __init__(self, data: DataFolder) -> None:
+    def __init__(self, data: EuRoCMAVData) -> None:
         self._data = data
         self._checker: Optional[CoordinateMappingChecker] = None
         self._feature_detection_result: Optional[FeatureDetectionResult] = None

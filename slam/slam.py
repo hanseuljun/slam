@@ -6,7 +6,7 @@ import gtsam
 import numpy as np
 from scipy.optimize import least_squares
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
@@ -62,7 +62,7 @@ class SlamResult:
 
 
 def _solve_pnp(
-    data: DataFolder,
+    data: EuRoCMAVData,
     points_3d: np.ndarray,
     stereo_matches: list,
     cam0_descriptors0: np.ndarray,
@@ -105,7 +105,7 @@ def _solve_pnp(
 
 
 def _run_pnp(
-    data: DataFolder,
+    data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     on_progress: Callable[[float], None],
@@ -179,7 +179,7 @@ def _optimize_angular_velocities(
 
 
 def _optimize_with_gtsam(
-    data: DataFolder,
+    data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     pnp_poses_in_world: np.ndarray,
@@ -252,12 +252,14 @@ def _optimize_with_gtsam(
             ))
 
     result = gtsam.LevenbergMarquardtOptimizer(graph, initial).optimize()
-    poses = np.array([result.atPose3(P(i)).matrix() for i in range(N)])
-    return SlamGtsamResult(attitudes=poses[:, :3, :3], positions=poses[:, :3, 3])
+    world_T_cam0_poses = np.array([result.atPose3(P(i)).matrix() for i in range(N)])
+    cam0_T_body = np.linalg.inv(data.cam0_extrinsics)
+    world_T_body_poses = world_T_cam0_poses @ cam0_T_body
+    return SlamGtsamResult(attitudes=world_T_body_poses[:, :3, :3], positions=world_T_body_poses[:, :3, 3])
 
 
 def _compute(
-    data: DataFolder,
+    data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     set_progress: Callable[[float, str], None],
@@ -335,12 +337,15 @@ def _compute(
         for T in pnp_poses_without_initial
     ])
 
+    cam0_T_body = np.linalg.inv(body_T_cam0)
+    pnp_world_T_body = pnp_poses_in_world @ cam0_T_body
+
     pnp_times = np.array([
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
         for i in range(len(pnp_poses_in_world))
     ])
-    pnp_positions_in_world = pnp_poses_in_world[:, :3, 3]
-    pnp_attitudes = pnp_poses_in_world[:, :3, :3]
+    pnp_positions_in_world = pnp_world_T_body[:, :3, 3]
+    pnp_attitudes = pnp_world_T_body[:, :3, :3]
     pnp_angular_velocity_times = np.array([
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
         for i in range(len(pnp_angular_velocities_from_rvec))
@@ -394,7 +399,7 @@ def _compute(
 
 
 class SlamSolver:
-    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
+    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result

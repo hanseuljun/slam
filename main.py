@@ -3,7 +3,7 @@ from typing import Optional
 
 from imgui_bundle import imgui, hello_imgui, immapp
 
-from slam import DataFolder, FeatureDetectionResult, StereoMatchingResult
+from slam import EuRoCMAVData, FeatureDetectionResult, StereoMatchingResult
 from ui.coordinate_mapping_view import CoordinateMappingViewModel, coordinate_mapping_view
 from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
@@ -13,7 +13,7 @@ from ui.time_range_view import TimeRangeModel, time_range_view
 
 
 class RootViewModel:
-    def __init__(self, data: DataFolder) -> None:
+    def __init__(self, data: EuRoCMAVData) -> None:
         self.data = data
         self.data_view_model = DataViewModel(data)
         self.slam_view_model = SlamViewModel(data)
@@ -102,7 +102,7 @@ def root_view(model: RootViewModel) -> None:
 
 
 def main():
-    data = DataFolder.load(Path("data/machine_hall/MH_01_easy/mav0"))
+    data = EuRoCMAVData.load(Path("data/machine_hall/MH_01_easy/mav0"))
     model = RootViewModel(data)
 
     runner_params = hello_imgui.RunnerParams()

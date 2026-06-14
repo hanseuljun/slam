@@ -4,7 +4,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
@@ -49,7 +49,7 @@ def _solve_icp_transform(src_pts: np.ndarray, dst_pts: np.ndarray) -> np.ndarray
 class CoordinateMappingChecker:
     def __init__(
         self,
-        data: DataFolder,
+        data: EuRoCMAVData,
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
     ) -> None:

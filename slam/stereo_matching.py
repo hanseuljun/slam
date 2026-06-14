@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 
 
@@ -22,7 +22,7 @@ class StereoMatchingResult:
 
 
 class StereoMatchingSolver:
-    def __init__(self, data: DataFolder, feature_detection_result: FeatureDetectionResult) -> None:
+    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self.progress: float = 0.0

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from slam.data import DataFolder
+from slam.data import EuRoCMAVData
 
 
 @dataclass
@@ -23,7 +23,7 @@ class FeatureDetectionResult:
 
 
 class FeatureDetectionSolver:
-    def __init__(self, data: DataFolder, start_s: float = 0.0, duration_s: float = 5.0) -> None:
+    def __init__(self, data: EuRoCMAVData, start_s: float = 0.0, duration_s: float = 5.0) -> None:
         self._data = data
         self._start_s = start_s
         self._duration_s = duration_s
