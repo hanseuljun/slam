@@ -196,7 +196,9 @@ def _download_transforms(result: CoordinateMappingCheckResult) -> None:
             "gt_transform": f.gt_transform.tolist(),
             "icp_transform": f.icp_transform.tolist() if f.icp_transform is not None else None,
         })
-    path = "inter_frame_transforms.json"
+    import os
+    os.makedirs("tmp", exist_ok=True)
+    path = "tmp/inter_frame_transforms.json"
     with open(path, "w") as fp:
         json.dump(records, fp, indent=2)
     print(f"Saved {len(records)} inter-frame transforms to {path}")
