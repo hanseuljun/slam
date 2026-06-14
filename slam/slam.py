@@ -161,10 +161,16 @@ def _run_pnp(
 
 
 def _optimize_angular_velocities(
-    imu_angular_velocities_at_cam_times: np.ndarray,
+    stereo_matching_result: StereoMatchingResult,
+    imu_timestamps_ns: np.ndarray,
+    imu_angular_velocities: np.ndarray,
     pnp_attitudes: np.ndarray,
     cam_rate_hz: int,
 ) -> SlamScipyResult:
+    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:len(pnp_attitudes)]])
+    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
+    imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
+
     N = len(pnp_attitudes)
     x0 = imu_angular_velocities_at_cam_times[:-1].flatten()
 
@@ -195,11 +201,15 @@ def _optimize_with_gtsam(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     pnp_poses_in_world: np.ndarray,
-    imu_angular_velocities_at_cam_times: np.ndarray,
+    imu_timestamps_ns: np.ndarray,
+    imu_angular_velocities: np.ndarray,
 ) -> SlamGtsamResult:
     from gtsam.symbol_shorthand import L, P
 
     N = len(pnp_poses_in_world)
+    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
+    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
+    imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
     intr = data.cam0_intrinsics
     K = gtsam.Cal3_S2(intr.fx, intr.fy, 0.0, intr.cx, intr.cy)
     K_mat = intr.to_matrix()
@@ -360,22 +370,15 @@ def _compute(
     ])
 
     set_progress(2.0 / 4.0, "Optimizing angular velocities...")
-    pnp_cam_timestamps_ns = np.array([
-        stereo_matching_result.frames[i].timestamp_ns
-        for i in range(len(pnp_poses_without_initial))
-    ])
-    nearest_imu_indices = np.array([
-        np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in pnp_cam_timestamps_ns
-    ])
-    imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
     optimization = _optimize_angular_velocities(
-        imu_angular_velocities_at_cam_times, pnp_attitudes, data.cam0_rate_hz
+        stereo_matching_result, imu_timestamps_ns, imu_angular_velocities,
+        pnp_attitudes, data.cam0_rate_hz,
     )
 
     set_progress(3.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
         data, feature_detection_result, stereo_matching_result,
-        pnp_poses_in_world, imu_angular_velocities_at_cam_times,
+        pnp_poses_in_world, imu_timestamps_ns, imu_angular_velocities,
     )
 
     set_progress(0.95, "Finishing...")
