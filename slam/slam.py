@@ -283,17 +283,13 @@ def _run_gtsam(
         data.cam0_intrinsics.cx, data.cam0_intrinsics.cy,
     )
 
-    graph = gtsam.NonlinearFactorGraph()
-    initial_estimates = gtsam.Values()
+    isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
-    graph.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), PRIOR_NOISE))
-    initial_estimates.insert(0, gtsam.Pose3())
-
-    for i in range(N - 1):
-        rotation_vector = imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz
-        odometry_measurement = gtsam.Pose3(gtsam.Rot3.Expmap(rotation_vector), gtsam.Point3(0.0, 0.0, 0.0))
-        graph.add(gtsam.BetweenFactorPose3(i, i + 1, odometry_measurement, ODOMETRY_NOISE))
-        initial_estimates.insert(i + 1, gtsam.Pose3())
+    frame0_factors = gtsam.NonlinearFactorGraph()
+    frame0_values = gtsam.Values()
+    frame0_factors.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), PRIOR_NOISE))
+    frame0_values.insert(0, gtsam.Pose3())
+    isam2.update(frame0_factors, frame0_values)
 
     landmark_id = 0
     landmark_map = {}  # (frame_i, cam0_queryIdx) -> l_key
@@ -301,10 +297,21 @@ def _run_gtsam(
 
     bf = cv2.BFMatcher(cv2.NORM_HAMMING)
     for i in range(N - 1):
+        estimate = isam2.calculateEstimate()
+        pose_i = estimate.atPose3(i)
+
+        rotation_vector = imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz
+        delta = gtsam.Pose3(gtsam.Rot3.Expmap(rotation_vector), gtsam.Point3(0.0, 0.0, 0.0))
+
+        new_factors = gtsam.NonlinearFactorGraph()
+        new_values = gtsam.Values()
+
+        new_factors.add(gtsam.BetweenFactorPose3(i, i + 1, delta, ODOMETRY_NOISE))
+        new_values.insert(i + 1, pose_i.compose(delta))
+
         fd_i = feature_detection_result.frames[i]
         fd_next = feature_detection_result.frames[i + 1]
         sm_i = stereo_matching_result.frames[i]
-
         cam0_idx_to_3d = {m.queryIdx: k for k, m in enumerate(sm_i.matches)}
 
         raw_matches = bf.knnMatch(fd_i.cam0_descriptors, fd_next.cam0_descriptors, k=2)
@@ -314,40 +321,30 @@ def _run_gtsam(
             if m.queryIdx not in cam0_idx_to_3d:
                 continue
 
-            k_3d = cam0_idx_to_3d[m.queryIdx]
-            p_3d = sm_i.points_3d[:, k_3d]
+            p_3d = sm_i.points_3d[:, cam0_idx_to_3d[m.queryIdx]]
 
             key_id = (i, m.queryIdx)
             if key_id not in landmark_map:
                 l_key = gtsam.symbol('l', landmark_id)
                 landmark_map[key_id] = l_key
-                initial_estimates.insert(l_key, gtsam.Point3(p_3d[0], p_3d[1], p_3d[2]))
+                p_world = pose_i.transformFrom(gtsam.Point3(p_3d[0], p_3d[1], p_3d[2]))
+                new_values.insert(l_key, p_world)
                 landmark_id += 1
 
             l_key = landmark_map[key_id]
 
-            obs_i = (l_key, i)
-            if obs_i not in added_observations:
-                kp_i = np.array(fd_i.cam0_keypoints[m.queryIdx].pt)
-                graph.add(gtsam.GenericProjectionFactorCal3_S2(kp_i, PROJECTION_NOISE, i, l_key, K))
-                added_observations.add(obs_i)
+            for pose_key, kp in [(i, fd_i.cam0_keypoints[m.queryIdx].pt), (i + 1, fd_next.cam0_keypoints[m.trainIdx].pt)]:
+                obs = (l_key, pose_key)
+                if obs not in added_observations:
+                    new_factors.add(gtsam.GenericProjectionFactorCal3_S2(
+                        np.array(kp), PROJECTION_NOISE, pose_key, l_key, K
+                    ))
+                    added_observations.add(obs)
 
-            obs_next = (l_key, i + 1)
-            if obs_next not in added_observations:
-                kp_next = np.array(fd_next.cam0_keypoints[m.trainIdx].pt)
-                graph.add(gtsam.GenericProjectionFactorCal3_S2(kp_next, PROJECTION_NOISE, i + 1, l_key, K))
-                added_observations.add(obs_next)
+        isam2.update(new_factors, new_values)
 
-    params = gtsam.LevenbergMarquardtParams()
-    optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimates, params)
-    result = optimizer.optimize()
-
-    poses = []
-    for i in range(N):
-        pose = result.atPose3(i).matrix()
-        poses.append(pose)
-
-    return poses
+    final_estimate = isam2.calculateEstimate()
+    return [final_estimate.atPose3(i).matrix() for i in range(N)]
 
 
 def _get_gtsam_result(
