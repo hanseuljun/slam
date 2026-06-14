@@ -77,7 +77,7 @@ def _get_ground_truth_result(
     data: EuRoCMAVData,
     first_ts: int,
     max_ts: int,
-) -> tuple[SlamGroundTruthResult, np.ndarray]:
+) -> SlamGroundTruthResult:
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
     gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
     gt_positions = np.array([s.position for s in gt_samples])
@@ -98,7 +98,7 @@ def _get_ground_truth_result(
         attitudes=gt_attitudes,
         angular_velocity_times=np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples[:-1]]),
         angular_velocities=gt_angular_velocities,
-    ), gt_attitudes
+    )
 
 
 def _get_imu_result(
@@ -156,22 +156,22 @@ def _run_pnp_step(
     object_points = np.array(object_points, dtype=np.float64)
     image_points = np.array(image_points, dtype=np.float64)
 
-    K0 = data.cam0_intrinsics.to_matrix()
+    intrinsics_matrix = data.cam0_intrinsics.to_matrix()
     dist_coeffs = np.array([
         data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
         data.cam0_intrinsics.p1, data.cam0_intrinsics.p2,
     ])
 
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(object_points, image_points, K0, dist_coeffs)
+    success, rotation_vector, translation_vector, inliers = cv2.solvePnPRansac(object_points, image_points, intrinsics_matrix, dist_coeffs)
     if not success:
         raise RuntimeError(f"cv2.solvePnPRansac failed. len(object_points): {len(object_points)}")
 
     inlier_object_points = object_points[inliers.flatten()]
     inlier_image_points = image_points[inliers.flatten()]
-    projected, _ = cv2.projectPoints(inlier_object_points, rvec, tvec, K0, dist_coeffs)
+    projected, _ = cv2.projectPoints(inlier_object_points, rotation_vector, translation_vector, intrinsics_matrix, dist_coeffs)
     reprojection_error = np.mean(np.linalg.norm(inlier_image_points - projected.reshape(-1, 2), axis=1))
 
-    return rvec, tvec, len(temporal_good_matches), reprojection_error
+    return rotation_vector, translation_vector, len(temporal_good_matches), reprojection_error
 
 
 def _run_pnp(
@@ -182,8 +182,8 @@ def _run_pnp(
 ) -> tuple[np.ndarray, np.ndarray]:
     keyframe_indices: list[int] = [0]
     keyframe_num_temporal_matches: Optional[int] = None
-    pnp_poses: list[np.ndarray] = [np.eye(4)]
-    pnp_angular_velocities: list[np.ndarray] = []
+    pnp_poses_in_body: list[np.ndarray] = [np.eye(4)]
+    pnp_angular_velocities_in_body: list[np.ndarray] = []
     n = len(stereo_matching_result.frames)
     for i in range(1, n):
         on_progress(i / n)
@@ -192,7 +192,7 @@ def _run_pnp(
             kf_fd = feature_detection_result.frames[kf_idx]
             kf_sm = stereo_matching_result.frames[kf_idx]
             cf_fd = feature_detection_result.frames[i]
-            rvec, tvec, num_temporal_matches, _ = _run_pnp_step(
+            rotation_vector_in_cam0, translation_vector_in_cam0, num_temporal_matches, _ = _run_pnp_step(
                 data,
                 kf_sm.points_3d, kf_sm.matches,
                 kf_fd.cam0_descriptors,
@@ -204,18 +204,18 @@ def _run_pnp(
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
         body_T_cam0 = data.cam0_extrinsics
-        rvec = body_T_cam0[:3, :3] @ rvec
-        tvec = body_T_cam0[:3, :3] @ tvec
-        pnp_angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
-        R_body, _ = cv2.Rodrigues(rvec)
-        pose_relative = np.eye(4)
-        pose_relative[:3, :3] = R_body
-        pose_relative[:3, 3] = tvec.flatten()
-        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ pose_relative)
+        rotation_vector_in_body = body_T_cam0[:3, :3] @ rotation_vector_in_cam0
+        translation_vector_in_body = body_T_cam0[:3, :3] @ translation_vector_in_cam0
+        pnp_angular_velocities_in_body.append(rotation_vector_in_body.flatten() * data.cam0_rate_hz)
+        rotation_matrix_body_in_body, _ = cv2.Rodrigues(rotation_vector_in_body)
+        transform = np.eye(4)
+        transform[:3, :3] = rotation_matrix_body_in_body
+        transform[:3, 3] = translation_vector_in_body.flatten()
+        pnp_poses_in_body.append(pnp_poses_in_body[keyframe_indices[-1]] @ transform)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return np.array(pnp_poses), np.array(pnp_angular_velocities)
+    return pnp_poses_in_body, np.array(pnp_angular_velocities_in_body)
 
 
 def _optimize_angular_velocities(
@@ -259,12 +259,12 @@ def _optimize_with_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    pnp_poses_in_world: np.ndarray,
+    pnp_poses: np.ndarray,
     imu_samples: list,
 ) -> SlamGtsamResult:
     from gtsam.symbol_shorthand import L, P
 
-    N = len(pnp_poses_in_world)
+    N = len(pnp_poses)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
@@ -278,7 +278,7 @@ def _optimize_with_gtsam(
     graph = gtsam.NonlinearFactorGraph()
     initial = gtsam.Values()
 
-    for i, T in enumerate(pnp_poses_in_world):
+    for i, T in enumerate(pnp_poses):
         initial.insert(P(i), gtsam.Pose3(gtsam.Rot3(T[:3, :3]), T[:3, 3]))
 
     graph.add(gtsam.PriorFactorPose3(
@@ -317,7 +317,7 @@ def _optimize_with_gtsam(
         raw_matches = bf.knnMatch(stereo_desc_k, fd_k1.cam0_descriptors, k=2)
         good = [ms[0] for ms in raw_matches if len(ms) == 2 and ms[0].distance < 0.75 * ms[1].distance]
 
-        T_k = pnp_poses_in_world[k]
+        T_k = pnp_poses[k]
         for m in good:
             p_cam = sm_k.points_3d[:, m.queryIdx]
             p_world = T_k[:3, :3] @ p_cam + T_k[:3, 3]
@@ -357,12 +357,12 @@ def _compute(
     world_T_body_first[:3, 3] = first_gt_sample.position
     first_gt_sample_pose = world_T_body_first
 
-    gt_result, gt_attitudes = _get_ground_truth_result(data, first_ts, max_ts)
+    gt_result = _get_ground_truth_result(data, first_ts, max_ts)
 
-    imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_attitudes)
+    imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
-    pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
+    pnp_poses_in_body, pnp_angular_velocities_in_body = _run_pnp(
         data, feature_detection_result, stereo_matching_result,
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
@@ -371,32 +371,32 @@ def _compute(
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
-    # pnp_poses_in_world = np.array([
+    # pnp_poses = np.array([
     #     first_gt_sample_pose @ data.leica_extrinsics
-    #     @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses_without_initial[closest_cam_index])
+    #     @ np.linalg.inv(data.cam0_extrinsics @ pnp_poses[closest_cam_index])
     #     @ data.cam0_extrinsics @ T
     #     @ np.linalg.inv(data.leica_extrinsics)
-    #     for T in pnp_poses_without_initial
+    #     for T in pnp_poses
     # ])
 
     world_T_cam0_first = world_T_body_first @ body_T_cam0
-    pnp_poses_in_world = np.array([
+    pnp_poses = np.array([
         world_T_cam0_first @ T
-        for T in pnp_poses_without_initial
+        for T in pnp_poses_in_body
     ])
 
     cam0_T_body = np.linalg.inv(body_T_cam0)
-    pnp_world_T_body = pnp_poses_in_world @ cam0_T_body
+    pnp_world_T_body = pnp_poses @ cam0_T_body
 
     pnp_times = np.array([
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
-        for i in range(len(pnp_poses_in_world))
+        for i in range(len(pnp_poses))
     ])
     pnp_positions_in_world = pnp_world_T_body[:, :3, 3]
     pnp_attitudes = pnp_world_T_body[:, :3, :3]
     pnp_angular_velocity_times = np.array([
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
-        for i in range(len(pnp_angular_velocities_from_rvec))
+        for i in range(len(pnp_angular_velocities_in_body))
     ])
 
     set_progress(2.0 / 4.0, "Optimizing angular velocities...")
@@ -407,7 +407,7 @@ def _compute(
     set_progress(3.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
         data, feature_detection_result, stereo_matching_result,
-        pnp_poses_in_world, imu_samples,
+        pnp_poses, imu_samples,
     )
 
     set_progress(0.95, "Finishing...")
@@ -419,7 +419,7 @@ def _compute(
             positions=pnp_positions_in_world,
             attitudes=pnp_attitudes,
             angular_velocity_times=pnp_angular_velocity_times,
-            angular_velocities=pnp_angular_velocities_from_rvec,
+            angular_velocities=pnp_angular_velocities_in_body,
         ),
         scipy=optimization,
         gtsam=gtsam_result,
