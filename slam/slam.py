@@ -254,94 +254,29 @@ def _get_pnp_result(
 
 
 
-def _optimize_with_gtsam(
+def _get_gtsam_result(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list,
 ) -> SlamGtsamResult:
-    from gtsam.symbol_shorthand import L, P
-
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
     nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
-    intr = data.cam0_intrinsics
-    K = gtsam.Cal3_S2(intr.fx, intr.fy, 0.0, intr.cx, intr.cy)
-    K_mat = intr.to_matrix()
-    dist_coeffs = np.array([intr.k1, intr.k2, intr.p1, intr.p2])
 
-    graph = gtsam.NonlinearFactorGraph()
-    initial = gtsam.Values()
-
-    initial_poses = [np.eye(4)]
+    poses = [np.eye(4)]
     for i in range(N - 1):
         R_imu, _ = cv2.Rodrigues(imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz)
-        T_prev = initial_poses[-1]
+        T_prev = poses[-1]
         T_next = np.eye(4)
         T_next[:3, :3] = T_prev[:3, :3] @ R_imu
         T_next[:3, 3] = T_prev[:3, 3]
-        initial_poses.append(T_next)
+        poses.append(T_next)
 
-    for i, T in enumerate(initial_poses):
-        initial.insert(P(i), gtsam.Pose3(gtsam.Rot3(T[:3, :3]), T[:3, 3]))
-
-    graph.add(gtsam.PriorFactorPose3(
-        P(0), initial.atPose3(P(0)),
-        gtsam.noiseModel.Isotropic.Sigma(6, 1e-3),
-    ))
-
-    # IMU between factors: constrain rotation, leave translation unconstrained
-    imu_noise = gtsam.noiseModel.Diagonal.Sigmas(
-        np.array([0.01, 0.01, 0.01, 1e6, 1e6, 1e6])
-    )
-    for i in range(N - 1):
-        R_imu, _ = cv2.Rodrigues(imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz)
-        graph.add(gtsam.BetweenFactorPose3(
-            P(i), P(i + 1),
-            gtsam.Pose3(gtsam.Rot3(R_imu), np.zeros(3)),
-            imu_noise,
-        ))
-
-    # Projection factors between temporally adjacent frames
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    proj_noise = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
-    lm_noise = gtsam.noiseModel.Isotropic.Sigma(3, 1e-3)
-    lm_id = 0
-
-    for k in range(N - 1):
-        sm_k = stereo_matching_result.frames[k]
-        fd_k = feature_detection_result.frames[k]
-        fd_k1 = feature_detection_result.frames[k + 1]
-
-        if len(sm_k.matches) < 2 or len(fd_k1.cam0_descriptors) < 2:
-            continue
-
-        # Descriptors of frame k's stereo-matched cam0 keypoints, ordered by sm_k.points_3d columns
-        stereo_desc_k = fd_k.cam0_descriptors[[m.queryIdx for m in sm_k.matches]]
-        raw_matches = bf.knnMatch(stereo_desc_k, fd_k1.cam0_descriptors, k=2)
-        good = [ms[0] for ms in raw_matches if len(ms) == 2 and ms[0].distance < 0.75 * ms[1].distance]
-
-        T_k = initial_poses[k]
-        for m in good:
-            p_cam = sm_k.points_3d[:, m.queryIdx]
-            p_world = T_k[:3, :3] @ p_cam + T_k[:3, 3]
-
-            pt = np.array([[fd_k1.cam0_keypoints[m.trainIdx].pt]], dtype=np.float64)
-            pt_u = cv2.undistortPoints(pt, K_mat, dist_coeffs, P=K_mat).reshape(2)
-
-            lk = L(lm_id)
-            lm_id += 1
-            initial.insert(lk, p_world)
-            graph.add(gtsam.PriorFactorPoint3(lk, p_world, lm_noise))
-            graph.add(gtsam.GenericProjectionFactorCal3_S2(
-                pt_u, proj_noise, P(k + 1), lk, K,
-            ))
-
-    result = gtsam.LevenbergMarquardtOptimizer(graph, initial).optimize()
-    world_T_cam0_poses = np.array([result.atPose3(P(i)).matrix() for i in range(N)])
+    world_T_cam0_poses = np.array(poses)
     cam0_T_body = np.linalg.inv(data.cam0_extrinsics)
     world_T_body_poses = world_T_cam0_poses @ cam0_T_body
     return SlamGtsamResult(attitudes=world_T_body_poses[:, :3, :3], positions=world_T_body_poses[:, :3, 3])
@@ -368,7 +303,7 @@ def _compute(
     )
 
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
-    gtsam_result = _optimize_with_gtsam(
+    gtsam_result = _get_gtsam_result(
         data, feature_detection_result, stereo_matching_result, imu_samples,
     )
 
