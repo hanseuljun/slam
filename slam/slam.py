@@ -171,6 +171,12 @@ def _run_pnp_step(
     projected, _ = cv2.projectPoints(inlier_object_points, rotation_vector, translation_vector, intrinsics_matrix, dist_coeffs)
     reprojection_error = np.mean(np.linalg.norm(inlier_image_points - projected.reshape(-1, 2), axis=1))
 
+    # inversing the pose from cv2.solvePnPRansac as they are the inverse of
+    # what the rest of the code expects.
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+    rotation_vector = -rotation_vector
+    translation_vector = -rotation_matrix.T @ translation_vector
+
     return rotation_vector, translation_vector, len(temporal_good_matches), reprojection_error
 
 
