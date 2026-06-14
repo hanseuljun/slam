@@ -262,7 +262,7 @@ def _get_pnp_result(
         attitudes=pnp_world_T_body[:, :3, :3],
         angular_velocity_times=pnp_angular_velocity_times,
         angular_velocities=pnp_angular_velocities,
-    ), pnp_world_T_body
+    )
 
 
 def _optimize_angular_velocities(
@@ -306,12 +306,11 @@ def _optimize_with_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    pnp_poses: np.ndarray,
     imu_samples: list,
 ) -> SlamGtsamResult:
     from gtsam.symbol_shorthand import L, P
 
-    N = len(pnp_poses)
+    N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
@@ -325,7 +324,16 @@ def _optimize_with_gtsam(
     graph = gtsam.NonlinearFactorGraph()
     initial = gtsam.Values()
 
-    for i, T in enumerate(pnp_poses):
+    initial_poses = [np.eye(4)]
+    for i in range(N - 1):
+        R_imu, _ = cv2.Rodrigues(imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz)
+        T_prev = initial_poses[-1]
+        T_next = np.eye(4)
+        T_next[:3, :3] = T_prev[:3, :3] @ R_imu
+        T_next[:3, 3] = T_prev[:3, 3]
+        initial_poses.append(T_next)
+
+    for i, T in enumerate(initial_poses):
         initial.insert(P(i), gtsam.Pose3(gtsam.Rot3(T[:3, :3]), T[:3, 3]))
 
     graph.add(gtsam.PriorFactorPose3(
@@ -364,7 +372,7 @@ def _optimize_with_gtsam(
         raw_matches = bf.knnMatch(stereo_desc_k, fd_k1.cam0_descriptors, k=2)
         good = [ms[0] for ms in raw_matches if len(ms) == 2 and ms[0].distance < 0.75 * ms[1].distance]
 
-        T_k = pnp_poses[k]
+        T_k = initial_poses[k]
         for m in good:
             p_cam = sm_k.points_3d[:, m.queryIdx]
             p_world = T_k[:3, :3] @ p_cam + T_k[:3, 3]
@@ -402,20 +410,19 @@ def _compute(
     imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
-    pnp_result, pnp_world_T_body = _get_pnp_result(
+    pnp_result = _get_pnp_result(
         data, feature_detection_result, stereo_matching_result, first_ts, first_gt_sample,
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
 
     set_progress(2.0 / 4.0, "Optimizing angular velocities...")
     optimization = _optimize_angular_velocities(
-        stereo_matching_result, imu_samples, pnp_world_T_body[:, :3, :3], data.cam0_rate_hz,
+        stereo_matching_result, imu_samples, pnp_result.attitudes, data.cam0_rate_hz,
     )
 
     set_progress(3.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
-        data, feature_detection_result, stereo_matching_result,
-        pnp_world_T_body, imu_samples,
+        data, feature_detection_result, stereo_matching_result, imu_samples,
     )
 
     set_progress(0.95, "Finishing...")
