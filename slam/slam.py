@@ -177,11 +177,10 @@ def _run_pnp(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     on_progress: Callable[[float], None],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> list[np.ndarray]:
     keyframe_indices: list[int] = [0]
     keyframe_num_temporal_matches: Optional[int] = None
     pnp_poses: list[np.ndarray] = [np.eye(4)]
-    pnp_angular_velocities: list[np.ndarray] = []
     n = len(stereo_matching_result.frames)
     for i in range(1, n):
         on_progress(i / n)
@@ -201,7 +200,6 @@ def _run_pnp(
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
-        pnp_angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
         rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
         transform = np.eye(4)
         transform[:3, :3] = rotation_matrix
@@ -210,7 +208,7 @@ def _run_pnp(
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
-    return pnp_poses, np.array(pnp_angular_velocities)
+    return pnp_poses
 
 
 def _get_pnp_result(
@@ -221,7 +219,7 @@ def _get_pnp_result(
     first_gt_sample,
     on_progress: Callable[[float], None],
 ) -> tuple[SlamPnpResult, np.ndarray]:
-    pnp_poses, pnp_angular_velocities = _run_pnp(
+    pnp_poses = _run_pnp(
         data, feature_detection_result, stereo_matching_result, on_progress,
     )
 
@@ -244,14 +242,19 @@ def _get_pnp_result(
         for i in range(len(pnp_world_T_body))
     ])
 
+    angular_velocities = []
+    for i in range(len(pnp_world_T_body) - 1):
+        rotation_matrix = pnp_world_T_body[i, :3, :3].T @ pnp_world_T_body[i + 1, :3, :3]
+        rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
+        angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
+
     return SlamPnpResult(
         times=pnp_times,
         positions=pnp_world_T_body[:, :3, 3],
         attitudes=pnp_world_T_body[:, :3, :3],
-        angular_velocity_times=pnp_times[:len(pnp_angular_velocities)],
-        angular_velocities=pnp_angular_velocities,
+        angular_velocity_times=pnp_times[:-1],
+        angular_velocities=np.array(angular_velocities),
     )
-
 
 
 def _get_gtsam_result(
