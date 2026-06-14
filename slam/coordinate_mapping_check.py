@@ -12,10 +12,8 @@ from slam.util import quaternion_to_rotation_matrix
 
 def _get_closest_ground_truth_pose(
     ground_truth_samples: list[GroundTruthSample],
-    gt_timestamps: np.ndarray,
-    timestamp_ns: int,
+    idx: int,
 ) -> np.ndarray:
-    idx = int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
     sample = ground_truth_samples[idx]
     pose = np.eye(4)
     pose[:3, :3] = quaternion_to_rotation_matrix(sample.quaternion)
@@ -26,6 +24,7 @@ def _get_closest_ground_truth_pose(
 @dataclass
 class CoordinateMappingCheckFrame:
     timestamp_ns: int
+    gt_sample_index: int
     gt_transform: np.ndarray  # 4x4 cam0_k1_T_cam0_k from ground truth (relative pose, k → k+1)
     projection_errors: list[float]
     matches: list  # list[cv2.DMatch]
@@ -82,8 +81,11 @@ class CoordinateMappingChecker:
 
         gt_timestamps = np.array([s.timestamp_ns for s in data.ground_truth_samples])
 
-        def gt_world_T_cam0(timestamp_ns: int) -> np.ndarray:
-            pose = _get_closest_ground_truth_pose(data.ground_truth_samples, gt_timestamps, timestamp_ns)
+        def gt_sample_index(timestamp_ns: int) -> int:
+            return int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
+
+        def gt_world_T_cam0(idx: int) -> np.ndarray:
+            pose = _get_closest_ground_truth_pose(data.ground_truth_samples, idx)
             return np.linalg.inv(data.cam0_extrinsics) @ pose
 
         n = len(sm_result.frames)
@@ -99,14 +101,17 @@ class CoordinateMappingChecker:
             fd_k = fd_result.frames[k]
             fd_k1 = fd_result.frames[k + 1]
 
-            world_T_cam0_k = gt_world_T_cam0(sm_k.timestamp_ns)
-            world_T_cam0_k1 = gt_world_T_cam0(sm_k1.timestamp_ns)
+            gt_idx_k = gt_sample_index(sm_k.timestamp_ns)
+            gt_idx_k1 = gt_sample_index(sm_k1.timestamp_ns)
+            world_T_cam0_k = gt_world_T_cam0(gt_idx_k)
+            world_T_cam0_k1 = gt_world_T_cam0(gt_idx_k1)
             cam0_T_world_k1 = np.linalg.inv(world_T_cam0_k1)
             gt_transform = cam0_T_world_k1 @ world_T_cam0_k
 
             if len(sm_k.matches) < 2 or len(fd_k1.cam0_descriptors) < 2:
                 frames.append(CoordinateMappingCheckFrame(
                     timestamp_ns=sm_k.timestamp_ns,
+                    gt_sample_index=gt_idx_k,
                     gt_transform=gt_transform,
                     projection_errors=[],
                     matches=[],
@@ -123,6 +128,7 @@ class CoordinateMappingChecker:
             if not good:
                 frames.append(CoordinateMappingCheckFrame(
                     timestamp_ns=sm_k.timestamp_ns,
+                    gt_sample_index=gt_idx_k,
                     gt_transform=gt_transform,
                     projection_errors=[],
                     matches=[],
@@ -192,6 +198,7 @@ class CoordinateMappingChecker:
 
             frames.append(CoordinateMappingCheckFrame(
                 timestamp_ns=sm_k.timestamp_ns,
+                gt_sample_index=gt_idx_k,
                 gt_transform=gt_transform,
                 projection_errors=errors,
                 matches=valid_matches,

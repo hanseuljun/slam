@@ -193,15 +193,16 @@ def _download_transforms(result: CoordinateMappingCheckResult) -> None:
     for f in result.frames:
         records.append({
             "timestamp_ns": f.timestamp_ns,
+            "gt_sample_index": f.gt_sample_index,
             "gt_transform": f.gt_transform.tolist(),
             "icp_transform": f.icp_transform.tolist() if f.icp_transform is not None else None,
         })
     import os
     os.makedirs("tmp", exist_ok=True)
-    path = "tmp/inter_frame_transforms.json"
+    path = "tmp/coordinate_mapping_check.json"
     with open(path, "w") as fp:
         json.dump(records, fp, indent=2)
-    print(f"Saved {len(records)} inter-frame transforms to {path}")
+    print(f"Saved {len(records)} records to {path}")
 
 
 def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
@@ -271,7 +272,7 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
 
     imgui.separator()
 
-    if imgui.button("Download inter-frame transforms"):
+    if imgui.button("Download coordinate_mapping_check.json"):
         _download_transforms(model._result)
 
     imgui.separator()
