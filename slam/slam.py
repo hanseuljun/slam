@@ -290,32 +290,27 @@ def _compute(
     first_gt_pose = world_T_body_first
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
-    gt_positions = np.array([s.position for s in gt_samples])
     gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
+    gt_positions = np.array([s.position for s in gt_samples])
     gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
 
     gt_angular_velocities = []
-    gt_angular_velocity_times = []
     for j in range(len(gt_samples) - 1):
-        R0 = quaternion_to_rotation_matrix(gt_samples[j].quaternion)
-        R1 = quaternion_to_rotation_matrix(gt_samples[j + 1].quaternion)
-        R_rel = R0.T @ R1
-        rvec_gt, _ = cv2.Rodrigues(R_rel)
+        gt_rotation = gt_attitudes[j].T @ gt_attitudes[j + 1]
+        gt_rotation_vector, _ = cv2.Rodrigues(gt_rotation)
         dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
-        gt_angular_velocities.append(rvec_gt.flatten() / dt)
-        gt_angular_velocity_times.append((gt_samples[j].timestamp_ns - first_ts) / 1e9)
+        gt_angular_velocity = gt_rotation_vector.flatten() / dt
+        gt_angular_velocities.append(gt_angular_velocity)
     gt_angular_velocities = np.array(gt_angular_velocities)
-    gt_angular_velocity_times = np.array(gt_angular_velocity_times)
 
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
-    imu_rotations = imu_angular_velocities / data.imu0_rate_hz
-    imu_attitudes = [np.eye(3)]
-    for rot in imu_rotations:
-        R, _ = cv2.Rodrigues(rot)
-        imu_attitudes.append(imu_attitudes[-1] @ R)
-    imu_attitudes = np.array(imu_attitudes)
     imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
+    imu_attitudes = [np.eye(3)]
+    for angular_velocity in imu_angular_velocities:
+        imu_rotation_matrix, _ = cv2.Rodrigues(angular_velocity / data.imu0_rate_hz)
+        imu_attitudes.append(imu_attitudes[-1] @ imu_rotation_matrix)
+    imu_attitudes = np.array(imu_attitudes)
     imu_attitude_times = np.concatenate([[0.0], imu_times])
 
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -390,7 +385,7 @@ def _compute(
             times=gt_times,
             positions=gt_positions,
             attitudes=gt_attitudes,
-            angular_velocity_times=gt_angular_velocity_times,
+            angular_velocity_times=np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples[:-1]]),
             angular_velocities=gt_angular_velocities,
         ),
         imu=SlamImuResult(
