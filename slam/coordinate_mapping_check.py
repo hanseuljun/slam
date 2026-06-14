@@ -77,7 +77,7 @@ class CoordinateMappingChecker:
         def gt_world_T_cam0(idx: int) -> np.ndarray:
             sample = data.ground_truth_samples[idx]
             world_T_body = np.eye(4)
-            world_T_body[:3, :3] = quaternion_to_rotation_matrix(sample.quaternion).T
+            world_T_body[:3, :3] = quaternion_to_rotation_matrix(sample.quaternion)
             world_T_body[:3, 3] = np.array(sample.position)
             return world_T_body @ data.cam0_extrinsics
 
