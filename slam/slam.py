@@ -6,7 +6,6 @@ from typing import Any, Callable, Optional
 import cv2
 import gtsam
 import numpy as np
-from scipy.optimize import least_squares
 
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
@@ -52,12 +51,6 @@ class SlamPnpResult:
 
 
 @dataclass
-class SlamScipyResult:
-    attitudes: np.ndarray
-    angular_velocities: np.ndarray
-
-
-@dataclass
 class SlamGtsamResult:
     attitudes: np.ndarray  # (N, 3, 3)
     positions: np.ndarray  # (N, 3)
@@ -68,7 +61,6 @@ class SlamResult:
     gt: SlamGroundTruthResult
     imu: SlamImuResult
     pnp: SlamPnpResult
-    scipy: SlamScipyResult
     gtsam: SlamGtsamResult
 
 
@@ -251,55 +243,15 @@ def _get_pnp_result(
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
         for i in range(len(pnp_world_T_body))
     ])
-    pnp_angular_velocity_times = np.array([
-        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
-        for i in range(len(pnp_angular_velocities))
-    ])
 
     return SlamPnpResult(
         times=pnp_times,
         positions=pnp_world_T_body[:, :3, 3],
         attitudes=pnp_world_T_body[:, :3, :3],
-        angular_velocity_times=pnp_angular_velocity_times,
+        angular_velocity_times=pnp_times[:len(pnp_angular_velocities)],
         angular_velocities=pnp_angular_velocities,
     )
 
-
-def _optimize_angular_velocities(
-    stereo_matching_result: StereoMatchingResult,
-    imu_samples: list,
-    pnp_attitudes: np.ndarray,
-    cam_rate_hz: int,
-) -> SlamScipyResult:
-    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
-    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:len(pnp_attitudes)]])
-    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
-    imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
-
-    N = len(pnp_attitudes)
-    x0 = imu_angular_velocities_at_cam_times[:-1].flatten()
-
-    def accumulate(x: np.ndarray) -> np.ndarray:
-        omegas = x.reshape(N - 1, 3)
-        attitudes = [pnp_attitudes[0]]
-        for omega in omegas:
-            R, _ = cv2.Rodrigues(omega / cam_rate_hz)
-            attitudes.append(attitudes[-1] @ R)
-        return np.array(attitudes)
-
-    def residuals(x: np.ndarray) -> np.ndarray:
-        omegas = x.reshape(N - 1, 3)
-        optimized_attitudes = accumulate(x)
-        omega_res = (omegas - imu_angular_velocities_at_cam_times[:-1]).flatten()
-        attitude_res = (optimized_attitudes[1:] - pnp_attitudes[1:]).flatten()
-        return np.concatenate([omega_res, attitude_res])
-
-    result = least_squares(residuals, x0, method='lm')
-    return SlamScipyResult(
-        attitudes=accumulate(result.x),
-        angular_velocities=result.x.reshape(N - 1, 3),
-    )
 
 
 def _optimize_with_gtsam(
@@ -415,12 +367,7 @@ def _compute(
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
 
-    set_progress(2.0 / 4.0, "Optimizing angular velocities...")
-    optimization = _optimize_angular_velocities(
-        stereo_matching_result, imu_samples, pnp_result.attitudes, data.cam0_rate_hz,
-    )
-
-    set_progress(3.0 / 4.0, "Running GTSAM optimization...")
+    set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _optimize_with_gtsam(
         data, feature_detection_result, stereo_matching_result, imu_samples,
     )
@@ -430,7 +377,6 @@ def _compute(
         gt=gt_result,
         imu=imu_result,
         pnp=pnp_result,
-        scipy=optimization,
         gtsam=gtsam_result,
     )
 
