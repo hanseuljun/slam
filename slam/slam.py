@@ -274,7 +274,7 @@ def _run_gtsam(
     imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
 
     PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
-    ODOMETRY_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+    ODOMETRY_NOISE = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1, 0.1, 0.1, 1e9, 1e9, 1e9]))
 
     graph = gtsam.NonlinearFactorGraph()
     initial_estimates = gtsam.Values()
