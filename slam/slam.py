@@ -101,6 +101,36 @@ def _get_ground_truth_result(
     ), gt_attitudes
 
 
+def _get_imu_result(
+    data: EuRoCMAVData,
+    first_ts: int,
+    max_ts: int,
+    first_gt_sample_timestamp_ns: int,
+    gt_attitudes: np.ndarray,
+) -> tuple[SlamImuResult, list]:
+    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
+    imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
+    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
+    imu_attitudes = []
+    prev_attitude = np.eye(3)
+    for angular_velocity in imu_angular_velocities:
+        imu_rotation_matrix, _ = cv2.Rodrigues(angular_velocity / data.imu0_rate_hz)
+        prev_attitude = prev_attitude @ imu_rotation_matrix
+        imu_attitudes.append(prev_attitude)
+
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    imu_index_closest_to_first_gt_sample = np.argmin(np.abs(imu_timestamps_ns - first_gt_sample_timestamp_ns))
+    imu_compensation_rotation_matrix = gt_attitudes[0] @ imu_attitudes[imu_index_closest_to_first_gt_sample].T
+    for i in range(len(imu_attitudes)):
+        imu_attitudes[i] = imu_compensation_rotation_matrix @ imu_attitudes[i]
+
+    return SlamImuResult(
+        times=imu_times,
+        attitudes=np.array(imu_attitudes),
+        angular_velocities=imu_angular_velocities,
+    ), imu_samples
+
+
 def _run_pnp_step(
     data: EuRoCMAVData,
     points_3d: np.ndarray,
@@ -329,23 +359,7 @@ def _compute(
 
     gt_result, gt_attitudes = _get_ground_truth_result(data, first_ts, max_ts)
 
-    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
-    imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
-    imu_attitudes = []
-    prev_attitude = np.eye(3)
-    for angular_velocity in imu_angular_velocities:
-        imu_rotation_matrix, _ = cv2.Rodrigues(angular_velocity / data.imu0_rate_hz)
-        prev_attitude = prev_attitude @ imu_rotation_matrix
-        imu_attitudes.append(prev_attitude)
-
-    imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
-    imu_index_closest_to_first_gt_sample= np.argmin(np.abs(imu_timestamps_ns - first_gt_sample.timestamp_ns))
-    imu_compensation_rotation_matrix = gt_attitudes[0] @ imu_attitudes[imu_index_closest_to_first_gt_sample].T
-    for i in range(len(imu_attitudes)):
-        imu_attitudes[i] = imu_compensation_rotation_matrix @ imu_attitudes[i]
-
-    imu_attitudes = np.array(imu_attitudes)
+    imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_attitudes)
 
     set_progress(0.0, "Running PnP...")
     pnp_poses_without_initial, pnp_angular_velocities_from_rvec = _run_pnp(
@@ -399,11 +413,7 @@ def _compute(
     set_progress(0.95, "Finishing...")
     return SlamResult(
         gt=gt_result,
-        imu=SlamImuResult(
-            times=imu_times,
-            attitudes=imu_attitudes,
-            angular_velocities=imu_angular_velocities,
-        ),
+        imu=imu_result,
         pnp=SlamPnpResult(
             times=pnp_times,
             positions=pnp_positions_in_world,
