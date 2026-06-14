@@ -133,7 +133,7 @@ def _run_pnp(
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
-        M = np.linalg.inv(data.cam0_extrinsics)
+        M = data.cam0_extrinsics
         rvec = M[:3, :3] @ rvec
         tvec = M[:3, :3] @ tvec
         pnp_angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
@@ -327,7 +327,7 @@ def _compute(
     # ])
 
     pnp_poses_in_world = np.array([
-        first_gt_pose @ np.linalg.inv(data.cam0_extrinsics) @ T
+        first_gt_pose @ data.cam0_extrinsics @ T
         for T in pnp_poses_without_initial
     ])
 
