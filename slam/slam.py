@@ -133,15 +133,15 @@ def _run_pnp(
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
-        M = data.cam0_extrinsics
-        rvec = M[:3, :3] @ rvec
-        tvec = M[:3, :3] @ tvec
+        body_T_cam0 = data.cam0_extrinsics
+        rvec = body_T_cam0[:3, :3] @ rvec
+        tvec = body_T_cam0[:3, :3] @ tvec
         pnp_angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
-        R, _ = cv2.Rodrigues(rvec)
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = tvec.flatten()
-        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ T)
+        R_body, _ = cv2.Rodrigues(rvec)
+        pose_relative = np.eye(4)
+        pose_relative[:3, :3] = R_body
+        pose_relative[:3, 3] = tvec.flatten()
+        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ pose_relative)
         if num_temporal_matches < keyframe_num_temporal_matches / 2:
             keyframe_indices.append(i)
             keyframe_num_temporal_matches = None
@@ -265,10 +265,13 @@ def _compute(
     first_ts = data.cam_timestamps_ns[0]
     max_ts = stereo_matching_result.frames[-1].timestamp_ns
 
+    body_T_cam0 = data.cam0_extrinsics
+
     first_gt = data.ground_truth_samples[0]
-    first_gt_pose = np.eye(4)
-    first_gt_pose[:3, :3] = quaternion_to_rotation_matrix(first_gt.quaternion)
-    first_gt_pose[:3, 3] = first_gt.position
+    world_T_body_first = np.eye(4)
+    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt.quaternion)
+    world_T_body_first[:3, 3] = first_gt.position
+    first_gt_pose = world_T_body_first
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
     gt_positions = np.array([s.position for s in gt_samples])
@@ -326,8 +329,9 @@ def _compute(
     #     for T in pnp_poses_without_initial
     # ])
 
+    world_T_cam0_first = world_T_body_first @ body_T_cam0
     pnp_poses_in_world = np.array([
-        first_gt_pose @ data.cam0_extrinsics @ T
+        world_T_cam0_first @ T
         for T in pnp_poses_without_initial
     ])
 
