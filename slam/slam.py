@@ -367,12 +367,10 @@ def _compute(
     world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
     world_T_body_first[:3, 3] = first_gt_sample.position
 
-    world_T_cam0_first = world_T_body_first @ body_T_cam0
-    T_comp = world_T_cam0_first @ np.linalg.inv(pnp_poses[closest_cam_index])
-    pnp_poses = np.array([T_comp @ T for T in pnp_poses])
-
     cam0_T_body = np.linalg.inv(body_T_cam0)
-    pnp_world_T_body = pnp_poses @ cam0_T_body
+    pnp_poses = [body_T_cam0 @ T @ cam0_T_body for T in pnp_poses]
+    T_comp = world_T_body_first @ np.linalg.inv(pnp_poses[closest_cam_index])
+    pnp_world_T_body = np.array([T_comp @ T for T in pnp_poses])
 
     pnp_times = np.array([
         (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
