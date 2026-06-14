@@ -4,21 +4,11 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from slam.data import DataFolder, GroundTruthSample
+from slam.data import DataFolder
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
-
-def _get_closest_ground_truth_pose(
-    ground_truth_samples: list[GroundTruthSample],
-    idx: int,
-) -> np.ndarray:
-    sample = ground_truth_samples[idx]
-    pose = np.eye(4)
-    pose[:3, :3] = quaternion_to_rotation_matrix(sample.quaternion)
-    pose[:3, 3] = np.array(sample.position)
-    return pose
 
 
 @dataclass
@@ -85,8 +75,11 @@ class CoordinateMappingChecker:
             return int(np.argmin(np.abs(gt_timestamps - timestamp_ns)))
 
         def gt_world_T_cam0(idx: int) -> np.ndarray:
-            pose = _get_closest_ground_truth_pose(data.ground_truth_samples, idx)
-            return np.linalg.inv(data.cam0_extrinsics) @ pose
+            sample = data.ground_truth_samples[idx]
+            world_T_body = np.eye(4)
+            world_T_body[:3, :3] = quaternion_to_rotation_matrix(sample.quaternion).T
+            world_T_body[:3, 3] = np.array(sample.position)
+            return world_T_body @ data.cam0_extrinsics
 
         n = len(sm_result.frames)
         first_ts = data.cam_timestamps_ns[0]
@@ -151,7 +144,8 @@ class CoordinateMappingChecker:
                 p_world = world_T_cam0_k[:3, :3] @ p_cam0_k + world_T_cam0_k[:3, 3]
                 p_cam0_k1 = cam0_T_world_k1[:3, :3] @ p_world + cam0_T_world_k1[:3, 3]
 
-                if p_cam0_k1[2] <= 0:
+                _MIN_DEPTH, _MAX_DEPTH = 0.1, 50.0
+                if not (_MIN_DEPTH < p_cam0_k[2] < _MAX_DEPTH) or p_cam0_k1[2] <= 0:
                     continue
 
                 projected, _ = cv2.projectPoints(
