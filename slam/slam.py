@@ -73,7 +73,35 @@ class SlamResult:
 
 
 
-def _solve_pnp(
+def _get_ground_truth_result(
+    data: EuRoCMAVData,
+    first_ts: int,
+    max_ts: int,
+) -> tuple[SlamGroundTruthResult, np.ndarray]:
+    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
+    gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
+    gt_positions = np.array([s.position for s in gt_samples])
+    gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
+
+    gt_angular_velocities = []
+    for j in range(len(gt_samples) - 1):
+        gt_rotation = gt_attitudes[j].T @ gt_attitudes[j + 1]
+        gt_rotation_vector, _ = cv2.Rodrigues(gt_rotation)
+        dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
+        gt_angular_velocity = gt_rotation_vector.flatten() / dt
+        gt_angular_velocities.append(gt_angular_velocity)
+    gt_angular_velocities = np.array(gt_angular_velocities)
+
+    return SlamGroundTruthResult(
+        times=gt_times,
+        positions=gt_positions,
+        attitudes=gt_attitudes,
+        angular_velocity_times=np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples[:-1]]),
+        angular_velocities=gt_angular_velocities,
+    ), gt_attitudes
+
+
+def _run_pnp_step(
     data: EuRoCMAVData,
     points_3d: np.ndarray,
     stereo_matches: list,
@@ -134,14 +162,14 @@ def _run_pnp(
             kf_fd = feature_detection_result.frames[kf_idx]
             kf_sm = stereo_matching_result.frames[kf_idx]
             cf_fd = feature_detection_result.frames[i]
-            rvec, tvec, num_temporal_matches, _ = _solve_pnp(
+            rvec, tvec, num_temporal_matches, _ = _run_pnp_step(
                 data,
                 kf_sm.points_3d, kf_sm.matches,
                 kf_fd.cam0_descriptors,
                 cf_fd.cam0_keypoints, cf_fd.cam0_descriptors,
             )
         except Exception as e:
-            print(f"_solve_pnp failed at i={i}: {e}")
+            print(f"_run_pnp_step failed at i={i}: {e}")
             continue
         if keyframe_num_temporal_matches is None:
             keyframe_num_temporal_matches = num_temporal_matches
@@ -299,19 +327,7 @@ def _compute(
     world_T_body_first[:3, 3] = first_gt_sample.position
     first_gt_sample_pose = world_T_body_first
 
-    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
-    gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
-    gt_positions = np.array([s.position for s in gt_samples])
-    gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
-
-    gt_angular_velocities = []
-    for j in range(len(gt_samples) - 1):
-        gt_rotation = gt_attitudes[j].T @ gt_attitudes[j + 1]
-        gt_rotation_vector, _ = cv2.Rodrigues(gt_rotation)
-        dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
-        gt_angular_velocity = gt_rotation_vector.flatten() / dt
-        gt_angular_velocities.append(gt_angular_velocity)
-    gt_angular_velocities = np.array(gt_angular_velocities)
+    gt_result, gt_attitudes = _get_ground_truth_result(data, first_ts, max_ts)
 
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
     imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
@@ -382,13 +398,7 @@ def _compute(
 
     set_progress(0.95, "Finishing...")
     return SlamResult(
-        gt=SlamGroundTruthResult(
-            times=gt_times,
-            positions=gt_positions,
-            attitudes=gt_attitudes,
-            angular_velocity_times=np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples[:-1]]),
-            angular_velocities=gt_angular_velocities,
-        ),
+        gt=gt_result,
         imu=SlamImuResult(
             times=imu_times,
             attitudes=imu_attitudes,
