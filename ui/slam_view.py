@@ -94,8 +94,8 @@ class SlamViewModel:
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
-        self.att_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'gtsam': True}
-        self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': True, 'pnp': True, 'gtsam': True}
+        self.att_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
+        self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
 
     def start(
         self,
