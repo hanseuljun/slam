@@ -40,6 +40,7 @@ class SlamImuResult:
     times: np.ndarray
     attitudes: np.ndarray
     angular_velocities: np.ndarray
+    linear_accelerations: np.ndarray
 
 
 @dataclass
@@ -106,6 +107,7 @@ def _get_imu_result(
 ) -> SlamImuResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
     imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
+    imu_linear_accelerations = np.array([s.linear_acceleration for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     imu_attitudes = []
     prev_attitude = np.eye(3)
@@ -124,6 +126,7 @@ def _get_imu_result(
         times=imu_times,
         attitudes=np.array(imu_attitudes),
         angular_velocities=imu_angular_velocities,
+        linear_accelerations=imu_linear_accelerations,
     )
 
 
