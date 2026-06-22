@@ -59,6 +59,7 @@ class SlamGtsamResult:
     attitudes: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
+    linear_accelerations: np.ndarray
 
 
 @dataclass
@@ -351,7 +352,9 @@ def _run_gtsam(
         isam2.update(new_factors, new_values)
 
     final = isam2.calculateEstimate()
-    return [final.atPose3(X(i)).matrix() for i in range(N)]
+    poses = [final.atPose3(X(i)).matrix() for i in range(N)]
+    velocities = [final.atVector(V(i)) for i in range(N)]
+    return poses, velocities
 
 
 def _get_gtsam_result(
@@ -363,7 +366,7 @@ def _get_gtsam_result(
     first_gt_sample,
 ) -> SlamGtsamResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
-    poses = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples)
+    poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples)
     N = len(poses)
 
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
@@ -383,10 +386,17 @@ def _get_gtsam_result(
     times = np.array([(f.timestamp_ns - first_ts) / 1e9 for f in stereo_matching_result.frames[:N]])
 
     angular_velocities = []
+    linear_accelerations = []
+    velocities_np = np.array(velocities)
     for i in range(N - 1):
         rotation_matrix = world_T_body_poses[i, :3, :3].T @ world_T_body_poses[i + 1, :3, :3]
         rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
         angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
+
+        dt = times[i + 1] - times[i]
+        acc_world = (velocities_np[i + 1] - velocities_np[i]) / dt
+        acc_body = world_T_body_poses[i, :3, :3].T @ acc_world
+        linear_accelerations.append(acc_body)
 
     return SlamGtsamResult(
         times=times,
@@ -394,6 +404,7 @@ def _get_gtsam_result(
         attitudes=world_T_body_poses[:, :3, :3],
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
+        linear_accelerations=np.array(linear_accelerations),
     )
 
 
