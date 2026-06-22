@@ -273,6 +273,12 @@ def _run_gtsam(
     imu_ang_vels      = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
 
+    body_T_cam0 = data.cam0_extrinsics
+    cam0_T_body = np.linalg.inv(body_T_cam0)
+    cam0_R_body = cam0_T_body[:3, :3]
+    imu_lin_accs = (cam0_R_body @ imu_lin_accs.T).T
+    imu_ang_vels = (cam0_R_body @ imu_ang_vels.T).T
+
     X = lambda i: gtsam.symbol('x', i)
     V = lambda i: gtsam.symbol('v', i)
     B = gtsam.symbol('b', 0)
