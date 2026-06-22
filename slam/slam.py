@@ -8,7 +8,7 @@ import cv2
 import gtsam
 import numpy as np
 
-from slam.data import EuRoCMAVData
+from slam.data import EuRoCMAVData, ImuSample
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
@@ -265,7 +265,7 @@ def _run_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    imu_samples: list,
+    imu_samples: list[ImuSample],
 ) -> list[np.ndarray]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
