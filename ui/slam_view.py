@@ -104,7 +104,6 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
 
 def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.imu.times, results.imu.velocities, 'imu'),
         (results.gtsam.times, results.gtsam.velocities, 'gtsam'),
     ]
     return figure_to_image(_plot_velocities([s for s in all_series if enabled[s[2]]]))
@@ -139,7 +138,7 @@ class SlamViewModel:
         self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
-        self.vel_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
+        self.vel_enabled: dict[str, bool] = {'gtsam': True}
         self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
 

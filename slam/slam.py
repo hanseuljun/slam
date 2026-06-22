@@ -39,7 +39,6 @@ class SlamGroundTruthResult:
 class SlamImuResult:
     times: np.ndarray
     attitudes: np.ndarray
-    velocities: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
 
@@ -125,19 +124,9 @@ def _get_imu_result(
     for i in range(len(imu_attitudes)):
         imu_attitudes[i] = imu_compensation_rotation_matrix @ imu_attitudes[i]
 
-    gravity_body = np.array([9.81, 0.0, 0.0])
-    v = np.zeros(3)
-    imu_velocities = [v.copy()]
-    for i in range(len(imu_samples) - 1):
-        dt = (imu_samples[i + 1].timestamp_ns - imu_samples[i].timestamp_ns) / 1e9
-        a_world = imu_attitudes[i] @ (imu_linear_accelerations[i] - gravity_body)
-        v = v + a_world * dt
-        imu_velocities.append(v.copy())
-
     return SlamImuResult(
         times=imu_times,
         attitudes=np.array(imu_attitudes),
-        velocities=np.array(imu_velocities),
         angular_velocities=imu_angular_velocities,
         linear_accelerations=imu_linear_accelerations,
     )
