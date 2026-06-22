@@ -1,0 +1,3 @@
+from gtsam.symbol_shorthand import X as X
+
+def main() -> None: ...

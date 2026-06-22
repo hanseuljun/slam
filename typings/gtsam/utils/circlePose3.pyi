@@ -1,0 +1,3 @@
+from gtsam import Values as Values
+
+def circlePose3(numPoses: int = 8, radius: float = 1.0, symbolChar: str = '\x00') -> Values: ...

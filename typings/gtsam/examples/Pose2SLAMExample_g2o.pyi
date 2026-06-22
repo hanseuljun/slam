@@ -1,0 +1,3 @@
+from gtsam.utils import plot as plot
+
+def main() -> None: ...

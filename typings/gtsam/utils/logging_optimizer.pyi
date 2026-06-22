@@ -1,0 +1,9 @@
+import gtsam
+from _typeshed import Incomplete
+from gtsam import NonlinearOptimizer as NonlinearOptimizer, NonlinearOptimizerParams as NonlinearOptimizerParams
+
+OPTIMIZER_PARAMS_MAP: Incomplete
+
+def optimize_using(OptimizerClass, hook, *args) -> gtsam.Values: ...
+def optimize(optimizer, check_convergence, hook) -> None: ...
+def gtsam_optimize(optimizer, params, hook): ...

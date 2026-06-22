@@ -1,0 +1,6 @@
+from gtsam.examples import SFMdata as SFMdata
+from gtsam.symbol_shorthand import L as L, X as X
+from mpl_toolkits.mplot3d import Axes3D as Axes3D
+
+def visual_ISAM2_plot(result) -> None: ...
+def visual_ISAM2_example() -> None: ...
