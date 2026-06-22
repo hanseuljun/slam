@@ -57,6 +57,7 @@ class SlamGtsamResult:
     times: np.ndarray
     positions: np.ndarray
     attitudes: np.ndarray
+    velocities: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
@@ -287,7 +288,7 @@ def _run_gtsam(
     V = lambda i: gtsam.symbol('v', i)
     B = gtsam.symbol('b', 0)
 
-    imu_params = gtsam.PreintegrationParams.MakeSharedU(9.81)
+    imu_params = gtsam.PreintegrationParams(cam0_R_body @ np.array([-9.81, 0.0, 0.0]))
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
     imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
     imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
@@ -402,6 +403,7 @@ def _get_gtsam_result(
         times=times,
         positions=world_T_body_poses[:, :3, 3],
         attitudes=world_T_body_poses[:, :3, :3],
+        velocities=velocities_np,
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
         linear_accelerations=np.array(linear_accelerations),

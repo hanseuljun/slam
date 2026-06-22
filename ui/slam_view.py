@@ -57,6 +57,19 @@ def _plot_linear_accelerations(series: list[tuple[np.ndarray, np.ndarray, str]])
     return fig
 
 
+def _plot_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
+    fig, (ax_vx, ax_vy, ax_vz) = plt.subplots(3, 1, figsize=(12, 9))
+    fig.suptitle('Velocity in World Frame')
+    for ax, i, label in zip([ax_vx, ax_vy, ax_vz], range(3), ['vx', 'vy', 'vz']):
+        for times, velocities, name in series:
+            ax.plot(times, velocities[:, i], label=name)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{label} [m/s]')
+        ax.legend()
+    plt.tight_layout()
+    return fig
+
+
 def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle('Angular Velocity in Body Frame')
@@ -89,6 +102,13 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
 
+def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+    all_series = [
+        (results.gtsam.times, results.gtsam.velocities, 'gtsam'),
+    ]
+    return figure_to_image(_plot_velocities([s for s in all_series if enabled[s[2]]]))
+
+
 def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
         (results.imu.times, results.imu.linear_accelerations, 'imu'),
@@ -115,8 +135,10 @@ class SlamViewModel:
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
+        self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
+        self.vel_enabled: dict[str, bool] = {'gtsam': True}
         self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
 
@@ -130,6 +152,7 @@ class SlamViewModel:
         self._tex_attitudes = None
         self._tex_linear_accelerations = None
         self._tex_angular_velocities = None
+        self._tex_velocities = None
         threading.Thread(target=self._solver.run, daemon=True).start()
 
     def stop(self) -> None:
@@ -178,6 +201,13 @@ def slam_view(model: SlamViewModel) -> None:
     if model._tex_attitudes is None:
         model._tex_attitudes = image_to_texture(_render_attitudes(result, model.att_enabled))
     tex = model._tex_attitudes
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
+    if _checkboxes(model.vel_enabled, "vel"):
+        model._tex_velocities = None
+    if model._tex_velocities is None:
+        model._tex_velocities = image_to_texture(_render_velocities(result, model.vel_enabled))
+    tex = model._tex_velocities
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.omega_enabled, "omega"):
