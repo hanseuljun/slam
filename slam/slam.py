@@ -103,7 +103,7 @@ def _get_imu_result(
     max_ts: int,
     first_gt_sample_timestamp_ns: int,
     gt_attitudes: np.ndarray,
-) -> tuple[SlamImuResult, list]:
+) -> SlamImuResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
     imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
@@ -124,7 +124,7 @@ def _get_imu_result(
         times=imu_times,
         attitudes=np.array(imu_attitudes),
         angular_velocities=imu_angular_velocities,
-    ), imu_samples
+    )
 
 
 def _run_pnp_step(
@@ -269,61 +269,91 @@ def _run_gtsam(
 ) -> list[np.ndarray]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
-    imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
+    imu_lin_accs      = np.array([s.linear_acceleration for s in imu_samples])
+    imu_ang_vels      = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
-    nearest_imu_indices = np.array([np.argmin(np.abs(imu_timestamps_ns - ts)) for ts in cam_timestamps_ns])
-    imu_angular_velocities_at_cam_times = imu_angular_velocities[nearest_imu_indices]
 
-    PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
-    IMU_NOISE   = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1, 0.1, 0.1, 10.0, 10.0, 10.0]))
-    PNP_NOISE   = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]))
+    X = lambda i: gtsam.symbol('x', i)
+    V = lambda i: gtsam.symbol('v', i)
+    B = gtsam.symbol('b', 0)
+
+    imu_params = gtsam.PreintegrationParams.MakeSharedU(9.81)
+    imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
+    imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
+    imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
+
+    PRIOR_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+    PRIOR_VEL_NOISE  = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
+    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1e-3)
+    PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]))
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
     f0, v0 = gtsam.NonlinearFactorGraph(), gtsam.Values()
-    f0.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(), PRIOR_NOISE))
-    v0.insert(0, gtsam.Pose3())
+    f0.add(gtsam.PriorFactorPose3(X(0), gtsam.Pose3(), PRIOR_POSE_NOISE))
+    f0.add(gtsam.PriorFactorVector(V(0), np.zeros(3), PRIOR_VEL_NOISE))
+    f0.add(gtsam.PriorFactorConstantBias(B, gtsam.imuBias.ConstantBias(), PRIOR_BIAS_NOISE))
+    v0.insert(X(0), gtsam.Pose3())
+    v0.insert(V(0), np.zeros(3))
+    v0.insert(B, gtsam.imuBias.ConstantBias())
     isam2.update(f0, v0)
 
     for i in range(N - 1):
-        pose_i = isam2.calculateEstimate().atPose3(i)
+        est = isam2.calculateEstimate()
+        pose_i = est.atPose3(X(i))
+        vel_i  = est.atVector(V(i))
+        bias_i = est.atConstantBias(B)
+
         fd_i, fd_next = feature_detection_result.frames[i], feature_detection_result.frames[i + 1]
         sm_i = stereo_matching_result.frames[i]
 
         new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
 
-        rv_imu = imu_angular_velocities_at_cam_times[i] / data.cam0_rate_hz
-        imu_delta = gtsam.Pose3(gtsam.Rot3.Expmap(rv_imu), gtsam.Point3(0.0, 0.0, 0.0))
-        new_factors.add(gtsam.BetweenFactorPose3(i, i + 1, imu_delta, IMU_NOISE))
+        pim = gtsam.PreintegratedImuMeasurements(imu_params, gtsam.imuBias.ConstantBias())
+        window = np.where(
+            (imu_timestamps_ns >= cam_timestamps_ns[i]) &
+            (imu_timestamps_ns <  cam_timestamps_ns[i + 1])
+        )[0]
+        for k in window:
+            dt = (float(imu_timestamps_ns[k + 1] - imu_timestamps_ns[k]) * 1e-9
+                  if k + 1 < len(imu_timestamps_ns) else 1.0 / data.imu0_rate_hz)
+            pim.integrateMeasurement(imu_lin_accs[k], imu_ang_vels[k], dt)
 
-        pose_init = pose_i.compose(imu_delta)
+        new_factors.add(gtsam.ImuFactor(X(i), V(i), X(i + 1), V(i + 1), B, pim))
+
+        nav_j     = pim.predict(gtsam.NavState(pose_i, vel_i), bias_i)
+        pose_init = nav_j.pose()
+        vel_init  = nav_j.velocity()
+
         try:
-            rv_pnp, tv_pnp, _, _ = _run_pnp_step(
+            pnp_rotation_vector, pnp_translation_vector, _, _ = _run_pnp_step(
                 data, sm_i.points_3d, sm_i.matches,
                 fd_i.cam0_descriptors, fd_next.cam0_keypoints, fd_next.cam0_descriptors,
             )
-            R_pnp, _ = cv2.Rodrigues(rv_pnp)
-            pnp_delta = gtsam.Pose3(gtsam.Rot3(R_pnp), gtsam.Point3(*tv_pnp.flatten()))
-            new_factors.add(gtsam.BetweenFactorPose3(i, i + 1, pnp_delta, PNP_NOISE))
+            pnp_rotation_matrix, _ = cv2.Rodrigues(pnp_rotation_vector)
+            pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_rotation_matrix), gtsam.Point3(*pnp_translation_vector.flatten()))
+            new_factors.add(gtsam.BetweenFactorPose3(X(i), X(i + 1), pnp_delta, PNP_NOISE))
             pose_init = pose_i.compose(pnp_delta)
         except Exception:
             pass
 
-        new_values.insert(i + 1, pose_init)
+        new_values.insert(X(i + 1), pose_init)
+        new_values.insert(V(i + 1), vel_init)
         isam2.update(new_factors, new_values)
 
     final = isam2.calculateEstimate()
-    return [final.atPose3(i).matrix() for i in range(N)]
+    return [final.atPose3(X(i)).matrix() for i in range(N)]
 
 
 def _get_gtsam_result(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    imu_samples: list,
     first_ts: int,
+    max_ts: int,
     first_gt_sample,
 ) -> SlamGtsamResult:
+    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
     poses = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples)
     N = len(poses)
 
@@ -345,9 +375,9 @@ def _get_gtsam_result(
 
     angular_velocities = []
     for i in range(N - 1):
-        R_rel = world_T_body_poses[i, :3, :3].T @ world_T_body_poses[i + 1, :3, :3]
-        rvec, _ = cv2.Rodrigues(R_rel)
-        angular_velocities.append(rvec.flatten() * data.cam0_rate_hz)
+        rotation_matrix = world_T_body_poses[i, :3, :3].T @ world_T_body_poses[i + 1, :3, :3]
+        rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
+        angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
 
     return SlamGtsamResult(
         times=times,
@@ -370,7 +400,7 @@ def _compute(
 
     gt_result = _get_ground_truth_result(data, first_ts, max_ts)
 
-    imu_result, imu_samples = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
+    imu_result = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
     pnp_result = _get_pnp_result(
@@ -380,7 +410,7 @@ def _compute(
 
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, imu_samples, first_ts, first_gt_sample,
+        data, feature_detection_result, stereo_matching_result, first_ts, max_ts, first_gt_sample,
     )
 
     set_progress(0.95, "Finishing...")
