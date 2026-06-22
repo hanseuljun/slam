@@ -74,41 +74,41 @@ class SlamResult:
 
 def _get_ground_truth_result(
     data: EuRoCMAVData,
-    first_ts: int,
-    max_ts: int,
+    first_timestamp_ns: int,
+    max_timestamp_ns: int,
 ) -> SlamGroundTruthResult:
-    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_ts]
-    gt_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples])
-    gt_positions = np.array([s.position for s in gt_samples])
-    gt_attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in gt_samples])
+    samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
+    times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
+    positions = np.array([s.position for s in samples])
+    attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in samples])
 
-    gt_angular_velocities = []
-    for j in range(len(gt_samples) - 1):
-        gt_rotation = gt_attitudes[j].T @ gt_attitudes[j + 1]
-        gt_rotation_vector, _ = cv2.Rodrigues(gt_rotation)
-        dt = (gt_samples[j + 1].timestamp_ns - gt_samples[j].timestamp_ns) / 1e9
-        gt_angular_velocity = gt_rotation_vector.flatten() / dt
-        gt_angular_velocities.append(gt_angular_velocity)
-    gt_angular_velocities = np.array(gt_angular_velocities)
+    angular_velocities = []
+    for j in range(len(samples) - 1):
+        rotation = attitudes[j].T @ attitudes[j + 1]
+        rotation_vector, _ = cv2.Rodrigues(rotation)
+        dt = (samples[j + 1].timestamp_ns - samples[j].timestamp_ns) / 1e9
+        angular_velocity = rotation_vector.flatten() / dt
+        angular_velocities.append(angular_velocity)
+    angular_velocities = np.array(angular_velocities)
 
     return SlamGroundTruthResult(
-        times=gt_times,
-        positions=gt_positions,
-        attitudes=gt_attitudes,
-        angular_velocity_times=np.array([(s.timestamp_ns - first_ts) / 1e9 for s in gt_samples[:-1]]),
-        angular_velocities=gt_angular_velocities,
+        times=times,
+        positions=positions,
+        attitudes=attitudes,
+        angular_velocity_times=np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples[:-1]]),
+        angular_velocities=angular_velocities,
     )
 
 
 def _get_imu_result(
     data: EuRoCMAVData,
-    first_ts: int,
-    max_ts: int,
+    first_timestamp_ns: int,
+    max_timestamp_ns: int,
     first_gt_sample_timestamp_ns: int,
     gt_attitudes: np.ndarray,
 ) -> SlamImuResult:
-    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
-    imu_times = np.array([(s.timestamp_ns - first_ts) / 1e9 for s in imu_samples])
+    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
+    imu_times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in imu_samples])
     imu_linear_accelerations = np.array([s.linear_acceleration for s in imu_samples])
     imu_angular_velocities = np.array([s.angular_velocity for s in imu_samples])
     imu_attitudes = []
@@ -224,7 +224,7 @@ def _get_pnp_result(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    first_ts: int,
+    first_timestamp_ns: int,
     first_gt_sample,
     on_progress: Callable[[float], None],
 ) -> SlamPnpResult:
@@ -247,7 +247,7 @@ def _get_pnp_result(
     pnp_world_T_body = np.array([T_comp @ T for T in pnp_body_poses])
 
     pnp_times = np.array([
-        (stereo_matching_result.frames[i].timestamp_ns - first_ts) / 1e9
+        (stereo_matching_result.frames[i].timestamp_ns - first_timestamp_ns) / 1e9
         for i in range(len(pnp_world_T_body))
     ])
 
@@ -362,11 +362,11 @@ def _get_gtsam_result(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    first_ts: int,
-    max_ts: int,
+    first_timestamp_ns: int,
+    max_timestamp_ns: int,
     first_gt_sample,
 ) -> SlamGtsamResult:
-    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_ts]
+    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
     poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples)
     N = len(poses)
 
@@ -384,7 +384,7 @@ def _get_gtsam_result(
     T_comp = world_T_body_first @ np.linalg.inv(gtsam_body_poses[closest_cam_index])
     world_T_body_poses = np.array([T_comp @ T for T in gtsam_body_poses])
 
-    times = np.array([(f.timestamp_ns - first_ts) / 1e9 for f in stereo_matching_result.frames[:N]])
+    times = np.array([(f.timestamp_ns - first_timestamp_ns) / 1e9 for f in stereo_matching_result.frames[:N]])
 
     angular_velocities = []
     linear_accelerations = []
@@ -416,23 +416,23 @@ def _compute(
     stereo_matching_result: StereoMatchingResult,
     set_progress: Callable[[float, str], None],
 ) -> SlamResult:
-    first_ts = data.cam_timestamps_ns[0]
-    max_ts = stereo_matching_result.frames[-1].timestamp_ns
+    first_timestamp_ns = data.cam_timestamps_ns[0]
+    max_timestamp_ns = stereo_matching_result.frames[-1].timestamp_ns
     first_gt_sample = data.ground_truth_samples[0]
 
-    gt_result = _get_ground_truth_result(data, first_ts, max_ts)
+    gt_result = _get_ground_truth_result(data, first_timestamp_ns, max_timestamp_ns)
 
-    imu_result = _get_imu_result(data, first_ts, max_ts, first_gt_sample.timestamp_ns, gt_result.attitudes)
+    imu_result = _get_imu_result(data, first_timestamp_ns, max_timestamp_ns, first_gt_sample.timestamp_ns, gt_result.attitudes)
 
     set_progress(0.0, "Running PnP...")
     pnp_result = _get_pnp_result(
-        data, feature_detection_result, stereo_matching_result, first_ts, first_gt_sample,
+        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, first_gt_sample,
         on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
     )
 
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, first_ts, max_ts, first_gt_sample,
+        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, max_timestamp_ns, first_gt_sample,
     )
 
     set_progress(0.95, "Finishing...")
