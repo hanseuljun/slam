@@ -16,7 +16,7 @@ from ui.utils import figure_to_image, image_to_texture
 
 def _plot_positions(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
     fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
-    fig.suptitle('Position')
+    fig.suptitle('Position in Body Frame')
     for ax, i, label in zip([ax_x, ax_y, ax_z], range(3), ['X', 'Y', 'Z']):
         for times, positions, name in series:
             ax.plot(times, positions[:, i], label=name)
@@ -29,7 +29,7 @@ def _plot_positions(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Fig
 
 def _plot_attitudes(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
-    fig.suptitle('Rotation Axes')
+    fig.suptitle('Rotation Axes in Body Frame')
     axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
     component_names = ['X', 'Y', 'Z']
     for row in range(3):
