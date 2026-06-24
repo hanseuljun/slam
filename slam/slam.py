@@ -288,9 +288,12 @@ def _run_gtsam(
     B = gtsam.symbol('b', 0)
 
     imu_params = gtsam.PreintegrationParams(cam0_R_body @ np.array([-9.81, 0.0, 0.0]))
-    imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
-    imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
-    imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
+    # imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
+    imu_params.setGyroscopeCovariance(np.eye(3) * 1)
+    # imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
+    imu_params.setAccelerometerCovariance(np.eye(3) * 1)
+    # imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
+    imu_params.setIntegrationCovariance(np.eye(3) * 1)
 
     PRIOR_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
     PRIOR_VEL_NOISE  = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
