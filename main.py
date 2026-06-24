@@ -11,28 +11,35 @@ from ui.slam_view import SlamViewModel, slam_view
 from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
 from ui.data_range_view import DataRangeViewModel, data_range_view
 
+_DATA_PATHS = [
+    "data/machine_hall/MH_01_easy/mav0",
+    "data/machine_hall/MH_02_easy/mav0",
+    "data/machine_hall/MH_03_medium/mav0",
+    "data/machine_hall/MH_04_difficult/mav0",
+    "data/machine_hall/MH_05_difficult/mav0",
+]
+
 
 class RootViewModel:
-    def __init__(self, data: EuRoCMAVData) -> None:
-        self.data = data
-        self.data_view_model = DataViewModel(data)
-        self.slam_view_model = SlamViewModel(data)
-        self.time_range_model = DataRangeViewModel()
+    def __init__(self) -> None:
+        self.time_range_view_model = DataRangeViewModel(data_paths=_DATA_PATHS)
+        self.data = EuRoCMAVData.load(Path(self.time_range_view_model.data_path_str))
+        self.data_view_model = DataViewModel(self.data)
+        self.slam_view_model = SlamViewModel(self.data)
         self.feature_detection_result: Optional[FeatureDetectionResult] = None
         self.feature_detection_view_model = FeatureDetectionViewModel(
-            data,
+            self.data,
             on_result=self._on_feature_detection_result,
-            start_s=self.time_range_model.start_s,
-            duration_s=self.time_range_model.duration_s,
+            start_s=self.time_range_view_model.start_s,
+            duration_s=self.time_range_view_model.duration_s,
         )
         self.feature_detection_view_model.start()
         self.stereo_matching_result: Optional[StereoMatchingResult] = None
         self.stereo_matching_view_model = StereoMatchingViewModel(
-            data,
+            self.data,
             on_result=self._on_stereo_matching_result,
         )
-        self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
-
+        self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
@@ -45,6 +52,9 @@ class RootViewModel:
 
     def restart(self) -> None:
         self.slam_view_model.stop()
+        self.data = EuRoCMAVData.load(Path(self.time_range_view_model.data_path_str))
+        self.data_view_model = DataViewModel(self.time_range_view_model.data_path_str, self.data)
+        self.slam_view_model = SlamViewModel(self.data)
         self.stereo_matching_result = None
         self.feature_detection_result = None
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
@@ -55,8 +65,8 @@ class RootViewModel:
         self.feature_detection_view_model = FeatureDetectionViewModel(
             self.data,
             on_result=self._on_feature_detection_result,
-            start_s=self.time_range_model.start_s,
-            duration_s=self.time_range_model.duration_s,
+            start_s=self.time_range_view_model.start_s,
+            duration_s=self.time_range_view_model.duration_s,
         )
         self.feature_detection_view_model.start()
 
@@ -73,7 +83,7 @@ def root_view(model: RootViewModel) -> None:
         | imgui.WindowFlags_.no_scrollbar,
     )
 
-    data_range_view(model.time_range_model, model.restart)
+    data_range_view(model.time_range_view_model, model.restart)
 
     if imgui.begin_tab_bar("##tabs"):
         if imgui.begin_tab_item("Data")[0]:
@@ -102,8 +112,7 @@ def root_view(model: RootViewModel) -> None:
 
 
 def main():
-    data = EuRoCMAVData.load(Path("data/machine_hall/MH_01_easy/mav0"))
-    model = RootViewModel(data)
+    model = RootViewModel()
 
     runner_params = hello_imgui.RunnerParams()
     runner_params.app_window_params.window_title = "slam"
