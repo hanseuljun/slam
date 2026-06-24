@@ -136,6 +136,7 @@ class SlamViewModel:
         self._tex_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
+        self._stale_textures: list[hello_imgui.TextureGpu] = []
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'imu': False, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
@@ -148,6 +149,12 @@ class SlamViewModel:
         stereo_matching_result: StereoMatchingResult,
     ) -> None:
         self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result)
+        # Stash old textures so GC doesn't run glDeleteTextures on this (non-render) thread.
+        # slam_view() clears _stale_textures on the main render thread.
+        for tex in [self._tex_positions, self._tex_attitudes, self._tex_linear_accelerations,
+                    self._tex_angular_velocities, self._tex_velocities]:
+            if tex is not None:
+                self._stale_textures.append(tex)
         self._tex_positions = None
         self._tex_attitudes = None
         self._tex_linear_accelerations = None
@@ -171,6 +178,7 @@ def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
 
 
 def slam_view(model: SlamViewModel) -> None:
+    model._stale_textures.clear()
     solver = model._solver
     if solver is None:
         imgui.text("Waiting for stereo matching...")
