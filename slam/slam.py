@@ -270,6 +270,7 @@ def _run_gtsam(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list[ImuSample],
+    on_progress: Callable[[float], None],
 ) -> list[np.ndarray]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -312,6 +313,7 @@ def _run_gtsam(
     isam2.update(f0, v0)
 
     for i in range(N - 1):
+        on_progress(i / (N - 1))
         est = isam2.calculateEstimate()
         pose_i = est.atPose3(X(i))
         vel_i  = est.atVector(V(i))
@@ -366,9 +368,10 @@ def _get_gtsam_result(
     stereo_matching_result: StereoMatchingResult,
     first_timestamp_ns: int,
     max_timestamp_ns: int,
+    on_progress: Callable[[float], None],
 ) -> SlamGtsamResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples)
+    poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, on_progress)
     N = len(poses)
 
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
@@ -434,6 +437,7 @@ def _compute(
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_result = _get_gtsam_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns, max_timestamp_ns,
+        on_progress=lambda p: set_progress(2.0 / 4.0 + p * (0.95 - 2.0 / 4.0), "Running GTSAM optimization..."),
     )
 
     set_progress(0.95, "Finishing...")
