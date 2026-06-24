@@ -5,12 +5,12 @@ from imgui_bundle import imgui
 
 
 @dataclass
-class TimeRangeModel:
+class DataRangeViewModel:
     start_s: float = 0.0
     duration_s: float = 10.0
 
 
-def time_range_view(model: TimeRangeModel, on_run: Callable[[], None]) -> None:
+def data_range_view(model: DataRangeViewModel, on_run: Callable[[], None]) -> None:
     imgui.text("Start time (s)")
     imgui.same_line()
     imgui.set_next_item_width(200)

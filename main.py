@@ -9,7 +9,7 @@ from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
 from ui.slam_view import SlamViewModel, slam_view
 from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
-from ui.time_range_view import TimeRangeModel, time_range_view
+from ui.data_range_view import DataRangeViewModel, data_range_view
 
 
 class RootViewModel:
@@ -17,7 +17,7 @@ class RootViewModel:
         self.data = data
         self.data_view_model = DataViewModel(data)
         self.slam_view_model = SlamViewModel(data)
-        self.time_range_model = TimeRangeModel()
+        self.time_range_model = DataRangeViewModel()
         self.feature_detection_result: Optional[FeatureDetectionResult] = None
         self.feature_detection_view_model = FeatureDetectionViewModel(
             data,
@@ -73,7 +73,7 @@ def root_view(model: RootViewModel) -> None:
         | imgui.WindowFlags_.no_scrollbar,
     )
 
-    time_range_view(model.time_range_model, model.restart)
+    data_range_view(model.time_range_model, model.restart)
 
     if imgui.begin_tab_bar("##tabs"):
         if imgui.begin_tab_item("Data")[0]:
