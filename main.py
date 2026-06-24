@@ -53,7 +53,7 @@ class RootViewModel:
     def restart(self) -> None:
         self.slam_view_model.stop()
         self.data = EuRoCMAVData.load(Path(self.time_range_view_model.data_path_str))
-        self.data_view_model = DataViewModel(self.time_range_view_model.data_path_str, self.data)
+        self.data_view_model = DataViewModel(self.data)
         self.slam_view_model = SlamViewModel(self.data)
         self.stereo_matching_result = None
         self.feature_detection_result = None
