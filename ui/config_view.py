@@ -11,6 +11,7 @@ class ConfigViewModel:
     selected_index: int = 0
     start_s: float = 0.0
     duration_s: float = 10.0
+    run_coordinate_mapping_check: bool = False
 
     @property
     def data_path_str(self) -> str:
@@ -33,6 +34,10 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     imgui.same_line()
     imgui.set_next_item_width(150)
     _, model.duration_s = imgui.input_float("##duration_s", model.duration_s, step=1.0)
+    imgui.same_line()
+    _, model.run_coordinate_mapping_check = imgui.checkbox(
+        "Coordinate Mapping Check", model.run_coordinate_mapping_check
+    )
     imgui.same_line()
     if imgui.button("Run Again"):
         on_run()

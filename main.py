@@ -47,7 +47,8 @@ class RootViewModel:
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
-        self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
+        if self.time_range_view_model.run_coordinate_mapping_check:
+            self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
         self.slam_view_model.start(self.feature_detection_result, result)
 
     def restart(self) -> None:
@@ -98,9 +99,10 @@ def root_view(model: RootViewModel) -> None:
             stereo_matching_view(model.stereo_matching_view_model)
             imgui.end_tab_item()
 
-        if imgui.begin_tab_item("Coordinate Mapping")[0]:
-            coordinate_mapping_view(model.coordinate_mapping_view_model)
-            imgui.end_tab_item()
+        if model.time_range_view_model.run_coordinate_mapping_check:
+            if imgui.begin_tab_item("Coordinate Mapping")[0]:
+                coordinate_mapping_view(model.coordinate_mapping_view_model)
+                imgui.end_tab_item()
 
         if imgui.begin_tab_item("SLAM")[0]:
             slam_view(model.slam_view_model)
