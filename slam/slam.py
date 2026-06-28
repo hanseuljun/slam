@@ -67,6 +67,7 @@ class SlamGtsamResult:
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
+    gravities: np.ndarray
     elapsed_time: float = 0.0
 
 
@@ -421,6 +422,8 @@ def _get_gtsam_result(
         linear_accelerations.append(acc_body)
 
     rotation_matrices = world_T_body_poses[:, :3, :3]
+    g_world = rotation_matrices[closest_cam_index] @ np.array([-9.81, 0.0, 0.0])
+    gravities = np.array([R.T @ g_world for R in rotation_matrices])
     return SlamGtsamResult(
         times=times,
         positions=world_T_body_poses[:, :3, 3],
@@ -430,6 +433,7 @@ def _get_gtsam_result(
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
         linear_accelerations=np.array(linear_accelerations),
+        gravities=gravities,
     )
 
 
