@@ -28,6 +28,19 @@ def _plot_positions(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Fig
 
 
 def _plot_attitudes(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
+    fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
+    fig.suptitle('Attitude (Rotation Vector) in Body Frame')
+    for ax, i, label in zip([ax_x, ax_y, ax_z], range(3), ['X', 'Y', 'Z']):
+        for times, attitudes, name in series:
+            ax.plot(times, attitudes[:, i], label=name)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel(f'{label} [rad]')
+        ax.legend()
+    plt.tight_layout()
+    return fig
+
+
+def _plot_rotation_matrices(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
     fig, axes = plt.subplots(3, 3, figsize=(12, 9))
     fig.suptitle('Rotation Axes in Body Frame')
     axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
@@ -35,8 +48,8 @@ def _plot_attitudes(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Fig
     for row in range(3):
         for col in range(3):
             ax = axes[row, col]
-            for times, attitudes, name in series:
-                ax.plot(times, attitudes[:, col, row], label=name)
+            for times, rotation_matrices, name in series:
+                ax.plot(times, rotation_matrices[:, col, row], label=name)
             ax.set_xlabel('Time [s]')
             ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
             ax.legend()
@@ -102,6 +115,16 @@ def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarr
     return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
 
 
+def _render_rotation_matrices(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+    all_series = [
+        (results.gt.times, results.gt.rotation_matrices, 'gt'),
+        (results.imu.times, results.imu.rotation_matrices, 'imu'),
+        (results.pnp.times, results.pnp.rotation_matrices, 'pnp'),
+        (results.gtsam.times, results.gtsam.rotation_matrices, 'gtsam'),
+    ]
+    return figure_to_image(_plot_rotation_matrices([s for s in all_series if enabled[s[2]]]))
+
+
 def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
         (results.gtsam.times, results.gtsam.velocities, 'gtsam'),
@@ -133,6 +156,7 @@ class SlamViewModel:
         self._solver: Optional[SlamSolver] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
+        self._tex_rotation_matrices: Optional[hello_imgui.TextureGpu] = None
         self._tex_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
@@ -151,12 +175,13 @@ class SlamViewModel:
         self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result)
         # Stash old textures so GC doesn't run glDeleteTextures on this (non-render) thread.
         # slam_view() clears _stale_textures on the main render thread.
-        for tex in [self._tex_positions, self._tex_attitudes, self._tex_linear_accelerations,
-                    self._tex_angular_velocities, self._tex_velocities]:
+        for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,
+                    self._tex_linear_accelerations, self._tex_angular_velocities, self._tex_velocities]:
             if tex is not None:
                 self._stale_textures.append(tex)
         self._tex_positions = None
         self._tex_attitudes = None
+        self._tex_rotation_matrices = None
         self._tex_linear_accelerations = None
         self._tex_angular_velocities = None
         self._tex_velocities = None
@@ -206,9 +231,15 @@ def slam_view(model: SlamViewModel) -> None:
 
     if _checkboxes(model.att_enabled, "att"):
         model._tex_attitudes = None
+        model._tex_rotation_matrices = None
     if model._tex_attitudes is None:
         model._tex_attitudes = image_to_texture(_render_attitudes(result, model.att_enabled))
     tex = model._tex_attitudes
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
+    if model._tex_rotation_matrices is None:
+        model._tex_rotation_matrices = image_to_texture(_render_rotation_matrices(result, model.att_enabled))
+    tex = model._tex_rotation_matrices
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.vel_enabled, "vel"):

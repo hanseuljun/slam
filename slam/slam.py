@@ -31,6 +31,7 @@ class SlamGroundTruthResult:
     times: np.ndarray
     positions: np.ndarray
     attitudes: np.ndarray
+    rotation_matrices: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
 
@@ -39,6 +40,7 @@ class SlamGroundTruthResult:
 class SlamImuResult:
     times: np.ndarray
     attitudes: np.ndarray
+    rotation_matrices: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
 
@@ -48,6 +50,7 @@ class SlamPnpResult:
     times: np.ndarray
     positions: np.ndarray
     attitudes: np.ndarray
+    rotation_matrices: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
 
@@ -57,6 +60,7 @@ class SlamGtsamResult:
     times: np.ndarray
     positions: np.ndarray
     attitudes: np.ndarray
+    rotation_matrices: np.ndarray
     velocities: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
@@ -72,6 +76,10 @@ class SlamResult:
 
 
 
+def _mats_to_rvecs(rotation_matrices: np.ndarray) -> np.ndarray:
+    return np.array([cv2.Rodrigues(R)[0].flatten() for R in rotation_matrices])
+
+
 def _get_ground_truth_result(
     data: EuRoCMAVData,
     first_timestamp_ns: int,
@@ -80,11 +88,11 @@ def _get_ground_truth_result(
     samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
     times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
     positions = np.array([s.position for s in samples])
-    attitudes = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in samples])
+    rotation_matrices = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in samples])
 
     angular_velocities = []
     for j in range(len(samples) - 1):
-        rotation = attitudes[j].T @ attitudes[j + 1]
+        rotation = rotation_matrices[j].T @ rotation_matrices[j + 1]
         rotation_vector, _ = cv2.Rodrigues(rotation)
         dt = (samples[j + 1].timestamp_ns - samples[j].timestamp_ns) / 1e9
         angular_velocity = rotation_vector.flatten() / dt
@@ -94,7 +102,8 @@ def _get_ground_truth_result(
     return SlamGroundTruthResult(
         times=times,
         positions=positions,
-        attitudes=attitudes,
+        attitudes=_mats_to_rvecs(rotation_matrices),
+        rotation_matrices=rotation_matrices,
         angular_velocity_times=np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples[:-1]]),
         angular_velocities=angular_velocities,
     )
@@ -104,28 +113,30 @@ def _get_imu_result(
     data: EuRoCMAVData,
     first_timestamp_ns: int,
     max_timestamp_ns: int,
-    gt_attitudes: np.ndarray,
+    gt_rotation_matrices: np.ndarray,
 ) -> SlamImuResult:
     samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
     times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
     linear_accelerations = np.array([s.linear_acceleration for s in samples])
     angular_velocities = np.array([s.angular_velocity for s in samples])
-    attitudes = []
-    prev_attitude = np.eye(3)
+    rotation_matrices_list = []
+    prev_rotation_matrix = np.eye(3)
     for angular_velocity in angular_velocities:
         rotation_matrix, _ = cv2.Rodrigues(angular_velocity / data.imu0_rate_hz)
-        prev_attitude = prev_attitude @ rotation_matrix
-        attitudes.append(prev_attitude)
+        prev_rotation_matrix = prev_rotation_matrix @ rotation_matrix
+        rotation_matrices_list.append(prev_rotation_matrix)
 
     timestamps_ns = np.array([s.timestamp_ns for s in samples])
     index_closest_to_first_gt_sample = np.argmin(np.abs(timestamps_ns - data.ground_truth_samples[0].timestamp_ns))
-    compensation_rotation_matrix = gt_attitudes[0] @ attitudes[index_closest_to_first_gt_sample].T
-    for i in range(len(attitudes)):
-        attitudes[i] = compensation_rotation_matrix @ attitudes[i]
+    compensation_rotation_matrix = gt_rotation_matrices[0] @ rotation_matrices_list[index_closest_to_first_gt_sample].T
+    for i in range(len(rotation_matrices_list)):
+        rotation_matrices_list[i] = compensation_rotation_matrix @ rotation_matrices_list[i]
 
+    rotation_matrices = np.array(rotation_matrices_list)
     return SlamImuResult(
         times=times,
-        attitudes=np.array(attitudes),
+        attitudes=_mats_to_rvecs(rotation_matrices),
+        rotation_matrices=rotation_matrices,
         angular_velocities=angular_velocities,
         linear_accelerations=linear_accelerations,
     )
@@ -256,10 +267,12 @@ def _get_pnp_result(
         rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
         angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
 
+    rotation_matrices = pnp_world_T_body[:, :3, :3]
     return SlamPnpResult(
         times=pnp_times,
         positions=pnp_world_T_body[:, :3, 3],
-        attitudes=pnp_world_T_body[:, :3, :3],
+        attitudes=_mats_to_rvecs(rotation_matrices),
+        rotation_matrices=rotation_matrices,
         angular_velocity_times=pnp_times[:-1],
         angular_velocities=np.array(angular_velocities),
     )
@@ -404,10 +417,12 @@ def _get_gtsam_result(
         acc_body = world_T_body_poses[i, :3, :3].T @ acc_world
         linear_accelerations.append(acc_body)
 
+    rotation_matrices = world_T_body_poses[:, :3, :3]
     return SlamGtsamResult(
         times=times,
         positions=world_T_body_poses[:, :3, 3],
-        attitudes=world_T_body_poses[:, :3, :3],
+        attitudes=_mats_to_rvecs(rotation_matrices),
+        rotation_matrices=rotation_matrices,
         velocities=velocities_np,
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
@@ -426,7 +441,7 @@ def _compute(
 
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, max_timestamp_ns)
 
-    imu_result = _get_imu_result(data, first_timestamp_ns, max_timestamp_ns, gt_result.attitudes)
+    imu_result = _get_imu_result(data, first_timestamp_ns, max_timestamp_ns, gt_result.rotation_matrices)
 
     set_progress(0.0, "Running PnP...")
     pnp_result = _get_pnp_result(
