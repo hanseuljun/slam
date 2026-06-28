@@ -220,6 +220,8 @@ def slam_view(model: SlamViewModel) -> None:
 
     result = solver.result
 
+    imgui.text(f"PnP: {result.pnp.elapsed_time:.1f}s   GTSAM: {result.gtsam.elapsed_time:.1f}s")
+
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
     if _checkboxes(model.pos_enabled, "pos"):

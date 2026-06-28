@@ -1,6 +1,7 @@
 import copyreg
 from dataclasses import dataclass
 import multiprocessing as mp
+import time
 import traceback
 from typing import Any, Callable, Optional
 
@@ -53,6 +54,7 @@ class SlamPnpResult:
     rotation_matrices: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
+    elapsed_time: float = 0.0
 
 
 @dataclass
@@ -65,6 +67,7 @@ class SlamGtsamResult:
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
+    elapsed_time: float = 0.0
 
 
 @dataclass
@@ -444,16 +447,20 @@ def _compute(
     imu_result = _get_imu_result(data, first_timestamp_ns, max_timestamp_ns, gt_result.rotation_matrices)
 
     set_progress(0.0, "Running PnP...")
+    pnp_t0 = time.monotonic()
     pnp_result = _get_pnp_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns,
-        on_progress=lambda p: set_progress(p / 4.0, "Running PnP..."),
+        on_progress=lambda p: set_progress(p / 2.0, "Running PnP..."),
     )
+    pnp_result.elapsed_time = time.monotonic() - pnp_t0
 
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
+    gtsam_t0 = time.monotonic()
     gtsam_result = _get_gtsam_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns, max_timestamp_ns,
         on_progress=lambda p: set_progress(2.0 / 4.0 + p * (0.95 - 2.0 / 4.0), "Running GTSAM optimization..."),
     )
+    gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
     set_progress(0.95, "Finishing...")
     return SlamResult(
