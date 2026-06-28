@@ -6,7 +6,7 @@ from imgui_bundle import imgui
 
 
 @dataclass
-class DataRangeViewModel:
+class ConfigViewModel:
     data_paths: list[str] = field(default_factory=list)
     selected_index: int = 0
     start_s: float = 0.0
@@ -17,7 +17,7 @@ class DataRangeViewModel:
         return self.data_paths[self.selected_index]
 
 
-def data_range_view(model: DataRangeViewModel, on_run: Callable[[], None]) -> None:
+def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     labels = [Path(p).parent.name for p in model.data_paths]
     imgui.set_next_item_width(180)
     changed, model.selected_index = imgui.combo("##data_path", model.selected_index, labels)

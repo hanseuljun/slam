@@ -9,7 +9,7 @@ from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
 from ui.slam_view import SlamViewModel, slam_view
 from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
-from ui.data_range_view import DataRangeViewModel, data_range_view
+from ui.config_view import ConfigViewModel, config_view
 
 _DATA_PATHS = [
     "data/machine_hall/MH_01_easy/mav0",
@@ -22,7 +22,7 @@ _DATA_PATHS = [
 
 class RootViewModel:
     def __init__(self) -> None:
-        self.time_range_view_model = DataRangeViewModel(data_paths=_DATA_PATHS)
+        self.time_range_view_model = ConfigViewModel(data_paths=_DATA_PATHS)
         self.data = EuRoCMAVData.load(Path(self.time_range_view_model.data_path_str))
         self.data_view_model = DataViewModel(self.data)
         self.slam_view_model = SlamViewModel(self.data)
@@ -83,7 +83,7 @@ def root_view(model: RootViewModel) -> None:
         | imgui.WindowFlags_.no_scrollbar,
     )
 
-    data_range_view(model.time_range_view_model, model.restart)
+    config_view(model.time_range_view_model, model.restart)
 
     if imgui.begin_tab_bar("##tabs"):
         if imgui.begin_tab_item("Data")[0]:
