@@ -133,7 +133,6 @@ def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndar
 def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
         (results.gtsam.angular_velocity_times, results.gtsam.linear_accelerations, 'gtsam'),
-        (results.gtsam.times, results.gtsam.gravities, 'gravity'),
     ]
     return figure_to_image(_plot_linear_accelerations([s for s in all_series if enabled[s[2]]]))
 
@@ -185,7 +184,7 @@ class SlamViewModel:
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
-        self.lin_acc_enabled: dict[str, bool] = {'gtsam': True, 'gravity': True}
+        self.lin_acc_enabled: dict[str, bool] = {'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
 
     def start(
