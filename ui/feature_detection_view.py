@@ -99,3 +99,4 @@ def feature_detection_view(model: FeatureDetectionViewModel) -> None:
     imgui.text(f"cam1 keypoints: {len(frame.cam1_keypoints)}")
     imgui.text(f"Timestamp: {frame.timestamp_ns} ns")
     imgui.text(f"Time since first frame: {(frame.timestamp_ns - first_ts_ns) / 1e9:.3f} s")
+    imgui.text(f"Elapsed: {model._result.elapsed_s:.3f} s")

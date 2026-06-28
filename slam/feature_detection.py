@@ -1,4 +1,5 @@
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ class FeatureDetectionFrame:
 @dataclass
 class FeatureDetectionResult:
     frames: list[FeatureDetectionFrame]
+    elapsed_s: float
 
 
 class FeatureDetectionSolver:
@@ -50,6 +52,7 @@ class FeatureDetectionSolver:
         timestamps = [t for t in self._data.cam_timestamps_ns if min_ts <= t <= max_ts]
         n = len(timestamps)
         frames: list[FeatureDetectionFrame | None] = [None] * n
+        t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             future_to_index = {
                 executor.submit(self._process_frame, ts): i
@@ -61,4 +64,5 @@ class FeatureDetectionSolver:
                 frames[i] = future.result()
                 completed += 1
                 self.progress = completed / n
-        return FeatureDetectionResult(frames=frames)
+        elapsed_s = time.monotonic() - t0
+        return FeatureDetectionResult(frames=frames, elapsed_s=elapsed_s)

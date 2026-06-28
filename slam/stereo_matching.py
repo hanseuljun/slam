@@ -1,4 +1,5 @@
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -19,6 +20,7 @@ class StereoMatchingFrame:
 @dataclass
 class StereoMatchingResult:
     frames: list[StereoMatchingFrame]
+    elapsed_s: float
 
 
 class StereoMatchingSolver:
@@ -79,6 +81,7 @@ class StereoMatchingSolver:
     def run(self) -> StereoMatchingResult:
         n = len(self._feature_detection_result.frames)
         frames: list[StereoMatchingFrame | None] = [None] * n
+        t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             future_to_index = {
                 executor.submit(self._process_frame, i): i
@@ -90,4 +93,5 @@ class StereoMatchingSolver:
                 frames[i] = future.result()
                 completed += 1
                 self.progress = completed / n
-        return StereoMatchingResult(frames=frames)
+        elapsed_s = time.monotonic() - t0
+        return StereoMatchingResult(frames=frames, elapsed_s=elapsed_s)
