@@ -304,9 +304,6 @@ def _run_gtsam(
 
     body_T_cam0 = data.cam0_extrinsics
     cam0_T_body = np.linalg.inv(body_T_cam0)
-    cam0_R_body = cam0_T_body[:3, :3]
-    imu_lin_accs = (cam0_R_body @ imu_lin_accs.T).T
-    imu_ang_vels = (cam0_R_body @ imu_ang_vels.T).T
 
     X = lambda i: gtsam.symbol('x', i)
     V = lambda i: gtsam.symbol('v', i)
@@ -370,7 +367,11 @@ def _run_gtsam(
                 fd_i.cam0_descriptors, fd_next.cam0_keypoints, fd_next.cam0_descriptors,
             )
             pnp_rotation_matrix, _ = cv2.Rodrigues(pnp_rotation_vector)
-            pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_rotation_matrix), gtsam.Point3(*pnp_translation_vector.flatten()))
+            pnp_cam0 = np.eye(4)
+            pnp_cam0[:3, :3] = pnp_rotation_matrix
+            pnp_cam0[:3, 3] = pnp_translation_vector.flatten()
+            pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
+            pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
             new_factors.add(gtsam.BetweenFactorPose3(X(i), X(i + 1), pnp_delta, PNP_NOISE))
             pose_init = pose_i.compose(pnp_delta)
         except Exception:
