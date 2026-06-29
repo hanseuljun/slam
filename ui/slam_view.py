@@ -57,12 +57,14 @@ def _plot_rotation_matrices(series: list[tuple[np.ndarray, np.ndarray, str]], ti
     return fig
 
 
-def _plot_linear_accelerations(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Linear Acceleration in World Frame') -> plt.Figure:
+def _plot_linear_accelerations(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Linear Acceleration in World Frame', gravity: np.ndarray | None = None) -> plt.Figure:
     fig, (ax_ax, ax_ay, ax_az) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle(title)
     for ax, i, label in zip([ax_ax, ax_ay, ax_az], range(3), ['ax', 'ay', 'az']):
         for times, linear_accelerations, name in series:
             ax.plot(times, linear_accelerations[:, i], label=name)
+        if gravity is not None:
+            ax.axhline(gravity[i], color='gray', linestyle='--', linewidth=1, label='gravity')
         ax.set_xlabel('Time [s]')
         ax.set_ylabel(f'{label} [m/s²]')
         ax.legend()
@@ -134,9 +136,8 @@ def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) 
     all_series = [
         (results.imu.times, results.extra.linear_accelerations_in_world, 'imu'),
         (results.gtsam.angular_velocity_times, results.gtsam.linear_accelerations, 'gtsam'),
-        (results.gt.times, results.extra.gravities, 'gt_gravity'),
     ]
-    return figure_to_image(_plot_linear_accelerations([s for s in all_series if enabled[s[2]]]))
+    return figure_to_image(_plot_linear_accelerations([s for s in all_series if enabled[s[2]]], gravity=results.extra.gravity))
 
 
 def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
@@ -186,7 +187,7 @@ class SlamViewModel:
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
-        self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True, 'gt_gravity': True}
+        self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
 
     def start(
@@ -292,6 +293,8 @@ def slam_view(model: SlamViewModel) -> None:
         model._tex_linear_accelerations = image_to_texture(_render_linear_accelerations(result, model.lin_acc_enabled))
     tex = model._tex_linear_accelerations
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    g = result.extra.gravity
+    imgui.text(f"Gravity: [{g[0]:.4f}, {g[1]:.4f}, {g[2]:.4f}]")
 
     imgui.separator()
     imgui.text("IMU (Body Frame)")

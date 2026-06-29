@@ -72,7 +72,7 @@ class SlamGtsamResult:
 
 @dataclass
 class SlamExtraResult:
-    gravities: np.ndarray
+    gravity: np.ndarray
     linear_accelerations_in_world: np.ndarray
 
 
@@ -447,8 +447,7 @@ def _get_extra_result(
     imu_result: SlamImuResult,
     max_timestamp_ns: int,
 ) -> SlamExtraResult:
-    g_world = np.array([-9.81, 0.0, 0.0])
-    gravities = gt_result.rotation_matrices.transpose(0, 2, 1) @ g_world
+    gravity = np.array([0.0, 0.0, 9.81])
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
     gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
@@ -460,7 +459,7 @@ def _get_extra_result(
     ])
 
     return SlamExtraResult(
-        gravities=gravities,
+        gravity=gravity,
         linear_accelerations_in_world=linear_accelerations_in_world,
     )
 
