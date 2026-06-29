@@ -35,6 +35,7 @@ class SlamGroundTruthResult:
     rotation_matrices: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
+    gravities: np.ndarray
 
 
 @dataclass
@@ -103,6 +104,9 @@ def _get_ground_truth_result(
         angular_velocities.append(angular_velocity)
     angular_velocities = np.array(angular_velocities)
 
+    g_world = np.array([-9.81, 0.0, 0.0])
+    gravities = rotation_matrices.transpose(0, 2, 1) @ g_world
+
     return SlamGroundTruthResult(
         times=times,
         positions=positions,
@@ -110,6 +114,7 @@ def _get_ground_truth_result(
         rotation_matrices=rotation_matrices,
         angular_velocity_times=np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples[:-1]]),
         angular_velocities=angular_velocities,
+        gravities=gravities,
     )
 
 
