@@ -44,6 +44,7 @@ class SlamImuResult:
     rotation_matrices: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
+    linear_accelerations_in_world: np.ndarray
 
 
 @dataclass
@@ -136,12 +137,22 @@ def _get_imu_result(
         rotation_matrices_list[i] = compensation_rotation_matrix @ rotation_matrices_list[i]
 
     rotation_matrices = np.array(rotation_matrices_list)
+
+    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
+    gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
+    closest_gt_indices = np.argmin(np.abs(gt_timestamps_ns[:, None] - timestamps_ns[None, :]), axis=0)
+    linear_accelerations_in_world = np.array([
+        gt_rotation_matrices[idx] @ acc
+        for idx, acc in zip(closest_gt_indices, linear_accelerations)
+    ])
+
     return SlamImuResult(
         times=times,
         attitudes=_mats_to_rvecs(rotation_matrices),
         rotation_matrices=rotation_matrices,
         angular_velocities=angular_velocities,
         linear_accelerations=linear_accelerations,
+        linear_accelerations_in_world=linear_accelerations_in_world,
     )
 
 
@@ -287,7 +298,7 @@ def _run_gtsam(
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list[ImuSample],
     on_progress: Callable[[float], None],
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_lin_accs      = np.array([s.linear_acceleration for s in imu_samples])
