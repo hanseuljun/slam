@@ -132,9 +132,9 @@ def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndar
 
 def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
-        (results.imu.times, results.imu.linear_accelerations_in_world, 'imu'),
+        (results.imu.times, results.extra.linear_accelerations_in_world, 'imu'),
         (results.gtsam.angular_velocity_times, results.gtsam.linear_accelerations, 'gtsam'),
-        (results.gt.times, results.gt.gravities, 'gt_gravity'),
+        (results.gt.times, results.extra.gravities, 'gt_gravity'),
     ]
     return figure_to_image(_plot_linear_accelerations([s for s in all_series if enabled[s[2]]]))
 

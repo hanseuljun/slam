@@ -35,7 +35,6 @@ class SlamGroundTruthResult:
     rotation_matrices: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
-    gravities: np.ndarray
 
 
 @dataclass
@@ -45,7 +44,6 @@ class SlamImuResult:
     rotation_matrices: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
-    linear_accelerations_in_world: np.ndarray
 
 
 @dataclass
@@ -73,11 +71,18 @@ class SlamGtsamResult:
 
 
 @dataclass
+class SlamExtraResult:
+    gravities: np.ndarray
+    linear_accelerations_in_world: np.ndarray
+
+
+@dataclass
 class SlamResult:
     gt: SlamGroundTruthResult
     imu: SlamImuResult
     pnp: SlamPnpResult
     gtsam: SlamGtsamResult
+    extra: SlamExtraResult
 
 
 
@@ -104,9 +109,6 @@ def _get_ground_truth_result(
         angular_velocities.append(angular_velocity)
     angular_velocities = np.array(angular_velocities)
 
-    g_world = np.array([-9.81, 0.0, 0.0])
-    gravities = rotation_matrices.transpose(0, 2, 1) @ g_world
-
     return SlamGroundTruthResult(
         times=times,
         positions=positions,
@@ -114,7 +116,6 @@ def _get_ground_truth_result(
         rotation_matrices=rotation_matrices,
         angular_velocity_times=np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples[:-1]]),
         angular_velocities=angular_velocities,
-        gravities=gravities,
     )
 
 
@@ -143,21 +144,12 @@ def _get_imu_result(
 
     rotation_matrices = np.array(rotation_matrices_list)
 
-    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
-    gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
-    closest_gt_indices = np.argmin(np.abs(gt_timestamps_ns[:, None] - timestamps_ns[None, :]), axis=0)
-    linear_accelerations_in_world = np.array([
-        gt_rotation_matrices[idx] @ acc
-        for idx, acc in zip(closest_gt_indices, linear_accelerations)
-    ])
-
     return SlamImuResult(
         times=times,
         attitudes=_mats_to_rvecs(rotation_matrices),
         rotation_matrices=rotation_matrices,
         angular_velocities=angular_velocities,
         linear_accelerations=linear_accelerations,
-        linear_accelerations_in_world=linear_accelerations_in_world,
     )
 
 
@@ -449,6 +441,30 @@ def _get_gtsam_result(
     )
 
 
+def _get_extra_result(
+    data: EuRoCMAVData,
+    gt_result: SlamGroundTruthResult,
+    imu_result: SlamImuResult,
+    max_timestamp_ns: int,
+) -> SlamExtraResult:
+    g_world = np.array([-9.81, 0.0, 0.0])
+    gravities = gt_result.rotation_matrices.transpose(0, 2, 1) @ g_world
+
+    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
+    gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns])
+    closest_gt_indices = np.argmin(np.abs(gt_timestamps_ns[:, None] - imu_timestamps_ns[None, :]), axis=0)
+    linear_accelerations_in_world = np.array([
+        gt_result.rotation_matrices[idx] @ acc
+        for idx, acc in zip(closest_gt_indices, imu_result.linear_accelerations)
+    ])
+
+    return SlamExtraResult(
+        gravities=gravities,
+        linear_accelerations_in_world=linear_accelerations_in_world,
+    )
+
+
 def _compute(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
@@ -479,11 +495,13 @@ def _compute(
     gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
     set_progress(0.95, "Finishing...")
+    extra_result = _get_extra_result(data, gt_result, imu_result, max_timestamp_ns)
     return SlamResult(
         gt=gt_result,
         imu=imu_result,
         pnp=pnp_result,
         gtsam=gtsam_result,
+        extra=extra_result,
     )
 
 
