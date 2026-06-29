@@ -10,6 +10,7 @@ from ui.feature_detection_view import FeatureDetectionViewModel, feature_detecti
 from ui.slam_view import SlamViewModel, slam_view
 from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
 from ui.config_view import ConfigViewModel, config_view
+from ui.imu_initialization_view import ImuInitializationViewModel, imu_initialization_view
 
 _DATA_PATHS = [
     "data/machine_hall/MH_01_easy/mav0",
@@ -40,6 +41,7 @@ class RootViewModel:
             on_result=self._on_stereo_matching_result,
         )
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
+        self.imu_initialization_view_model = ImuInitializationViewModel(self.data)
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
@@ -59,6 +61,7 @@ class RootViewModel:
         self.stereo_matching_result = None
         self.feature_detection_result = None
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
+        self.imu_initialization_view_model = ImuInitializationViewModel(self.data)
         self.stereo_matching_view_model = StereoMatchingViewModel(
             self.data,
             on_result=self._on_stereo_matching_result,
@@ -103,6 +106,10 @@ def root_view(model: RootViewModel) -> None:
             if imgui.begin_tab_item("Coordinate Mapping")[0]:
                 coordinate_mapping_view(model.coordinate_mapping_view_model)
                 imgui.end_tab_item()
+
+        if imgui.begin_tab_item("IMU Initialization")[0]:
+            imu_initialization_view(model.imu_initialization_view_model)
+            imgui.end_tab_item()
 
         if imgui.begin_tab_item("SLAM")[0]:
             slam_view(model.slam_view_model)
