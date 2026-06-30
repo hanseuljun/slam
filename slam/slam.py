@@ -311,11 +311,8 @@ def _run_gtsam(
 
     imu_params = gtsam.PreintegrationParams(np.array([0.0, 0.0, 9.81]))
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
-    # imu_params.setGyroscopeCovariance(np.eye(3) * 1)
     imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
-    # imu_params.setAccelerometerCovariance(np.eye(3) * 1)
     imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
-    # imu_params.setIntegrationCovariance(np.eye(3) * 1)
 
     PRIOR_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
     PRIOR_VEL_NOISE  = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
@@ -403,16 +400,12 @@ def _get_gtsam_result(
     first_gt_sample = data.ground_truth_samples[0]
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
-    body_T_cam0 = data.cam0_extrinsics
-    cam0_T_body = np.linalg.inv(body_T_cam0)
-
     world_T_body_first = np.eye(4)
     world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
     world_T_body_first[:3, 3] = first_gt_sample.position
 
-    gtsam_body_poses = [body_T_cam0 @ T @ cam0_T_body for T in poses]
-    T_comp = world_T_body_first @ np.linalg.inv(gtsam_body_poses[closest_cam_index])
-    world_T_body_poses = np.array([T_comp @ T for T in gtsam_body_poses])
+    T_comp = world_T_body_first @ np.linalg.inv(poses[closest_cam_index])
+    world_T_body_poses = np.array([T_comp @ T for T in poses])
 
     times = np.array([(f.timestamp_ns - first_timestamp_ns) / 1e9 for f in stereo_matching_result.frames[:N]])
 
