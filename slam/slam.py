@@ -11,6 +11,7 @@ import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
 from slam.feature_detection import FeatureDetectionResult
+from slam.imu_initialization import ImuInitializationResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
@@ -294,6 +295,7 @@ def _run_gtsam(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list[ImuSample],
+    gravity: np.ndarray,
     on_progress: Callable[[float], None],
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     N = len(stereo_matching_result.frames)
@@ -309,7 +311,7 @@ def _run_gtsam(
     V = lambda i: gtsam.symbol('v', i)
     B = gtsam.symbol('b', 0)
 
-    imu_params = gtsam.PreintegrationParams(np.array([0.0, 0.0, 9.81]))
+    imu_params = gtsam.PreintegrationParams(gravity)
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
     imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
     imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
@@ -390,10 +392,11 @@ def _get_gtsam_result(
     stereo_matching_result: StereoMatchingResult,
     first_timestamp_ns: int,
     max_timestamp_ns: int,
+    gravity: np.ndarray,
     on_progress: Callable[[float], None],
 ) -> SlamGtsamResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, on_progress)
+    poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
     N = len(poses)
 
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
@@ -440,8 +443,8 @@ def _get_extra_result(
     gt_result: SlamGroundTruthResult,
     imu_result: SlamImuResult,
     max_timestamp_ns: int,
+    gravity: np.ndarray,
 ) -> SlamExtraResult:
-    gravity = np.array([0.0, 0.0, 9.81])
 
     gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
     gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
@@ -462,10 +465,13 @@ def _compute(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
+    imu_init_result: ImuInitializationResult,
     set_progress: Callable[[float, str], None],
 ) -> SlamResult:
     first_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = stereo_matching_result.frames[-1].timestamp_ns
+
+    gravity = imu_init_result.gravity_in_world
 
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, max_timestamp_ns)
 
@@ -483,12 +489,13 @@ def _compute(
     gtsam_t0 = time.monotonic()
     gtsam_result = _get_gtsam_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns, max_timestamp_ns,
+        gravity=gravity,
         on_progress=lambda p: set_progress(2.0 / 4.0 + p * (0.95 - 2.0 / 4.0), "Running GTSAM optimization..."),
     )
     gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
     set_progress(0.95, "Finishing...")
-    extra_result = _get_extra_result(data, gt_result, imu_result, max_timestamp_ns)
+    extra_result = _get_extra_result(data, gt_result, imu_result, max_timestamp_ns, gravity)
     return SlamResult(
         gt=gt_result,
         imu=imu_result,
@@ -502,6 +509,7 @@ def _worker_entry(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
+    imu_init_result: ImuInitializationResult,
     progress_val: Any,
     label_arr: Any,
     result_queue: Any,
@@ -511,17 +519,18 @@ def _worker_entry(
         label_arr.value = label.encode('utf-8')[:255]
 
     try:
-        result = _compute(data, feature_detection_result, stereo_matching_result, set_progress)
+        result = _compute(data, feature_detection_result, stereo_matching_result, imu_init_result, set_progress)
         result_queue.put(('ok', result))
     except Exception:
         result_queue.put(('err', traceback.format_exc()))
 
 
 class SlamSolver:
-    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
+    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult, imu_init_result: ImuInitializationResult) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
+        self._imu_init_result = imu_init_result
         self.result: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
@@ -542,7 +551,7 @@ class SlamSolver:
             target=_worker_entry,
             args=(
                 self._data, self._feature_detection_result, self._stereo_matching_result,
-                self._progress_val, self._label_arr, self._result_queue,
+                self._imu_init_result, self._progress_val, self._label_arr, self._result_queue,
             ),
             daemon=True,
         )
