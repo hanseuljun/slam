@@ -51,9 +51,7 @@ class RootViewModel:
         self.stereo_matching_result = result
         if self.time_range_view_model.run_coordinate_mapping_check:
             self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
-        imu_init_result = self.imu_initialization_view_model._result
-        assert imu_init_result is not None
-        self.slam_view_model.start(self.feature_detection_result, result, imu_init_result)
+        self.slam_view_model.start(self.feature_detection_result, result)
 
     def restart(self) -> None:
         self.slam_view_model.stop()

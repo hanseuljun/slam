@@ -195,9 +195,8 @@ class SlamViewModel:
         self,
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
-        imu_init_result: ImuInitializationResult,
     ) -> None:
-        self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result, imu_init_result)
+        self._solver = SlamSolver(self._data, feature_detection_result, stereo_matching_result)
         # Stash old textures so GC doesn't run glDeleteTextures on this (non-render) thread.
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,

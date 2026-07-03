@@ -465,13 +465,12 @@ def _compute(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    imu_init_result: ImuInitializationResult,
     set_progress: Callable[[float, str], None],
 ) -> SlamResult:
     first_timestamp_ns = data.cam_timestamps_ns[0]
     max_timestamp_ns = stereo_matching_result.frames[-1].timestamp_ns
 
-    gravity = imu_init_result.gravity_in_world
+    gravity = np.array([0.0, 0.0, -9.81])
 
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, max_timestamp_ns)
 
@@ -509,7 +508,6 @@ def _worker_entry(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    imu_init_result: ImuInitializationResult,
     progress_val: Any,
     label_arr: Any,
     result_queue: Any,
@@ -519,18 +517,17 @@ def _worker_entry(
         label_arr.value = label.encode('utf-8')[:255]
 
     try:
-        result = _compute(data, feature_detection_result, stereo_matching_result, imu_init_result, set_progress)
+        result = _compute(data, feature_detection_result, stereo_matching_result, set_progress)
         result_queue.put(('ok', result))
     except Exception:
         result_queue.put(('err', traceback.format_exc()))
 
 
 class SlamSolver:
-    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult, imu_init_result: ImuInitializationResult) -> None:
+    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
-        self._imu_init_result = imu_init_result
         self.result: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
@@ -551,7 +548,7 @@ class SlamSolver:
             target=_worker_entry,
             args=(
                 self._data, self._feature_detection_result, self._stereo_matching_result,
-                self._imu_init_result, self._progress_val, self._label_arr, self._result_queue,
+                self._progress_val, self._label_arr, self._result_queue,
             ),
             daemon=True,
         )
