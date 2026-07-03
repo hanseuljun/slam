@@ -91,6 +91,29 @@ def _mats_to_rvecs(rotation_matrices: np.ndarray) -> np.ndarray:
     return np.array([cv2.Rodrigues(R)[0].flatten() for R in rotation_matrices])
 
 
+def _align_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Rotation matrix R such that R @ a is parallel to b (both unit-normalized)."""
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    if c > 1.0 - 1e-8:
+        return np.eye(3)
+    if c < -1.0 + 1e-8:
+        # a and b are antiparallel; rotate 180 deg about any axis orthogonal to a.
+        axis = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.cross(a, np.array([0.0, 1.0, 0.0]))
+        axis = axis / np.linalg.norm(axis)
+        return 2.0 * np.outer(axis, axis) - np.eye(3)
+    vx = np.array([
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0],
+    ])
+    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
+
+
 def _get_ground_truth_result(
     data: EuRoCMAVData,
     first_timestamp_ns: int,
@@ -307,27 +330,46 @@ def _run_gtsam(
     body_T_cam0 = data.cam0_extrinsics
     cam0_T_body = np.linalg.inv(body_T_cam0)
 
+    # Estimate the gravity direction in the body frame *at frame 0* by averaging the
+    # accelerometer over a short window there (at rest it senses specific force, "up").
+    # A global most-static window would measure gravity at a different body orientation,
+    # because the body is generally rotated differently by the time it settles; integrating
+    # the gyro across that gap drifts too much to correct for it reliably.
+    grav_win = max(1, int(data.imu0_rate_hz * 0.5))
+    i0 = int(np.argmin(np.abs(imu_timestamps_ns - cam_timestamps_ns[0])))
+    gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
+
     X = lambda i: gtsam.symbol('x', i)
     V = lambda i: gtsam.symbol('v', i)
     B = gtsam.symbol('b', 0)
 
     imu_params = gtsam.PreintegrationParams(gravity)
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
-    imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
+    # Keep the accelerometer factor from over-dominating the PnP between-factors; too small
+    # a covariance lets the IMU dead-reckon (and drift) despite accurate vision constraints.
+    imu_params.setAccelerometerCovariance(np.eye(3) * 1e-1)
     imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
 
     PRIOR_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
     PRIOR_VEL_NOISE  = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
-    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1e-3)
+    # Loose enough that the optimizer can actually estimate the (constant) IMU bias. A tight
+    # prior here pins bias to zero, so the real accelerometer bias double-integrates into drift.
+    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
     PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]))
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
+    # Anchor the GTSAM navigation frame G to be gravity-aligned: rotate body-frame-0
+    # so its measured gravity lands on the nav-frame gravity axis. At rest the
+    # accelerometer reads "up" (specific force), so R_G_body0 @ gravity_in_body = -gravity.
+    R_G_body0 = _align_vectors(gravity_in_body, -gravity)
+    pose0 = gtsam.Pose3(gtsam.Rot3(R_G_body0), gtsam.Point3(0.0, 0.0, 0.0))
+
     f0, v0 = gtsam.NonlinearFactorGraph(), gtsam.Values()
-    f0.add(gtsam.PriorFactorPose3(X(0), gtsam.Pose3(), PRIOR_POSE_NOISE))
+    f0.add(gtsam.PriorFactorPose3(X(0), pose0, PRIOR_POSE_NOISE))
     f0.add(gtsam.PriorFactorVector(V(0), np.zeros(3), PRIOR_VEL_NOISE))
     f0.add(gtsam.PriorFactorConstantBias(B, gtsam.imuBias.ConstantBias(), PRIOR_BIAS_NOISE))
-    v0.insert(X(0), gtsam.Pose3())
+    v0.insert(X(0), pose0)
     v0.insert(V(0), np.zeros(3))
     v0.insert(B, gtsam.imuBias.ConstantBias())
     isam2.update(f0, v0)
