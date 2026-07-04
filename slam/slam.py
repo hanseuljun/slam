@@ -354,7 +354,7 @@ def _run_gtsam(
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
     # Keep the accelerometer factor from over-dominating the PnP between-factors; too small
     # a covariance lets the IMU dead-reckon (and drift) despite accurate vision constraints.
-    imu_params.setAccelerometerCovariance(np.eye(3) * 1e-1)
+    imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
     imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
 
     PRIOR_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
