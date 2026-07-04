@@ -33,13 +33,20 @@ def _plot_norms(result: ImuInitializationResult) -> plt.Figure:
 
 class ImuInitializationViewModel:
     def __init__(self, data: EuRoCMAVData) -> None:
+        self._data = data
         self._result: Optional[ImuInitializationResult] = None
-        self._loading: bool = True
+        self._loading: bool = False
         self._error: Optional[str] = None
         self._texture: Optional[hello_imgui.TextureGpu] = None
+
+    def start(self) -> None:
+        self._result = None
+        self._loading = True
+        self._error = None
+        self._texture = None
         threading.Thread(
             target=self._compute,
-            args=(ImuInitializationSolver(data),),
+            args=(ImuInitializationSolver(self._data),),
             daemon=True,
         ).start()
 

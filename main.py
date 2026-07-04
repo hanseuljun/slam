@@ -42,6 +42,8 @@ class RootViewModel:
         )
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
         self.imu_initialization_view_model = ImuInitializationViewModel(self.data)
+        if self.time_range_view_model.run_imu_initialization:
+            self.imu_initialization_view_model.start()
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
@@ -62,6 +64,8 @@ class RootViewModel:
         self.feature_detection_result = None
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(self.data)
         self.imu_initialization_view_model = ImuInitializationViewModel(self.data)
+        if self.time_range_view_model.run_imu_initialization:
+            self.imu_initialization_view_model.start()
         self.stereo_matching_view_model = StereoMatchingViewModel(
             self.data,
             on_result=self._on_stereo_matching_result,
@@ -107,9 +111,10 @@ def root_view(model: RootViewModel) -> None:
                 coordinate_mapping_view(model.coordinate_mapping_view_model)
                 imgui.end_tab_item()
 
-        if imgui.begin_tab_item("IMU Initialization")[0]:
-            imu_initialization_view(model.imu_initialization_view_model)
-            imgui.end_tab_item()
+        if model.time_range_view_model.run_imu_initialization:
+            if imgui.begin_tab_item("IMU Initialization")[0]:
+                imu_initialization_view(model.imu_initialization_view_model)
+                imgui.end_tab_item()
 
         if imgui.begin_tab_item("SLAM")[0]:
             slam_view(model.slam_view_model)
