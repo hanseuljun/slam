@@ -362,7 +362,10 @@ def _run_gtsam(
     # Loose enough that the optimizer can actually estimate the (constant) IMU bias. A tight
     # prior here pins bias to zero, so the real accelerometer bias double-integrates into drift.
     PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
-    PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]))
+    # Per-step (adjacent-frame) PnP sigmas. The keyframe constraint chains KEYFRAME_STRIDE of
+    # these, so its error accumulates like a random walk -> scale the sigmas by sqrt(stride).
+    PNP_STEP_SIGMAS  = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
+    PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(PNP_STEP_SIGMAS * np.sqrt(KEYFRAME_STRIDE))
     # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
     # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
     BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.05)
@@ -392,8 +395,6 @@ def _run_gtsam(
         bias_i = est.atConstantBias(B(j))
 
         kf_i, kf_next = keyframe_indices[j], keyframe_indices[j + 1]
-        fd_i, fd_next = feature_detection_result.frames[kf_i], feature_detection_result.frames[kf_next]
-        sm_i = stereo_matching_result.frames[kf_i]
 
         new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
 
@@ -415,21 +416,34 @@ def _run_gtsam(
         pose_init = nav_j.pose()
         vel_init  = nav_j.velocity()
 
-        try:
-            pnp_rotation_vector, pnp_translation_vector, _, _ = _run_pnp_step(
-                data, sm_i.points_3d, sm_i.matches,
-                fd_i.cam0_descriptors, fd_next.cam0_keypoints, fd_next.cam0_descriptors,
-            )
-            pnp_rotation_matrix, _ = cv2.Rodrigues(pnp_rotation_vector)
-            pnp_cam0 = np.eye(4)
-            pnp_cam0[:3, :3] = pnp_rotation_matrix
-            pnp_cam0[:3, 3] = pnp_translation_vector.flatten()
+        # Build the keyframe->keyframe PnP constraint by chaining the intermediate
+        # adjacent-frame PnP steps. Each step is between neighbouring frames, where feature
+        # overlap is high, so it is well-conditioned; a single direct match across the full
+        # ~10-frame gap would have little overlap and fail often. If any step fails, drop the
+        # whole constraint for this interval and let the IMU factor carry it.
+        pnp_cam0 = np.eye(4)
+        pnp_ok = True
+        for f in range(kf_i, kf_next):
+            sm_f = stereo_matching_result.frames[f]
+            fd_f, fd_f1 = feature_detection_result.frames[f], feature_detection_result.frames[f + 1]
+            try:
+                rvec, tvec, _, _ = _run_pnp_step(
+                    data, sm_f.points_3d, sm_f.matches,
+                    fd_f.cam0_descriptors, fd_f1.cam0_keypoints, fd_f1.cam0_descriptors,
+                )
+            except Exception:
+                pnp_ok = False
+                break
+            step = np.eye(4)
+            step[:3, :3], _ = cv2.Rodrigues(rvec)
+            step[:3, 3] = tvec.flatten()
+            pnp_cam0 = pnp_cam0 @ step
+
+        if pnp_ok:
             pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
             pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
             new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, PNP_NOISE))
             pose_init = pose_i.compose(pnp_delta)
-        except Exception:
-            pass
 
         new_values.insert(X(j + 1), pose_init)
         new_values.insert(V(j + 1), vel_init)
