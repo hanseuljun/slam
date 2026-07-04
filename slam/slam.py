@@ -320,7 +320,7 @@ def _run_gtsam(
     imu_samples: list[ImuSample],
     gravity: np.ndarray,
     on_progress: Callable[[float], None],
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
+) -> tuple[list[np.ndarray], list[np.ndarray], list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_lin_accs      = np.array([s.linear_acceleration for s in imu_samples])
@@ -339,9 +339,16 @@ def _run_gtsam(
     i0 = int(np.argmin(np.abs(imu_timestamps_ns - cam_timestamps_ns[0])))
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
+    # Only keep every KEYFRAME_STRIDE-th frame as a node in the factor graph. Fewer, more
+    # widely spaced nodes keep the graph small and give each PnP/IMU factor enough baseline
+    # to be well-conditioned. keyframe_indices maps graph node j -> original frame index.
+    KEYFRAME_STRIDE = 10
+    keyframe_indices = list(range(0, N, KEYFRAME_STRIDE))
+    K = len(keyframe_indices)
+
     X = lambda i: gtsam.symbol('x', i)
     V = lambda i: gtsam.symbol('v', i)
-    B = gtsam.symbol('b', 0)
+    B = lambda i: gtsam.symbol('b', i)
 
     imu_params = gtsam.PreintegrationParams(gravity)
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
@@ -356,6 +363,9 @@ def _run_gtsam(
     # prior here pins bias to zero, so the real accelerometer bias double-integrates into drift.
     PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
     PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05]))
+    # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
+    # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
+    BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.05)
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
@@ -368,35 +378,38 @@ def _run_gtsam(
     f0, v0 = gtsam.NonlinearFactorGraph(), gtsam.Values()
     f0.add(gtsam.PriorFactorPose3(X(0), pose0, PRIOR_POSE_NOISE))
     f0.add(gtsam.PriorFactorVector(V(0), np.zeros(3), PRIOR_VEL_NOISE))
-    f0.add(gtsam.PriorFactorConstantBias(B, gtsam.imuBias.ConstantBias(), PRIOR_BIAS_NOISE))
+    f0.add(gtsam.PriorFactorConstantBias(B(0), gtsam.imuBias.ConstantBias(), PRIOR_BIAS_NOISE))
     v0.insert(X(0), pose0)
     v0.insert(V(0), np.zeros(3))
-    v0.insert(B, gtsam.imuBias.ConstantBias())
+    v0.insert(B(0), gtsam.imuBias.ConstantBias())
     isam2.update(f0, v0)
 
-    for i in range(N - 1):
-        on_progress(i / (N - 1))
+    for j in range(K - 1):
+        on_progress(j / (K - 1))
         est = isam2.calculateEstimate()
-        pose_i = est.atPose3(X(i))
-        vel_i  = est.atVector(V(i))
-        bias_i = est.atConstantBias(B)
+        pose_i = est.atPose3(X(j))
+        vel_i  = est.atVector(V(j))
+        bias_i = est.atConstantBias(B(j))
 
-        fd_i, fd_next = feature_detection_result.frames[i], feature_detection_result.frames[i + 1]
-        sm_i = stereo_matching_result.frames[i]
+        kf_i, kf_next = keyframe_indices[j], keyframe_indices[j + 1]
+        fd_i, fd_next = feature_detection_result.frames[kf_i], feature_detection_result.frames[kf_next]
+        sm_i = stereo_matching_result.frames[kf_i]
 
         new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
 
-        pim = gtsam.PreintegratedImuMeasurements(imu_params, gtsam.imuBias.ConstantBias())
+        pim = gtsam.PreintegratedImuMeasurements(imu_params, bias_i)
         window = np.where(
-            (imu_timestamps_ns >= cam_timestamps_ns[i]) &
-            (imu_timestamps_ns <  cam_timestamps_ns[i + 1])
+            (imu_timestamps_ns >= cam_timestamps_ns[kf_i]) &
+            (imu_timestamps_ns <  cam_timestamps_ns[kf_next])
         )[0]
         for k in window:
             dt = (float(imu_timestamps_ns[k + 1] - imu_timestamps_ns[k]) * 1e-9
                   if k + 1 < len(imu_timestamps_ns) else 1.0 / data.imu0_rate_hz)
             pim.integrateMeasurement(imu_lin_accs[k], imu_ang_vels[k], dt)
 
-        new_factors.add(gtsam.ImuFactor(X(i), V(i), X(i + 1), V(i + 1), B, pim))
+        new_factors.add(gtsam.ImuFactor(X(j), V(j), X(j + 1), V(j + 1), B(j), pim))
+        new_factors.add(gtsam.BetweenFactorConstantBias(
+            B(j), B(j + 1), gtsam.imuBias.ConstantBias(), BIAS_BETWEEN_NOISE))
 
         nav_j     = pim.predict(gtsam.NavState(pose_i, vel_i), bias_i)
         pose_init = nav_j.pose()
@@ -413,19 +426,20 @@ def _run_gtsam(
             pnp_cam0[:3, 3] = pnp_translation_vector.flatten()
             pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
             pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
-            new_factors.add(gtsam.BetweenFactorPose3(X(i), X(i + 1), pnp_delta, PNP_NOISE))
+            new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, PNP_NOISE))
             pose_init = pose_i.compose(pnp_delta)
         except Exception:
             pass
 
-        new_values.insert(X(i + 1), pose_init)
-        new_values.insert(V(i + 1), vel_init)
+        new_values.insert(X(j + 1), pose_init)
+        new_values.insert(V(j + 1), vel_init)
+        new_values.insert(B(j + 1), bias_i)
         isam2.update(new_factors, new_values)
 
     final = isam2.calculateEstimate()
-    poses = [final.atPose3(X(i)).matrix() for i in range(N)]
-    velocities = [final.atVector(V(i)) for i in range(N)]
-    return poses, velocities
+    poses = [final.atPose3(X(j)).matrix() for j in range(K)]
+    velocities = [final.atVector(V(j)) for j in range(K)]
+    return poses, velocities, keyframe_indices
 
 
 def _get_gtsam_result(
@@ -438,10 +452,11 @@ def _get_gtsam_result(
     on_progress: Callable[[float], None],
 ) -> SlamGtsamResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    poses, velocities = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
-    N = len(poses)
+    poses, velocities, keyframe_indices = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
+    K = len(poses)
 
-    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
+    kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
+    cam_timestamps_ns = np.array([f.timestamp_ns for f in kf_frames])
     first_gt_sample = data.ground_truth_samples[0]
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
@@ -452,17 +467,17 @@ def _get_gtsam_result(
     T_comp = world_T_body_first @ np.linalg.inv(poses[closest_cam_index])
     world_T_body_poses = np.array([T_comp @ T for T in poses])
 
-    times = np.array([(f.timestamp_ns - first_timestamp_ns) / 1e9 for f in stereo_matching_result.frames[:N]])
+    times = np.array([(f.timestamp_ns - first_timestamp_ns) / 1e9 for f in kf_frames])
 
     angular_velocities = []
     linear_accelerations = []
     velocities_np = np.array(velocities)
-    for i in range(N - 1):
+    for i in range(K - 1):
+        dt = times[i + 1] - times[i]
         rotation_matrix = world_T_body_poses[i, :3, :3].T @ world_T_body_poses[i + 1, :3, :3]
         rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
-        angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
+        angular_velocities.append(rotation_vector.flatten() / dt)
 
-        dt = times[i + 1] - times[i]
         acc_world = (velocities_np[i + 1] - velocities_np[i]) / dt
         acc_body = world_T_body_poses[i, :3, :3].T @ acc_world
         linear_accelerations.append(acc_body)
