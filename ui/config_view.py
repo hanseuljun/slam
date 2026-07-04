@@ -10,7 +10,7 @@ class ConfigViewModel:
     data_paths: list[str] = field(default_factory=list)
     selected_index: int = 0
     start_s: float = 0.0
-    duration_s: float = 10.0
+    duration_s: float = 50.0
     run_coordinate_mapping_check: bool = False
     run_imu_initialization: bool = False
 
