@@ -65,6 +65,7 @@ class SlamGtsamResult:
     attitudes: np.ndarray
     rotation_matrices: np.ndarray
     velocities: np.ndarray
+    biases: np.ndarray  # per-keyframe IMU bias, shape (K, 6): [accel(3), gyro(3)]
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
@@ -361,14 +362,14 @@ def _run_gtsam(
     PRIOR_VEL_NOISE  = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
     # Loose enough that the optimizer can actually estimate the (constant) IMU bias. A tight
     # prior here pins bias to zero, so the real accelerometer bias double-integrates into drift.
-    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.5)
+    PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
     # Per-step (adjacent-frame) PnP sigmas. The keyframe constraint chains KEYFRAME_STRIDE of
     # these, so its error accumulates like a random walk -> scale the sigmas by sqrt(stride).
     PNP_STEP_SIGMAS  = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
     PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(PNP_STEP_SIGMAS * np.sqrt(KEYFRAME_STRIDE))
     # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
     # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
-    BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.05)
+    BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
@@ -453,7 +454,8 @@ def _run_gtsam(
     final = isam2.calculateEstimate()
     poses = [final.atPose3(X(j)).matrix() for j in range(K)]
     velocities = [final.atVector(V(j)) for j in range(K)]
-    return poses, velocities, keyframe_indices
+    biases = [final.atConstantBias(B(j)).vector() for j in range(K)]  # [accel(3), gyro(3)]
+    return poses, velocities, biases, keyframe_indices
 
 
 def _get_gtsam_result(
@@ -466,7 +468,7 @@ def _get_gtsam_result(
     on_progress: Callable[[float], None],
 ) -> SlamGtsamResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    poses, velocities, keyframe_indices = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
+    poses, velocities, biases, keyframe_indices = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
     K = len(poses)
 
     kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
@@ -503,6 +505,7 @@ def _get_gtsam_result(
         attitudes=_mats_to_rvecs(rotation_matrices),
         rotation_matrices=rotation_matrices,
         velocities=velocities_np,
+        biases=np.array(biases),
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
         linear_accelerations=np.array(linear_accelerations),

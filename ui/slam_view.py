@@ -86,6 +86,24 @@ def _plot_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Fi
     return fig
 
 
+def _plot_biases(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'IMU Bias (Body Frame)') -> plt.Figure:
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6))
+    fig.suptitle(title)
+    row_labels = ['accel bias', 'gyro bias']
+    row_units = ['m/s²', 'rad/s']
+    component_names = ['x', 'y', 'z']
+    for row in range(2):
+        for col in range(3):
+            ax = axes[row, col]
+            for times, biases, name in series:
+                ax.plot(times, biases[:, row * 3 + col], label=name)
+            ax.set_xlabel('Time [s]')
+            ax.set_ylabel(f'{row_labels[row]} {component_names[col]} [{row_units[row]}]')
+            ax.legend()
+    plt.tight_layout()
+    return fig
+
+
 def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Angular Velocity in World Frame') -> plt.Figure:
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle(title)
@@ -131,6 +149,13 @@ def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndar
         (results.gtsam.times, results.gtsam.velocities, 'gtsam'),
     ]
     return figure_to_image(_plot_velocities([s for s in all_series if enabled[s[2]]]))
+
+
+def _render_biases(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+    all_series = [
+        (results.gtsam.times, results.gtsam.biases, 'gtsam'),
+    ]
+    return figure_to_image(_plot_biases([s for s in all_series if enabled[s[2]]]))
 
 
 def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
@@ -180,6 +205,7 @@ class SlamViewModel:
         self._tex_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
+        self._tex_biases: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_rotation_matrices: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
@@ -188,6 +214,7 @@ class SlamViewModel:
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
+        self.bias_enabled: dict[str, bool] = {'gtsam': True}
         self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
 
@@ -201,6 +228,7 @@ class SlamViewModel:
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,
                     self._tex_linear_accelerations, self._tex_angular_velocities, self._tex_velocities,
+                    self._tex_biases,
                     self._tex_imu_attitudes, self._tex_imu_rotation_matrices,
                     self._tex_imu_angular_velocities, self._tex_imu_linear_accelerations]:
             if tex is not None:
@@ -211,6 +239,7 @@ class SlamViewModel:
         self._tex_linear_accelerations = None
         self._tex_angular_velocities = None
         self._tex_velocities = None
+        self._tex_biases = None
         self._tex_imu_attitudes = None
         self._tex_imu_rotation_matrices = None
         self._tex_imu_angular_velocities = None
@@ -279,6 +308,13 @@ def slam_view(model: SlamViewModel) -> None:
     if model._tex_velocities is None:
         model._tex_velocities = image_to_texture(_render_velocities(result, model.vel_enabled))
     tex = model._tex_velocities
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
+    if _checkboxes(model.bias_enabled, "bias"):
+        model._tex_biases = None
+    if model._tex_biases is None:
+        model._tex_biases = image_to_texture(_render_biases(result, model.bias_enabled))
+    tex = model._tex_biases
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.omega_enabled, "omega"):
