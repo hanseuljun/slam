@@ -66,6 +66,9 @@ class SlamGtsamResult:
     rotation_matrices: np.ndarray
     velocities: np.ndarray
     biases: np.ndarray  # per-keyframe IMU bias, shape (K, 6): [accel(3), gyro(3)]
+    position_errors: np.ndarray  # per-keyframe position error vs nearest GT sample [m], shape (K,)
+    reprojection_rmse: np.ndarray  # per-keyframe landmark reprojection RMSE [px], shape (K,)
+    landmark_counts: np.ndarray  # per-keyframe number of observed landmarks, shape (K,)
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
@@ -314,6 +317,98 @@ def _get_pnp_result(
     )
 
 
+def _build_landmark_tracks(
+    data: EuRoCMAVData,
+    feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
+    keyframe_indices: list[int],
+    min_track_len: int,
+    depth_min: float,
+    depth_max: float,
+    fund_ransac_px: float,
+) -> dict[int, list[tuple[int, np.ndarray, np.ndarray, np.ndarray]]]:
+    """Chain stereo-matched features across keyframes into persistent landmark tracks.
+
+    Returns {track_id: [(node, uv0_undistorted, uv1_undistorted, point_cam0), ...]} where
+    ``node`` is the graph-node index (into keyframe_indices) that observed the landmark.
+    Only cam0-cam1 stereo inliers are tracked, so every observation carries a metric depth
+    for initialization; observations are pre-undistorted so they match a Cal3_S2 pinhole model.
+    """
+    K0 = data.cam0_intrinsics.to_matrix()
+    K1 = data.cam1_intrinsics.to_matrix()
+    dist0 = np.array([data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
+                      data.cam0_intrinsics.p1, data.cam0_intrinsics.p2])
+    dist1 = np.array([data.cam1_intrinsics.k1, data.cam1_intrinsics.k2,
+                      data.cam1_intrinsics.p1, data.cam1_intrinsics.p2])
+
+    # Per node: the stereo-inlier descriptors (for matching) and observation tuples.
+    node_descs: list[np.ndarray] = []
+    node_obs: list[list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = []
+    for frame in keyframe_indices:
+        sm = stereo_matching_result.frames[frame]
+        fd = feature_detection_result.frames[frame]
+        if not sm.matches:
+            node_descs.append(np.zeros((0, 32), dtype=np.uint8))
+            node_obs.append([])
+            continue
+        q_idx = [m.queryIdx for m in sm.matches]
+        t_idx = [m.trainIdx for m in sm.matches]
+        descs = fd.cam0_descriptors[q_idx]
+        uv0 = np.array([fd.cam0_keypoints[i].pt for i in q_idx], dtype=np.float64)
+        uv1 = np.array([fd.cam1_keypoints[i].pt for i in t_idx], dtype=np.float64)
+        uv0u = cv2.undistortPoints(uv0.reshape(-1, 1, 2), K0, dist0, P=K0).reshape(-1, 2)
+        uv1u = cv2.undistortPoints(uv1.reshape(-1, 1, 2), K1, dist1, P=K1).reshape(-1, 2)
+        pts = sm.points_3d.T  # (M, 3), column i <-> sm.matches[i]
+        node_descs.append(descs)
+        node_obs.append([(uv0u[i], uv1u[i], pts[i]) for i in range(len(sm.matches))])
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    tracks: dict[int, list[tuple[int, np.ndarray, np.ndarray, np.ndarray]]] = {}
+    next_tid = 0
+    prev_obs_to_tid: dict[int, int] = {}  # obs-index at node jj-1 -> track id
+    for jj in range(len(keyframe_indices)):
+        cur_obs_to_tid: dict[int, int] = {}
+        if jj > 0 and len(node_descs[jj - 1]) and len(node_descs[jj]):
+            raw = bf.knnMatch(node_descs[jj - 1], node_descs[jj], k=2)
+            good = [pair[0] for pair in raw
+                    if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+            # Geometric gate: keep only matches consistent with a two-view epipolar geometry
+            # (fundamental-matrix RANSAC on the undistorted cam0 points). Descriptor + ratio
+            # matching alone leaves gross mismatches that would otherwise seed bad landmarks
+            # and inflate reprojection error; the epipolar constraint removes them without
+            # needing any pose estimate.
+            if len(good) >= 8:
+                pts_prev = np.array([node_obs[jj - 1][m.queryIdx][0] for m in good])
+                pts_cur = np.array([node_obs[jj][m.trainIdx][0] for m in good])
+                _, mask = cv2.findFundamentalMat(
+                    pts_prev, pts_cur, cv2.FM_RANSAC, fund_ransac_px, 0.99)
+                if mask is not None:
+                    good = [m for m, keep in zip(good, mask.ravel()) if keep]
+            for m in good:
+                p, c = m.queryIdx, m.trainIdx
+                if c in cur_obs_to_tid:
+                    continue
+                tid = prev_obs_to_tid.get(p)
+                if tid is None:
+                    tid = next_tid
+                    next_tid += 1
+                    tracks[tid] = [(jj - 1, *node_obs[jj - 1][p])]
+                cur_obs_to_tid[c] = tid
+                tracks[tid].append((jj, *node_obs[jj][c]))
+        prev_obs_to_tid = cur_obs_to_tid
+
+    # Keep only tracks long enough to bundle-adjust and whose first (init) depth is sane.
+    kept: dict[int, list[tuple[int, np.ndarray, np.ndarray, np.ndarray]]] = {}
+    for tid, obs in tracks.items():
+        if len(obs) < min_track_len:
+            continue
+        z0 = float(obs[0][3][2])
+        if not (depth_min < z0 < depth_max):
+            continue
+        kept[tid] = obs
+    return kept
+
+
 def _run_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
@@ -321,7 +416,7 @@ def _run_gtsam(
     imu_samples: list[ImuSample],
     gravity: np.ndarray,
     on_progress: Callable[[float], None],
-) -> tuple[list[np.ndarray], list[np.ndarray], list[int]]:
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
     imu_lin_accs      = np.array([s.linear_acceleration for s in imu_samples])
@@ -350,6 +445,7 @@ def _run_gtsam(
     X = lambda i: gtsam.symbol('x', i)
     V = lambda i: gtsam.symbol('v', i)
     B = lambda i: gtsam.symbol('b', i)
+    L = lambda i: gtsam.symbol('l', i)
 
     imu_params = gtsam.PreintegrationParams(gravity)
     imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
@@ -370,6 +466,80 @@ def _run_gtsam(
     # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
     # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
     BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+
+    # --- Landmarks (rung 2: explicit structure / bundle adjustment) ---------------------
+    # Persistent 3D landmarks tied to poses by reprojection factors. A point seen across
+    # several keyframes becomes one shared variable with many rigid constraints (errors
+    # average), instead of a chain of noisy relative PnP poses (errors compound).
+    MIN_TRACK_LEN   = 3       # observations before a landmark is trusted enough to add
+    PNP_FALLBACK_COVIS = 15   # if a keyframe pair shares >= this many landmarks, drop PnP
+    PX_SIGMA        = 1.5     # reprojection sigma [px]
+    DEPTH_MIN, DEPTH_MAX = 0.3, 40.0
+    FUND_RANSAC_PX  = 2.0     # epipolar (fundamental-matrix RANSAC) inlier threshold [px]
+    # cam0/cam1 pinhole calibrations (measurements are pre-undistorted) and body<-cam poses.
+    cam0_K = gtsam.Cal3_S2(data.cam0_intrinsics.fx, data.cam0_intrinsics.fy, 0.0,
+                           data.cam0_intrinsics.cx, data.cam0_intrinsics.cy)
+    cam1_K = gtsam.Cal3_S2(data.cam1_intrinsics.fx, data.cam1_intrinsics.fy, 0.0,
+                           data.cam1_intrinsics.cx, data.cam1_intrinsics.cy)
+    cam0_pose = gtsam.Pose3(body_T_cam0)
+    cam1_pose = gtsam.Pose3(data.cam1_extrinsics)
+    # Robust (Huber) pixel noise so a single bad match can't drag a landmark or a pose.
+    PX_NOISE = gtsam.noiseModel.Robust.Create(
+        gtsam.noiseModel.mEstimator.Huber.Create(1.345),
+        gtsam.noiseModel.Isotropic.Sigma(2, PX_SIGMA))
+    # Weak prior anchoring each landmark to its stereo-triangulated init. Far / low-parallax
+    # points are barely constrained along the viewing ray and would make ISAM2's system
+    # indeterminate; this regularizes them. It is orders of magnitude looser than the pixel
+    # factors, so it is negligible for well-observed landmarks.
+    LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
+
+    tracks = _build_landmark_tracks(
+        data, feature_detection_result, stereo_matching_result, keyframe_indices,
+        MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX, FUND_RANSAC_PX)
+    # node -> track ids observed there; and per-interval covisibility for the PnP gate.
+    nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
+    node_seen: list[set[int]] = [set() for _ in range(K)]
+    for tid, obs in tracks.items():
+        for o in obs:
+            nodes_to_tracks[o[0]].append(tid)
+            node_seen[o[0]].add(tid)
+    inserted_landmarks: set[int] = set()
+    added_obs: set[tuple[int, int]] = set()
+    n_proj_factors = 0
+
+    def _add_obs_factors(factors: gtsam.NonlinearFactorGraph, tid: int, node: int,
+                         uv0: np.ndarray, uv1: np.ndarray) -> None:
+        nonlocal n_proj_factors
+        factors.add(gtsam.GenericProjectionFactorCal3_S2(
+            uv0, PX_NOISE, X(node), L(tid), cam0_K, False, False, cam0_pose))
+        factors.add(gtsam.GenericProjectionFactorCal3_S2(
+            uv1, PX_NOISE, X(node), L(tid), cam1_K, False, False, cam1_pose))
+        added_obs.add((tid, node))
+        n_proj_factors += 2
+
+    def _process_node_landmarks(jj: int, est: gtsam.Values,
+                                factors: gtsam.NonlinearFactorGraph,
+                                values: gtsam.Values) -> None:
+        """Add reprojection factors for landmarks observed at node jj (X(jj) already staged)."""
+        for tid in nodes_to_tracks[jj]:
+            obs = tracks[tid]
+            if tid in inserted_landmarks:
+                if (tid, jj) not in added_obs:
+                    o = next(o for o in obs if o[0] == jj)
+                    _add_obs_factors(factors, tid, jj, o[1], o[2])
+                continue
+            avail = [o for o in obs if o[0] <= jj]
+            if len(avail) < MIN_TRACK_LEN:
+                continue
+            # Initialize the landmark in the nav frame from the first observation's stereo depth.
+            first = obs[0]
+            T_G_cam0 = est.atPose3(X(first[0])).matrix() @ body_T_cam0
+            p_world = (T_G_cam0 @ np.append(first[3], 1.0))[:3]
+            values.insert(L(tid), gtsam.Point3(*p_world))
+            factors.add(gtsam.PriorFactorPoint3(L(tid), gtsam.Point3(*p_world), LM_PRIOR_NOISE))
+            inserted_landmarks.add(tid)
+            for o in avail:
+                _add_obs_factors(factors, tid, o[0], o[1], o[2])
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
@@ -422,40 +592,86 @@ def _run_gtsam(
         # overlap is high, so it is well-conditioned; a single direct match across the full
         # ~10-frame gap would have little overlap and fail often. If any step fails, drop the
         # whole constraint for this interval and let the IMU factor carry it.
-        pnp_cam0 = np.eye(4)
-        pnp_ok = True
-        for f in range(kf_i, kf_next):
-            sm_f = stereo_matching_result.frames[f]
-            fd_f, fd_f1 = feature_detection_result.frames[f], feature_detection_result.frames[f + 1]
-            try:
-                rvec, tvec, _, _ = _run_pnp_step(
-                    data, sm_f.points_3d, sm_f.matches,
-                    fd_f.cam0_descriptors, fd_f1.cam0_keypoints, fd_f1.cam0_descriptors,
-                )
-            except Exception:
-                pnp_ok = False
-                break
-            step = np.eye(4)
-            step[:3, :3], _ = cv2.Rodrigues(rvec)
-            step[:3, 3] = tvec.flatten()
-            pnp_cam0 = pnp_cam0 @ step
+        #
+        # PnP is now a *fallback*: when this keyframe pair already shares plenty of *inserted*
+        # landmarks, their reprojection factors constrain the relative pose directly, so adding
+        # PnP on top would double-count the same pixels. Only count landmarks that are already
+        # mature (inserted) and seen at both endpoints -- those are the ones that actually
+        # contribute factors linking X(j) and X(j+1) after this update. A track that is merely
+        # covisible but not yet mature contributes nothing here, so PnP must still carry it,
+        # otherwise the new pose would be left underconstrained (indeterminate system).
+        strong_covis = sum(
+            1 for tid in (node_seen[j] & node_seen[j + 1]) if tid in inserted_landmarks)
+        if strong_covis < PNP_FALLBACK_COVIS:
+            pnp_cam0 = np.eye(4)
+            pnp_ok = True
+            for f in range(kf_i, kf_next):
+                sm_f = stereo_matching_result.frames[f]
+                fd_f, fd_f1 = feature_detection_result.frames[f], feature_detection_result.frames[f + 1]
+                try:
+                    rvec, tvec, _, _ = _run_pnp_step(
+                        data, sm_f.points_3d, sm_f.matches,
+                        fd_f.cam0_descriptors, fd_f1.cam0_keypoints, fd_f1.cam0_descriptors,
+                    )
+                except Exception:
+                    pnp_ok = False
+                    break
+                step = np.eye(4)
+                step[:3, :3], _ = cv2.Rodrigues(rvec)
+                step[:3, 3] = tvec.flatten()
+                pnp_cam0 = pnp_cam0 @ step
 
-        if pnp_ok:
-            pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
-            pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
-            new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, PNP_NOISE))
-            pose_init = pose_i.compose(pnp_delta)
+            if pnp_ok:
+                pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
+                pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
+                new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, PNP_NOISE))
+                pose_init = pose_i.compose(pnp_delta)
 
         new_values.insert(X(j + 1), pose_init)
         new_values.insert(V(j + 1), vel_init)
         new_values.insert(B(j + 1), bias_i)
+        # Reprojection factors for landmarks observed at the new keyframe. X(j+1) is staged in
+        # new_values (valid within this same update); landmark inits use poses from `est`, all
+        # of which predate node j+1, so they are already in the estimate.
+        _process_node_landmarks(j + 1, est, new_factors, new_values)
         isam2.update(new_factors, new_values)
 
+    print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
+          f"{n_proj_factors} reprojection factors")
     final = isam2.calculateEstimate()
     poses = [final.atPose3(X(j)).matrix() for j in range(K)]
     velocities = [final.atVector(V(j)) for j in range(K)]
     biases = [final.atConstantBias(B(j)).vector() for j in range(K)]  # [accel(3), gyro(3)]
-    return poses, velocities, biases, keyframe_indices
+
+    # Per-keyframe landmark-quality metrics: reprojection RMSE [px] and how many landmarks were
+    # observed there. Reproject each final landmark into every keyframe that saw it, through
+    # both cameras, and compare to the (undistorted) measurement.
+    inv_Twc0 = [np.linalg.inv(pm @ body_T_cam0) for pm in poses]
+    inv_Twc1 = [np.linalg.inv(pm @ data.cam1_extrinsics) for pm in poses]
+    sq_px = np.zeros(K)
+    n_px = np.zeros(K)
+    n_lm = np.zeros(K)
+    for tid in inserted_landmarks:
+        p = np.append(np.asarray(final.atPoint3(L(tid))), 1.0)
+        for node, uv0, uv1, _pt in tracks[tid]:
+            seen = False
+            for intrin, inv_Twc, uv in (
+                (data.cam0_intrinsics, inv_Twc0, uv0),
+                (data.cam1_intrinsics, inv_Twc1, uv1),
+            ):
+                pc = inv_Twc[node] @ p
+                if pc[2] <= 1e-6:
+                    continue
+                u = intrin.fx * pc[0] / pc[2] + intrin.cx
+                v = intrin.fy * pc[1] / pc[2] + intrin.cy
+                sq_px[node] += (u - uv[0]) ** 2 + (v - uv[1]) ** 2
+                n_px[node] += 1
+                seen = True
+            if seen:
+                n_lm[node] += 1
+    reprojection_rmse = np.where(n_px > 0, np.sqrt(sq_px / np.maximum(n_px, 1)), np.nan)
+
+    return poses, velocities, biases, reprojection_rmse, n_lm, keyframe_indices
 
 
 def _get_gtsam_result(
@@ -468,7 +684,8 @@ def _get_gtsam_result(
     on_progress: Callable[[float], None],
 ) -> SlamGtsamResult:
     imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
-    poses, velocities, biases, keyframe_indices = _run_gtsam(data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
+    poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
+        data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
     K = len(poses)
 
     kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
@@ -484,6 +701,14 @@ def _get_gtsam_result(
     world_T_body_poses = np.array([T_comp @ T for T in poses])
 
     times = np.array([(f.timestamp_ns - first_timestamp_ns) / 1e9 for f in kf_frames])
+
+    # Per-keyframe position error vs the nearest ground-truth sample [m]. Poses are already
+    # anchored to GT at closest_cam_index (T_comp), so this is a single-point-aligned error,
+    # consistent with how positions are overlaid against GT in the view.
+    gt_timestamps_ns = np.array([s.timestamp_ns for s in data.ground_truth_samples])
+    gt_positions = np.array([s.position for s in data.ground_truth_samples])
+    nearest_gt = np.argmin(np.abs(cam_timestamps_ns[:, None] - gt_timestamps_ns[None, :]), axis=1)
+    position_errors = np.linalg.norm(world_T_body_poses[:, :3, 3] - gt_positions[nearest_gt], axis=1)
 
     angular_velocities = []
     linear_accelerations = []
@@ -506,6 +731,9 @@ def _get_gtsam_result(
         rotation_matrices=rotation_matrices,
         velocities=velocities_np,
         biases=np.array(biases),
+        position_errors=position_errors,
+        reprojection_rmse=reprojection_rmse,
+        landmark_counts=landmark_counts,
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
         linear_accelerations=np.array(linear_accelerations),

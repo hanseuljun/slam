@@ -104,6 +104,33 @@ def _plot_biases(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 
     return fig
 
 
+def _plot_gtsam_diagnostics(times: np.ndarray, position_errors: np.ndarray,
+                            reprojection_rmse: np.ndarray, landmark_counts: np.ndarray) -> plt.Figure:
+    fig, (ax_err, ax_rmse, ax_cnt) = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    fig.suptitle('GTSAM Diagnostics')
+
+    rmse = float(np.sqrt(np.mean(position_errors ** 2))) if len(position_errors) else float('nan')
+    ax_err.plot(times, position_errors, color='tab:red', marker='.', label='position error')
+    ax_err.axhline(rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rmse:.3f} m')
+    ax_err.set_ylabel('pos error vs GT [m]')
+    ax_err.legend()
+
+    valid = ~np.isnan(reprojection_rmse)
+    mean_reproj = float(np.mean(reprojection_rmse[valid])) if np.any(valid) else float('nan')
+    ax_rmse.plot(times, reprojection_rmse, color='tab:blue', marker='.', label='reprojection RMSE')
+    ax_rmse.axhline(mean_reproj, color='gray', linestyle='--', linewidth=1, label=f'mean = {mean_reproj:.2f} px')
+    ax_rmse.set_ylabel('reprojection RMSE [px]')
+    ax_rmse.legend()
+
+    ax_cnt.plot(times, landmark_counts, color='tab:green', marker='.', label='landmarks / keyframe')
+    ax_cnt.set_ylabel('# landmarks')
+    ax_cnt.set_xlabel('Time [s]')
+    ax_cnt.legend()
+
+    plt.tight_layout()
+    return fig
+
+
 def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Angular Velocity in World Frame') -> plt.Figure:
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle(title)
@@ -158,6 +185,12 @@ def _render_biases(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     return figure_to_image(_plot_biases([s for s in all_series if enabled[s[2]]]))
 
 
+def _render_gtsam_diagnostics(results: SlamResult) -> np.ndarray:
+    g = results.gtsam
+    return figure_to_image(_plot_gtsam_diagnostics(
+        g.times, g.position_errors, g.reprojection_rmse, g.landmark_counts))
+
+
 def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
         (results.imu.times, results.extra.linear_accelerations_in_world, 'imu'),
@@ -206,6 +239,7 @@ class SlamViewModel:
         self._tex_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_biases: Optional[hello_imgui.TextureGpu] = None
+        self._tex_diagnostics: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_rotation_matrices: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
@@ -228,7 +262,7 @@ class SlamViewModel:
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,
                     self._tex_linear_accelerations, self._tex_angular_velocities, self._tex_velocities,
-                    self._tex_biases,
+                    self._tex_biases, self._tex_diagnostics,
                     self._tex_imu_attitudes, self._tex_imu_rotation_matrices,
                     self._tex_imu_angular_velocities, self._tex_imu_linear_accelerations]:
             if tex is not None:
@@ -240,6 +274,7 @@ class SlamViewModel:
         self._tex_angular_velocities = None
         self._tex_velocities = None
         self._tex_biases = None
+        self._tex_diagnostics = None
         self._tex_imu_attitudes = None
         self._tex_imu_rotation_matrices = None
         self._tex_imu_angular_velocities = None
@@ -315,6 +350,11 @@ def slam_view(model: SlamViewModel) -> None:
     if model._tex_biases is None:
         model._tex_biases = image_to_texture(_render_biases(result, model.bias_enabled))
     tex = model._tex_biases
+    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
+    if model._tex_diagnostics is None:
+        model._tex_diagnostics = image_to_texture(_render_gtsam_diagnostics(result))
+    tex = model._tex_diagnostics
     imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.omega_enabled, "omega"):
