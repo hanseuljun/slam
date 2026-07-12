@@ -277,6 +277,7 @@ def _get_pnp_result(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     first_timestamp_ns: int,
+    min_timestamp_ns: int,
     on_progress: Callable[[float], None],
 ) -> SlamPnpResult:
     pnp_poses = _run_pnp(
@@ -284,7 +285,10 @@ def _get_pnp_result(
     )
 
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
-    first_gt_sample = data.ground_truth_samples[0]
+    # Anchor the trajectory to GT at the first GT sample inside the window (after start_s),
+    # not the dataset's first sample -- otherwise the windowed poses get aligned to a GT pose
+    # from before the window even begins.
+    first_gt_sample = next(s for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns)
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
     body_T_cam0 = data.cam0_extrinsics
@@ -682,6 +686,7 @@ def _get_gtsam_result(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     first_timestamp_ns: int,
+    min_timestamp_ns: int,
     max_timestamp_ns: int,
     gravity: np.ndarray,
     on_progress: Callable[[float], None],
@@ -693,7 +698,9 @@ def _get_gtsam_result(
 
     kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
     cam_timestamps_ns = np.array([f.timestamp_ns for f in kf_frames])
-    first_gt_sample = data.ground_truth_samples[0]
+    # Anchor to GT at the first GT sample inside the window (after start_s), consistent with
+    # how the GT/PnP series are windowed.
+    first_gt_sample = next(s for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns)
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
     world_T_body_first = np.eye(4)
@@ -798,7 +805,7 @@ def _compute(
     set_progress(0.0, "Running PnP...")
     pnp_t0 = time.monotonic()
     pnp_result = _get_pnp_result(
-        data, feature_detection_result, stereo_matching_result, first_timestamp_ns,
+        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
         on_progress=lambda p: set_progress(p / 2.0, "Running PnP..."),
     )
     pnp_result.elapsed_time = time.monotonic() - pnp_t0
@@ -806,7 +813,7 @@ def _compute(
     set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_t0 = time.monotonic()
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, max_timestamp_ns,
+        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
         gravity=gravity,
         on_progress=lambda p: set_progress(2.0 / 4.0 + p * (0.95 - 2.0 / 4.0), "Running GTSAM optimization..."),
     )

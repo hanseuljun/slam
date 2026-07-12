@@ -10,6 +10,20 @@ from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 
 
+# Reject a stereo match if its (undistorted) points sit more than this far, in pixels, from the
+# epipolar geometry implied by the *known* stereo calibration (Sampson distance). Tight because
+# F is exact here -- it is derived from the fixed extrinsics, not estimated from noisy matches.
+EPIPOLAR_SAMPSON_PX = 1.5
+
+
+def _skew(t: np.ndarray) -> np.ndarray:
+    return np.array([
+        [0.0, -t[2], t[1]],
+        [t[2], 0.0, -t[0]],
+        [-t[1], t[0], 0.0],
+    ])
+
+
 @dataclass
 class StereoMatchingFrame:
     timestamp_ns: int
@@ -65,8 +79,38 @@ class StereoMatchingSolver:
         points0 = cv2.undistortPoints(points0, K0, dist_coeffs0, P=K0).reshape(-1, 2)
         points1 = cv2.undistortPoints(points1, K1, dist_coeffs1, P=K1).reshape(-1, 2)
 
-        P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
         T_cam0_to_cam1 = np.linalg.inv(data.cam1_extrinsics) @ data.cam0_extrinsics
+        R = T_cam0_to_cam1[:3, :3]
+        t = T_cam0_to_cam1[:3, 3]
+
+        # Epipolar gate. A correct stereo match must satisfy x1^T F x0 = 0. F is built exactly
+        # from the known extrinsics (F = K1^-T [t]x R K0^-1), so instead of estimating it we
+        # score each match by its Sampson distance -- an approximate pixel distance to the
+        # epipolar geometry -- and drop matches beyond EPIPOLAR_SAMPSON_PX. The vast majority of
+        # nonsense pairs (repeated texture that fools the descriptor ratio test) land far off
+        # their epipolar line and are removed before they can triangulate into garbage 3D points.
+        F = np.linalg.inv(K1).T @ _skew(t) @ R @ np.linalg.inv(K0)
+        p0h = np.hstack([points0, np.ones((len(points0), 1))])
+        p1h = np.hstack([points1, np.ones((len(points1), 1))])
+        Fp0 = p0h @ F.T      # epipolar line in cam1 for each cam0 point
+        Ftp1 = p1h @ F       # epipolar line in cam0 for each cam1 point
+        num = np.sum(p1h * Fp0, axis=1)  # x1^T F x0
+        denom = Fp0[:, 0] ** 2 + Fp0[:, 1] ** 2 + Ftp1[:, 0] ** 2 + Ftp1[:, 1] ** 2
+        sampson_sq = np.where(denom > 1e-12, num ** 2 / np.maximum(denom, 1e-12), np.inf)
+        keep = sampson_sq < EPIPOLAR_SAMPSON_PX ** 2
+
+        good_matches = [m for m, k in zip(good_matches, keep) if k]
+        points0 = points0[keep]
+        points1 = points1[keep]
+
+        if not good_matches:
+            return StereoMatchingFrame(
+                timestamp_ns=fd.timestamp_ns,
+                matches=[],
+                points_3d=np.zeros((3, 0)),
+            )
+
+        P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
         P1 = K1 @ T_cam0_to_cam1[:3, :]
 
         points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
