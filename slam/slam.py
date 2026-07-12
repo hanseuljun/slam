@@ -416,6 +416,72 @@ def _build_landmark_tracks(
     return kept
 
 
+def _select_keyframes(
+    data: EuRoCMAVData,
+    feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
+    N: int,
+) -> list[int]:
+    """Adaptively choose which frames become factor-graph nodes.
+
+    A single PnP from the current reference keyframe to frame i yields both signals we need at
+    once: the temporal-match count (covisibility with the reference, which decays as we move
+    away) and the relative pose (motion since the reference). We open a new keyframe when overlap
+    drops below a fraction of the post-keyframe baseline, when enough translation/rotation has
+    accrued, or when a hard frame cap is hit -- all clamped by a min gap so we never place
+    near-duplicate nodes. Compared to a fixed stride this keeps large, well-conditioned baselines
+    when the camera moves fast and avoids zero-parallax nodes when it hovers.
+    """
+    MIN_GAP = 3                     # never place keyframes closer than this (avoid duplicate nodes)
+    MAX_GAP = 15                    # force a keyframe at least this often (bound IMU preint. drift)
+    COVIS_RATIO = 0.6               # new keyframe once covisibility falls below this * baseline
+    TRANS_THRESH = 0.2              # ... or once translation since the reference exceeds this [m]
+    ROT_THRESH = np.deg2rad(10.0)   # ... or rotation exceeds this [rad]
+
+    keyframes = [0]
+    ref_idx = 0
+    ref_covis: Optional[int] = None
+    i = 1
+    while i < N:
+        ref_fd = feature_detection_result.frames[ref_idx]
+        ref_sm = stereo_matching_result.frames[ref_idx]
+        cur_fd = feature_detection_result.frames[i]
+        try:
+            rvec, tvec, num_matches, _ = _run_pnp_step(
+                data, ref_sm.points_3d, ref_sm.matches,
+                ref_fd.cam0_descriptors, cur_fd.cam0_keypoints, cur_fd.cam0_descriptors,
+            )
+        except Exception:
+            # Overlap with the reference is gone: anchor a keyframe at the last connected frame
+            # (or one past the reference if that is already frame i-1), then re-evaluate i.
+            kf = max(i - 1, ref_idx + 1)
+            keyframes.append(kf)
+            ref_idx, ref_covis = kf, None
+            i = kf + 1
+            continue
+
+        if ref_covis is None:  # first frame after a keyframe sets the covisibility baseline
+            ref_covis = num_matches
+
+        gap = i - ref_idx
+        translation = float(np.linalg.norm(tvec))
+        rotation = float(np.linalg.norm(rvec))
+
+        force = gap >= MAX_GAP
+        allow = gap >= MIN_GAP
+        weak = num_matches < COVIS_RATIO * ref_covis
+        moved = translation > TRANS_THRESH or rotation > ROT_THRESH
+
+        if force or (allow and (weak or moved)):
+            keyframes.append(i)
+            ref_idx, ref_covis = i, None
+        i += 1
+
+    if keyframes[-1] != N - 1:
+        keyframes.append(N - 1)
+    return keyframes
+
+
 def _run_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
@@ -442,11 +508,10 @@ def _run_gtsam(
     i0 = int(np.argmin(np.abs(imu_timestamps_ns - cam_timestamps_ns[0])))
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
-    # Only keep every KEYFRAME_STRIDE-th frame as a node in the factor graph. Fewer, more
-    # widely spaced nodes keep the graph small and give each PnP/IMU factor enough baseline
-    # to be well-conditioned. keyframe_indices maps graph node j -> original frame index.
-    KEYFRAME_STRIDE = 10
-    keyframe_indices = list(range(0, N, KEYFRAME_STRIDE))
+    # Choose the factor-graph nodes adaptively (covisibility + motion, clamped by min/max frame
+    # gaps) instead of a fixed stride, so keyframes stay well-conditioned across varying motion.
+    # keyframe_indices maps graph node j -> original frame index; gaps between them now vary.
+    keyframe_indices = _select_keyframes(data, feature_detection_result, stereo_matching_result, N)
     K = len(keyframe_indices)
 
     X = lambda i: gtsam.symbol('x', i)
@@ -466,10 +531,10 @@ def _run_gtsam(
     # Loose enough that the optimizer can actually estimate the (constant) IMU bias. A tight
     # prior here pins bias to zero, so the real accelerometer bias double-integrates into drift.
     PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
-    # Per-step (adjacent-frame) PnP sigmas. The keyframe constraint chains KEYFRAME_STRIDE of
-    # these, so its error accumulates like a random walk -> scale the sigmas by sqrt(stride).
+    # Per-step (adjacent-frame) PnP sigmas. A keyframe constraint chains the intermediate steps,
+    # so its error accumulates like a random walk -> scale the sigmas by sqrt(gap) per interval,
+    # where gap is that interval's frame count. Built inside the loop since gaps now vary.
     PNP_STEP_SIGMAS  = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
-    PNP_NOISE        = gtsam.noiseModel.Diagonal.Sigmas(PNP_STEP_SIGMAS * np.sqrt(KEYFRAME_STRIDE))
     # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
     # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
     BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
@@ -631,7 +696,8 @@ def _run_gtsam(
             if pnp_ok:
                 pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
                 pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
-                new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, PNP_NOISE))
+                pnp_noise = gtsam.noiseModel.Diagonal.Sigmas(PNP_STEP_SIGMAS * np.sqrt(kf_next - kf_i))
+                new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, pnp_noise))
                 pose_init = pose_i.compose(pnp_delta)
 
         new_values.insert(X(j + 1), pose_init)
