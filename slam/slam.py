@@ -121,9 +121,10 @@ def _align_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def _get_ground_truth_result(
     data: EuRoCMAVData,
     first_timestamp_ns: int,
+    min_timestamp_ns: int,
     max_timestamp_ns: int,
 ) -> SlamGroundTruthResult:
-    samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
+    samples = [s for s in data.ground_truth_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
     times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
     positions = np.array([s.position for s in samples])
     rotation_matrices = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in samples])
@@ -150,10 +151,12 @@ def _get_ground_truth_result(
 def _get_imu_result(
     data: EuRoCMAVData,
     first_timestamp_ns: int,
+    min_timestamp_ns: int,
     max_timestamp_ns: int,
     gt_rotation_matrices: np.ndarray,
+    first_gt_timestamp_ns: int,
 ) -> SlamImuResult:
-    samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
+    samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
     times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
     linear_accelerations = np.array([s.linear_acceleration for s in samples])
     angular_velocities = np.array([s.angular_velocity for s in samples])
@@ -165,7 +168,7 @@ def _get_imu_result(
         rotation_matrices_list.append(prev_rotation_matrix)
 
     timestamps_ns = np.array([s.timestamp_ns for s in samples])
-    index_closest_to_first_gt_sample = np.argmin(np.abs(timestamps_ns - data.ground_truth_samples[0].timestamp_ns))
+    index_closest_to_first_gt_sample = np.argmin(np.abs(timestamps_ns - first_gt_timestamp_ns))
     compensation_rotation_matrix = gt_rotation_matrices[0] @ rotation_matrices_list[index_closest_to_first_gt_sample].T
     for i in range(len(rotation_matrices_list)):
         rotation_matrices_list[i] = compensation_rotation_matrix @ rotation_matrices_list[i]
@@ -744,13 +747,14 @@ def _get_extra_result(
     data: EuRoCMAVData,
     gt_result: SlamGroundTruthResult,
     imu_result: SlamImuResult,
+    min_timestamp_ns: int,
     max_timestamp_ns: int,
     gravity: np.ndarray,
 ) -> SlamExtraResult:
 
-    gt_samples = [s for s in data.ground_truth_samples if s.timestamp_ns <= max_timestamp_ns]
+    gt_samples = [s for s in data.ground_truth_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
     gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
-    imu_timestamps_ns = np.array([s.timestamp_ns for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns])
+    imu_timestamps_ns = np.array([s.timestamp_ns for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns])
     closest_gt_indices = np.argmin(np.abs(gt_timestamps_ns[:, None] - imu_timestamps_ns[None, :]), axis=0)
     linear_accelerations_in_world = np.array([
         gt_result.rotation_matrices[idx] @ acc
@@ -770,13 +774,26 @@ def _compute(
     set_progress: Callable[[float, str], None],
 ) -> SlamResult:
     first_timestamp_ns = data.cam_timestamps_ns[0]
+    # SLAM runs on the frames sliced to the config's [start_s, start_s + duration_s] window,
+    # so the first stereo frame marks the window start. Trimming GT/IMU/extra to the same
+    # lower bound makes every series' time axis begin at start_s (times stay relative to the
+    # dataset start), matching the PnP/GTSAM series that are already windowed.
+    min_timestamp_ns = stereo_matching_result.frames[0].timestamp_ns
     max_timestamp_ns = stereo_matching_result.frames[-1].timestamp_ns
 
     gravity = np.array([0.0, 0.0, -9.81])
 
-    gt_result = _get_ground_truth_result(data, first_timestamp_ns, max_timestamp_ns)
+    gt_result = _get_ground_truth_result(data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns)
 
-    imu_result = _get_imu_result(data, first_timestamp_ns, max_timestamp_ns, gt_result.rotation_matrices)
+    # Anchor the IMU-integrated orientation to GT at the first GT sample inside the window
+    # (i.e. gt_result's first sample, which is gt_rotation_matrices[0]).
+    first_gt_timestamp_ns = next(
+        s.timestamp_ns for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns
+    )
+    imu_result = _get_imu_result(
+        data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
+        gt_result.rotation_matrices, first_gt_timestamp_ns,
+    )
 
     set_progress(0.0, "Running PnP...")
     pnp_t0 = time.monotonic()
@@ -796,7 +813,7 @@ def _compute(
     gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
     set_progress(0.95, "Finishing...")
-    extra_result = _get_extra_result(data, gt_result, imu_result, max_timestamp_ns, gravity)
+    extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
     return SlamResult(
         gt=gt_result,
         imu=imu_result,
