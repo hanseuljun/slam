@@ -233,60 +233,6 @@ def _run_pnp_step(
     return rotation_vector, translation_vector, len(temporal_good_matches), reprojection_error
 
 
-def _loop_closure_pnp(
-    data: EuRoCMAVData,
-    points_3d: np.ndarray,
-    stereo_matches: list,
-    cam0_descriptors_ref: np.ndarray,
-    cam0_keypoints_cur,
-    cam0_descriptors_cur: np.ndarray,
-) -> tuple[Optional[np.ndarray], int]:
-    """Direct wide-baseline PnP between two (candidate revisiting) keyframes for loop closure.
-
-    Matches the reference keyframe's stereo-triangulated 3D points to the current keyframe's cam0
-    keypoints and solves PnP+RANSAC. Returns ``(cam0_ref_T_cam0_cur, n_inliers)`` -- the relative
-    camera pose as a 4x4 and the RANSAC inlier count -- or ``(None, 0)`` if there is nothing to
-    solve. Unlike ``_run_pnp_step`` this reports the inlier count (the strict geometric gate that
-    lets loop closure skip appearance-consistency filtering) and never raises: a failed solve is a
-    rejected loop, not an error. The reference and current keyframes are far apart in time, but a
-    true loop revisits the same place, so a single direct match is well-conditioned.
-    """
-    if cam0_descriptors_ref is None or cam0_descriptors_cur is None:
-        return None, 0
-    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_matches)}
-
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    matches = bf.knnMatch(cam0_descriptors_ref, cam0_descriptors_cur, k=2)
-    good = [m for m, n in matches if m.distance < 0.75 * n.distance]
-
-    object_points, image_points = [], []
-    for m in good:
-        if m.queryIdx in cam0_idx_to_3d_idx:
-            object_points.append(points_3d[:, cam0_idx_to_3d_idx[m.queryIdx]])
-            image_points.append(cam0_keypoints_cur[m.trainIdx].pt)
-    if len(object_points) < 6:  # need >= 4 for PnP; a little margin
-        return None, 0
-
-    intrinsics_matrix = data.cam0_intrinsics.to_matrix()
-    dist_coeffs = np.array([
-        data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
-        data.cam0_intrinsics.p1, data.cam0_intrinsics.p2,
-    ])
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(
-        np.array(object_points, dtype=np.float64),
-        np.array(image_points, dtype=np.float64),
-        intrinsics_matrix, dist_coeffs)
-    if not success or inliers is None:
-        return None, 0
-
-    # solvePnPRansac gives cam0_cur_T_cam0_ref (projects the reference 3D points into the current
-    # image); invert to the cam0_ref -> cam0_cur transform the between-factor convention expects.
-    R, _ = cv2.Rodrigues(rvec)
-    cur_T_ref = np.eye(4)
-    cur_T_ref[:3, :3], cur_T_ref[:3, 3] = R, tvec.flatten()
-    return np.linalg.inv(cur_T_ref), int(len(inliers))
-
-
 def _run_pnp(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
@@ -795,77 +741,6 @@ def _run_gtsam(
 
     print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
           f"{n_proj_factors} reprojection factors")
-
-    # --- Loop closure (rung 3: correct global drift on revisits) ------------------------
-    # The forward pass only ever links temporally-nearby keyframes, so error accumulates as
-    # drift. When the camera revisits a place, matching the current keyframe back to the old one
-    # gives a long-range relative-pose constraint that ties the trajectory together and lets the
-    # optimizer redistribute the accumulated drift.
-    #
-    # Detect -> verify -> constrain:
-    #   * Detect: brute-force ORB match each keyframe against every *older* keyframe separated by
-    #     at least MIN_LOOP_TRAVEL of accumulated path length; keep the best-scoring candidate.
-    #     Path length (not keyframe-index gap) is the discriminator: with adaptive keyframing a
-    #     slow hover packs many keyframes into one spot, so index gap alone would "close loops"
-    #     between poses centimetres apart -- redundant, not drift-correcting. Path length is
-    #     drift-robust and, unlike gating on endpoint proximity, is not circular: a real loop
-    #     travels a long way *between* two views that still look the same.
-    #   * Verify: metric stereo-PnP between the pair (_loop_closure_pnp). The RANSAC inlier count
-    #     is the real gate -- strict here (LOOP_MIN_INLIERS) so a wrong place can't get in. This
-    #     is why no appearance-consistency filtering is needed.
-    #   * Constrain: a robust (Huber) BetweenFactorPose3, loose relative to sequential PnP since a
-    #     wide-baseline match is less certain; the robust kernel keeps a stray loop from folding
-    #     the map. Feed the loop factors to ISAM2 and relinearize.
-    MIN_LOOP_TRAVEL = 2.0        # min path length [m] between the two views for a real loop
-    LOOP_APPEARANCE_MIN = 40     # min ratio-test matches before a candidate is worth verifying
-    LOOP_MIN_INLIERS = 25        # RANSAC inliers required to accept a loop -- the strict gate
-    LOOP_SIGMAS = np.array([0.05, 0.05, 0.05, 0.3, 0.3, 0.3])  # [rot(3) rad, trans(3) m], loose
-    LOOP_NOISE = gtsam.noiseModel.Robust.Create(
-        gtsam.noiseModel.mEstimator.Huber.Create(1.345),
-        gtsam.noiseModel.Diagonal.Sigmas(LOOP_SIGMAS))
-
-    # Cumulative path length along the current (pre-loop) trajectory: cum_path[j] is the arc
-    # length from node 0 to node j. cum_path[q] - cum_path[a] is how far the camera actually
-    # travelled between the two keyframes.
-    pre = isam2.calculateEstimate()
-    kf_positions = np.array([pre.atPose3(X(j)).translation() for j in range(K)])
-    cum_path = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(kf_positions, axis=0), axis=1))])
-
-    kf_descs = [feature_detection_result.frames[kf].cam0_descriptors for kf in keyframe_indices]
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    loop_factors = gtsam.NonlinearFactorGraph()
-    n_loops = 0
-    for q in range(K):
-        best_a, best_score = -1, 0
-        for a in range(q):
-            if cum_path[q] - cum_path[a] < MIN_LOOP_TRAVEL:
-                break  # a is too close along the path (and only gets closer as a grows)
-            if kf_descs[a] is None or kf_descs[q] is None:
-                continue
-            pairs = bf.knnMatch(kf_descs[a], kf_descs[q], k=2)
-            score = sum(1 for p in pairs if len(p) == 2 and p[0].distance < 0.75 * p[1].distance)
-            if score > best_score:
-                best_score, best_a = score, a
-        if best_a < 0 or best_score < LOOP_APPEARANCE_MIN:
-            continue
-        sm_a = stereo_matching_result.frames[keyframe_indices[best_a]]
-        cur_fd = feature_detection_result.frames[keyframe_indices[q]]
-        T_a_q_cam0, n_inliers = _loop_closure_pnp(
-            data, sm_a.points_3d, sm_a.matches,
-            kf_descs[best_a], cur_fd.cam0_keypoints, kf_descs[q])
-        if T_a_q_cam0 is None or n_inliers < LOOP_MIN_INLIERS:
-            continue
-        loop_body = body_T_cam0 @ T_a_q_cam0 @ cam0_T_body
-        loop_pose = gtsam.Pose3(gtsam.Rot3(loop_body[:3, :3]), gtsam.Point3(*loop_body[:3, 3]))
-        loop_factors.add(gtsam.BetweenFactorPose3(X(best_a), X(q), loop_pose, LOOP_NOISE))
-        n_loops += 1
-
-    if n_loops:
-        isam2.update(loop_factors, gtsam.Values())
-        for _ in range(5):  # extra iterations so the loop's correction propagates and converges
-            isam2.update()
-    print(f"loop closure: {n_loops} edges added")
-
     final = isam2.calculateEstimate()
     poses = [final.atPose3(X(j)).matrix() for j in range(K)]
     velocities = [final.atVector(V(j)) for j in range(K)]
