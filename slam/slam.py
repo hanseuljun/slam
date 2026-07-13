@@ -421,6 +421,7 @@ def _select_keyframes(
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     N: int,
+    on_progress: Optional[Callable[[float], None]] = None,
 ) -> list[int]:
     """Adaptively choose which frames become factor-graph nodes.
 
@@ -443,6 +444,8 @@ def _select_keyframes(
     ref_covis: Optional[int] = None
     i = 1
     while i < N:
+        if on_progress is not None:
+            on_progress(i / N)
         ref_fd = feature_detection_result.frames[ref_idx]
         ref_sm = stereo_matching_result.frames[ref_idx]
         cur_fd = feature_detection_result.frames[i]
@@ -488,7 +491,7 @@ def _run_gtsam(
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list[ImuSample],
     gravity: np.ndarray,
-    on_progress: Callable[[float], None],
+    on_progress: Callable[[float, str], None],
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -515,10 +518,17 @@ def _run_gtsam(
     i0 = int(np.argmin(np.abs(imu_timestamps_ns - cam_timestamps_ns[0])))
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
+    # Progress budget across this stage's sub-steps (fractions of the GTSAM phase):
+    #   keyframe selection [0.00, 0.30]  (a PnP per frame -- the slowest silent step)
+    #   landmark tracks    [0.30, 0.40]
+    #   ISAM2 forward loop [0.40, 0.92]
+    #   reprojection metrics [0.92, 1.00]
     # Choose the factor-graph nodes adaptively (covisibility + motion, clamped by min/max frame
     # gaps) instead of a fixed stride, so keyframes stay well-conditioned across varying motion.
     # keyframe_indices maps graph node j -> original frame index; gaps between them now vary.
-    keyframe_indices = _select_keyframes(data, feature_detection_result, stereo_matching_result, N)
+    keyframe_indices = _select_keyframes(
+        data, feature_detection_result, stereo_matching_result, N,
+        on_progress=lambda p: on_progress(p * 0.30, "Selecting keyframes..."))
     K = len(keyframe_indices)
 
     X = lambda i: gtsam.symbol('x', i)
@@ -578,6 +588,7 @@ def _run_gtsam(
     # factors, so it is negligible for well-observed landmarks.
     LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
 
+    on_progress(0.30, "Building landmark tracks...")
     tracks = _build_landmark_tracks(
         data, feature_detection_result, stereo_matching_result, keyframe_indices,
         MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX, FUND_RANSAC_PX)
@@ -654,7 +665,7 @@ def _run_gtsam(
     isam2.update(f0, v0)
 
     for j in range(K - 1):
-        on_progress(j / (K - 1))
+        on_progress(0.40 + (j / (K - 1)) * (0.92 - 0.40), "Optimizing (ISAM2)...")
         est = isam2.calculateEstimate()
         pose_i = est.atPose3(X(j))
         vel_i  = est.atVector(V(j))
@@ -741,6 +752,7 @@ def _run_gtsam(
 
     print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
           f"{n_proj_factors} reprojection factors")
+    on_progress(0.92, "Computing metrics...")
     final = isam2.calculateEstimate()
     poses = [final.atPose3(X(j)).matrix() for j in range(K)]
     velocities = [final.atVector(V(j)) for j in range(K)]
@@ -785,15 +797,18 @@ def _get_gtsam_result(
     min_timestamp_ns: int,
     max_timestamp_ns: int,
     gravity: np.ndarray,
-    on_progress: Callable[[float], None],
+    on_progress: Callable[[float, str], None],
 ) -> SlamGtsamResult:
     # Window the IMU to [min, max]; only this range is ever integrated. Leaving the whole t=0
     # prefix in (as `<= max` alone did) needlessly grows the array -- and, at larger start_s,
     # pushes it past NumPy's temporary-elision size threshold (see the read-only guard in
     # _run_gtsam), so keeping it windowed is both cheaper and safer.
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
+    # _run_gtsam gets [0.00, 0.95] of this stage; the trajectory alignment below takes the rest.
     poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
-        data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
+        data, feature_detection_result, stereo_matching_result, imu_samples, gravity,
+        on_progress=lambda p, lbl: on_progress(p * 0.95, lbl))
+    on_progress(0.96, "Aligning to ground truth...")
     K = len(poses)
 
     kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
@@ -890,10 +905,15 @@ def _compute(
 
     gravity = np.array([0.0, 0.0, -9.81])
 
+    # Progress budget across the whole solver so every step advances the bar:
+    #   ground truth [0.00, 0.03]  IMU [0.03, 0.06]  PnP [0.06, 0.40]
+    #   GTSAM [0.40, 0.97]  extra/finishing [0.97, 1.00]
+    set_progress(0.0, "Loading ground truth...")
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns)
 
     # Anchor the IMU-integrated orientation to GT at the first GT sample inside the window
     # (i.e. gt_result's first sample, which is gt_rotation_matrices[0]).
+    set_progress(0.03, "Integrating IMU...")
     first_gt_timestamp_ns = next(
         s.timestamp_ns for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns
     )
@@ -902,25 +922,25 @@ def _compute(
         gt_result.rotation_matrices, first_gt_timestamp_ns,
     )
 
-    set_progress(0.0, "Running PnP...")
+    set_progress(0.06, "Running PnP...")
     pnp_t0 = time.monotonic()
     pnp_result = _get_pnp_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
-        on_progress=lambda p: set_progress(p / 2.0, "Running PnP..."),
+        on_progress=lambda p: set_progress(0.06 + p * (0.40 - 0.06), "Running PnP..."),
     )
     pnp_result.elapsed_time = time.monotonic() - pnp_t0
 
-    set_progress(2.0 / 4.0, "Running GTSAM optimization...")
     gtsam_t0 = time.monotonic()
     gtsam_result = _get_gtsam_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
         gravity=gravity,
-        on_progress=lambda p: set_progress(2.0 / 4.0 + p * (0.95 - 2.0 / 4.0), "Running GTSAM optimization..."),
+        on_progress=lambda p, lbl: set_progress(0.40 + p * (0.97 - 0.40), lbl),
     )
     gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
-    set_progress(0.95, "Finishing...")
+    set_progress(0.97, "Finishing...")
     extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
+    set_progress(1.0, "Done")
     return SlamResult(
         gt=gt_result,
         imu=imu_result,
