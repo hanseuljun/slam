@@ -65,7 +65,7 @@ def _plot_linear_accelerations(series: list[tuple[np.ndarray, np.ndarray, str]],
         for times, linear_accelerations, name in series:
             ax.plot(times, linear_accelerations[:, i], label=name)
         if gravity is not None:
-            ax.axhline(gravity[i], color='gray', linestyle='--', linewidth=1, label='gravity')
+            ax.axhline(-gravity[i], color='gray', linestyle='--', linewidth=1, label='-gravity')
         ax.set_xlabel('Time [s]')
         ax.set_ylabel(f'{label} [m/s²]')
         ax.legend()
