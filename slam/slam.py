@@ -492,6 +492,13 @@ def _run_gtsam(
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+    # Mark read-only: these absolute-ns timestamps are a lookup table we only ever *read* (via
+    # `imu_timestamps_ns - cam_timestamps_ns[0]` etc.). Without this, NumPy's temporary-elision
+    # optimization can execute that subtraction in place -- when this array is large (long IMU
+    # prefix) and has refcount 1, `a - scalar` mutates `a` and returns it -- silently turning
+    # every timestamp relative, emptying every IMU window, and producing zero-dt (degenerate)
+    # ImuFactors that make ISAM2 indeterminate. Read-only arrays are never elided.
+    imu_timestamps_ns.flags.writeable = False
     imu_lin_accs      = np.array([s.linear_acceleration for s in imu_samples])
     imu_ang_vels      = np.array([s.angular_velocity for s in imu_samples])
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames[:N]])
@@ -538,6 +545,12 @@ def _run_gtsam(
     # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
     # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
     BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+    # Fallback regularizer for a keyframe that ends up with neither a PnP between-factor nor any
+    # landmark reprojection factor -- e.g. fast motion where feature tracks break and the chained
+    # PnP fails. Such a pose would hang off only its IMU factor (yaw about gravity unobservable),
+    # making ISAM2's system indeterminate. A weak prior at the IMU-predicted pose pins the free
+    # directions without fighting real constraints; it is far looser than PnP/reprojection noise.
+    FALLBACK_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1.0)
 
     # --- Landmarks (rung 2: explicit structure / bundle adjustment) ---------------------
     # Persistent 3D landmarks tied to poses by reprojection factors. A point seen across
@@ -591,14 +604,21 @@ def _run_gtsam(
 
     def _process_node_landmarks(jj: int, est: gtsam.Values,
                                 factors: gtsam.NonlinearFactorGraph,
-                                values: gtsam.Values) -> None:
-        """Add reprojection factors for landmarks observed at node jj (X(jj) already staged)."""
+                                values: gtsam.Values) -> int:
+        """Add reprojection factors for landmarks observed at node jj (X(jj) already staged).
+
+        Returns how many landmark observations were staged *at node jj* -- i.e. how many
+        projection factors now reference X(jj). The caller uses this to tell whether the new
+        pose picked up any structure constraint (see the underconstrained-pose guard below).
+        """
+        n_at_node = 0
         for tid in nodes_to_tracks[jj]:
             obs = tracks[tid]
             if tid in inserted_landmarks:
                 if (tid, jj) not in added_obs:
                     o = next(o for o in obs if o[0] == jj)
                     _add_obs_factors(factors, tid, jj, o[1], o[2])
+                    n_at_node += 1
                 continue
             avail = [o for o in obs if o[0] <= jj]
             if len(avail) < MIN_TRACK_LEN:
@@ -612,6 +632,9 @@ def _run_gtsam(
             inserted_landmarks.add(tid)
             for o in avail:
                 _add_obs_factors(factors, tid, o[0], o[1], o[2])
+                if o[0] == jj:
+                    n_at_node += 1
+        return n_at_node
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
@@ -674,6 +697,7 @@ def _run_gtsam(
         # otherwise the new pose would be left underconstrained (indeterminate system).
         strong_covis = sum(
             1 for tid in (node_seen[j] & node_seen[j + 1]) if tid in inserted_landmarks)
+        pnp_added = False
         if strong_covis < PNP_FALLBACK_COVIS:
             pnp_cam0 = np.eye(4)
             pnp_ok = True
@@ -699,6 +723,7 @@ def _run_gtsam(
                 pnp_noise = gtsam.noiseModel.Diagonal.Sigmas(PNP_STEP_SIGMAS * np.sqrt(kf_next - kf_i))
                 new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, pnp_noise))
                 pose_init = pose_i.compose(pnp_delta)
+                pnp_added = True
 
         new_values.insert(X(j + 1), pose_init)
         new_values.insert(V(j + 1), vel_init)
@@ -706,7 +731,12 @@ def _run_gtsam(
         # Reprojection factors for landmarks observed at the new keyframe. X(j+1) is staged in
         # new_values (valid within this same update); landmark inits use poses from `est`, all
         # of which predate node j+1, so they are already in the estimate.
-        _process_node_landmarks(j + 1, est, new_factors, new_values)
+        n_proj_at_next = _process_node_landmarks(j + 1, est, new_factors, new_values)
+        # Guard: never add a keyframe without a relative constraint. If neither the PnP fallback
+        # nor any landmark reprojection factor touched X(j+1), it would hang off only its IMU
+        # factor and make ISAM2 indeterminate. Anchor it with a weak prior at the IMU prediction.
+        if not pnp_added and n_proj_at_next == 0:
+            new_factors.add(gtsam.PriorFactorPose3(X(j + 1), pose_init, FALLBACK_POSE_NOISE))
         isam2.update(new_factors, new_values)
 
     print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
@@ -757,7 +787,11 @@ def _get_gtsam_result(
     gravity: np.ndarray,
     on_progress: Callable[[float], None],
 ) -> SlamGtsamResult:
-    imu_samples = [s for s in data.imu_samples if s.timestamp_ns <= max_timestamp_ns]
+    # Window the IMU to [min, max]; only this range is ever integrated. Leaving the whole t=0
+    # prefix in (as `<= max` alone did) needlessly grows the array -- and, at larger start_s,
+    # pushes it past NumPy's temporary-elision size threshold (see the read-only guard in
+    # _run_gtsam), so keeping it windowed is both cheaper and safer.
+    imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
     poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
         data, feature_detection_result, stereo_matching_result, imu_samples, gravity, on_progress)
     K = len(poses)
