@@ -233,57 +233,15 @@ def _run_pnp_step(
     return rotation_vector, translation_vector, len(temporal_good_matches), reprojection_error
 
 
-def _run_pnp(
-    data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
-    stereo_matching_result: StereoMatchingResult,
-    on_progress: Callable[[float], None],
-) -> list[np.ndarray]:
-    keyframe_indices: list[int] = [0]
-    keyframe_num_temporal_matches: Optional[int] = None
-    pnp_poses: list[np.ndarray] = [np.eye(4)]
-    n = len(stereo_matching_result.frames)
-    for i in range(1, n):
-        on_progress(i / n)
-        try:
-            kf_idx = keyframe_indices[-1]
-            kf_fd = feature_detection_result.frames[kf_idx]
-            kf_sm = stereo_matching_result.frames[kf_idx]
-            cf_fd = feature_detection_result.frames[i]
-            rotation_vector, translation_vector, num_temporal_matches, _ = _run_pnp_step(
-                data,
-                kf_sm.points_3d, kf_sm.matches,
-                kf_fd.cam0_descriptors,
-                cf_fd.cam0_keypoints, cf_fd.cam0_descriptors,
-            )
-        except Exception as e:
-            print(f"_run_pnp_step failed at i={i}: {e}")
-            continue
-        if keyframe_num_temporal_matches is None:
-            keyframe_num_temporal_matches = num_temporal_matches
-        rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-        transform = np.eye(4)
-        transform[:3, :3] = rotation_matrix
-        transform[:3, 3] = translation_vector.flatten()
-        pnp_poses.append(pnp_poses[keyframe_indices[-1]] @ transform)
-        if num_temporal_matches < keyframe_num_temporal_matches / 2:
-            keyframe_indices.append(i)
-            keyframe_num_temporal_matches = None
-    return pnp_poses
-
-
 def _get_pnp_result(
     data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     first_timestamp_ns: int,
     min_timestamp_ns: int,
-    on_progress: Callable[[float], None],
+    pnp_poses: list[np.ndarray],
 ) -> SlamPnpResult:
-    pnp_poses = _run_pnp(
-        data, feature_detection_result, stereo_matching_result, on_progress,
-    )
-
+    # pnp_poses is the per-frame cam0 dead-reckoning trajectory from the shared keyframe scan
+    # (_scan_keyframes) -- no separate PnP pass is run here.
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
     # Anchor the trajectory to GT at the first GT sample inside the window (after start_s),
     # not the dataset's first sample -- otherwise the windowed poses get aligned to a GT pose
@@ -416,30 +374,42 @@ def _build_landmark_tracks(
     return kept
 
 
-def _select_keyframes(
+def _scan_keyframes(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
     N: int,
     on_progress: Optional[Callable[[float], None]] = None,
-) -> list[int]:
-    """Adaptively choose which frames become factor-graph nodes.
+) -> tuple[list[int], list[np.ndarray]]:
+    """Single per-frame PnP scan that yields BOTH the factor-graph nodes and a per-frame PnP
+    trajectory, so the ref->frame ORB matching (the SLAM stage's dominant cost) is done once
+    rather than separately for keyframe selection and the PnP diagnostic.
 
-    A single PnP from the current reference keyframe to frame i yields both signals we need at
-    once: the temporal-match count (covisibility with the reference, which decays as we move
-    away) and the relative pose (motion since the reference). We open a new keyframe when overlap
-    drops below a fraction of the post-keyframe baseline, when enough translation/rotation has
-    accrued, or when a hard frame cap is hit -- all clamped by a min gap so we never place
-    near-duplicate nodes. Compared to a fixed stride this keeps large, well-conditioned baselines
-    when the camera moves fast and avoids zero-parallax nodes when it hovers.
+    Adaptive keyframing: a single PnP from the current reference keyframe to frame i yields both
+    signals we need at once -- the temporal-match count (covisibility with the reference, which
+    decays as we move away) and the relative pose (motion since the reference). We open a new
+    keyframe when overlap drops below a fraction of the post-keyframe baseline, when enough
+    translation/rotation has accrued, or when a hard frame cap is hit -- all clamped by a min gap
+    so we never place near-duplicate nodes. Compared to a fixed stride this keeps large,
+    well-conditioned baselines when the camera moves fast and avoids zero-parallax nodes when it
+    hovers. The chained relative poses are also returned as a per-frame cam0 dead-reckoning
+    trajectory for the PnP diagnostic view.
     """
     MIN_GAP = 3                     # never place keyframes closer than this (avoid duplicate nodes)
     MAX_GAP = 15                    # force a keyframe at least this often (bound IMU preint. drift)
     COVIS_RATIO = 0.6               # new keyframe once covisibility falls below this * baseline
     TRANS_THRESH = 0.2              # ... or once translation since the reference exceeds this [m]
     ROT_THRESH = np.deg2rad(10.0)   # ... or rotation exceeds this [rad]
+    # This probe only needs a covisibility *count* and a rough relative pose to decide where to
+    # place nodes -- not a precise reconstruction. ORB brute-force matching is O(features^2) and
+    # dominates the whole SLAM stage, so match only the strongest PROBE_N descriptors (ORB returns
+    # them response-ordered). The covisibility ratio is scale-free (baseline and current are both
+    # capped the same way), so placement is essentially unchanged at a fraction of the cost.
+    PROBE_N = 500
 
     keyframes = [0]
+    poses: list[Optional[np.ndarray]] = [None] * N
+    poses[0] = np.eye(4)
     ref_idx = 0
     ref_covis: Optional[int] = None
     i = 1
@@ -452,16 +422,24 @@ def _select_keyframes(
         try:
             rvec, tvec, num_matches, _ = _run_pnp_step(
                 data, ref_sm.points_3d, ref_sm.matches,
-                ref_fd.cam0_descriptors, cur_fd.cam0_keypoints, cur_fd.cam0_descriptors,
+                ref_fd.cam0_descriptors[:PROBE_N], cur_fd.cam0_keypoints, cur_fd.cam0_descriptors[:PROBE_N],
             )
         except Exception:
             # Overlap with the reference is gone: anchor a keyframe at the last connected frame
             # (or one past the reference if that is already frame i-1), then re-evaluate i.
             kf = max(i - 1, ref_idx + 1)
             keyframes.append(kf)
+            if poses[kf] is None:  # this frame never got its own PnP; carry the reference pose
+                poses[kf] = poses[ref_idx]
             ref_idx, ref_covis = kf, None
             i = kf + 1
             continue
+
+        # Chain the reference->i transform onto the reference pose for the per-frame trajectory.
+        step = np.eye(4)
+        step[:3, :3], _ = cv2.Rodrigues(rvec)
+        step[:3, 3] = tvec.flatten()
+        poses[i] = poses[ref_idx] @ step
 
         if ref_covis is None:  # first frame after a keyframe sets the covisibility baseline
             ref_covis = num_matches
@@ -482,7 +460,13 @@ def _select_keyframes(
 
     if keyframes[-1] != N - 1:
         keyframes.append(N - 1)
-    return keyframes
+    # Forward-fill any frame that never received a pose (rare: skipped by an exception jump).
+    last = np.eye(4)
+    filled = []
+    for p in poses:
+        last = p if p is not None else last
+        filled.append(last)
+    return keyframes, filled
 
 
 def _run_gtsam(
@@ -491,6 +475,7 @@ def _run_gtsam(
     stereo_matching_result: StereoMatchingResult,
     imu_samples: list[ImuSample],
     gravity: np.ndarray,
+    keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
@@ -519,16 +504,11 @@ def _run_gtsam(
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
     # Progress budget across this stage's sub-steps (fractions of the GTSAM phase):
-    #   keyframe selection [0.00, 0.30]  (a PnP per frame -- the slowest silent step)
-    #   landmark tracks    [0.30, 0.40]
-    #   ISAM2 forward loop [0.40, 0.92]
+    #   landmark tracks    [0.00, 0.10]
+    #   ISAM2 forward loop [0.10, 0.92]
     #   reprojection metrics [0.92, 1.00]
-    # Choose the factor-graph nodes adaptively (covisibility + motion, clamped by min/max frame
-    # gaps) instead of a fixed stride, so keyframes stay well-conditioned across varying motion.
-    # keyframe_indices maps graph node j -> original frame index; gaps between them now vary.
-    keyframe_indices = _select_keyframes(
-        data, feature_detection_result, stereo_matching_result, N,
-        on_progress=lambda p: on_progress(p * 0.30, "Selecting keyframes..."))
+    # keyframe_indices (from the shared _scan_keyframes pass) maps graph node j -> original frame
+    # index; gaps between them vary since nodes are chosen adaptively (covisibility + motion).
     K = len(keyframe_indices)
 
     X = lambda i: gtsam.symbol('x', i)
@@ -588,7 +568,7 @@ def _run_gtsam(
     # factors, so it is negligible for well-observed landmarks.
     LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
 
-    on_progress(0.30, "Building landmark tracks...")
+    on_progress(0.0, "Building landmark tracks...")
     tracks = _build_landmark_tracks(
         data, feature_detection_result, stereo_matching_result, keyframe_indices,
         MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX, FUND_RANSAC_PX)
@@ -665,7 +645,7 @@ def _run_gtsam(
     isam2.update(f0, v0)
 
     for j in range(K - 1):
-        on_progress(0.40 + (j / (K - 1)) * (0.92 - 0.40), "Optimizing (ISAM2)...")
+        on_progress(0.10 + (j / (K - 1)) * (0.92 - 0.10), "Optimizing (ISAM2)...")
         est = isam2.calculateEstimate()
         pose_i = est.atPose3(X(j))
         vel_i  = est.atVector(V(j))
@@ -797,6 +777,7 @@ def _get_gtsam_result(
     min_timestamp_ns: int,
     max_timestamp_ns: int,
     gravity: np.ndarray,
+    keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
 ) -> SlamGtsamResult:
     # Window the IMU to [min, max]; only this range is ever integrated. Leaving the whole t=0
@@ -807,7 +788,7 @@ def _get_gtsam_result(
     # _run_gtsam gets [0.00, 0.95] of this stage; the trajectory alignment below takes the rest.
     poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
         data, feature_detection_result, stereo_matching_result, imu_samples, gravity,
-        on_progress=lambda p, lbl: on_progress(p * 0.95, lbl))
+        keyframe_indices, on_progress=lambda p, lbl: on_progress(p * 0.95, lbl))
     on_progress(0.96, "Aligning to ground truth...")
     K = len(poses)
 
@@ -922,19 +903,24 @@ def _compute(
         gt_result.rotation_matrices, first_gt_timestamp_ns,
     )
 
-    set_progress(0.06, "Running PnP...")
+    # Single per-frame PnP scan shared by the PnP diagnostic and GTSAM node selection: it returns
+    # both the keyframe indices (GTSAM nodes) and the per-frame cam0 dead-reckoning trajectory,
+    # so the expensive ref->frame ORB matching happens once instead of twice.
+    set_progress(0.06, "Selecting keyframes...")
     pnp_t0 = time.monotonic()
-    pnp_result = _get_pnp_result(
-        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
-        on_progress=lambda p: set_progress(0.06 + p * (0.40 - 0.06), "Running PnP..."),
+    keyframe_indices, pnp_poses = _scan_keyframes(
+        data, feature_detection_result, stereo_matching_result, len(stereo_matching_result.frames),
+        on_progress=lambda p: set_progress(0.06 + p * (0.45 - 0.06), "Selecting keyframes..."),
     )
+    pnp_result = _get_pnp_result(
+        data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, pnp_poses)
     pnp_result.elapsed_time = time.monotonic() - pnp_t0
 
     gtsam_t0 = time.monotonic()
     gtsam_result = _get_gtsam_result(
         data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
-        gravity=gravity,
-        on_progress=lambda p, lbl: set_progress(0.40 + p * (0.97 - 0.40), lbl),
+        gravity=gravity, keyframe_indices=keyframe_indices,
+        on_progress=lambda p, lbl: set_progress(0.45 + p * (0.97 - 0.45), lbl),
     )
     gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
