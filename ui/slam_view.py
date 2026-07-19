@@ -1,5 +1,5 @@
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 import matplotlib
 matplotlib.use('Agg')
@@ -285,6 +285,16 @@ class SlamViewModel:
         self._solver = None
 
 
+# Every figure texture on the model, in one place so slam_view can tell when the whole batch
+# has finished rendering (see the idling toggle at the end of slam_view).
+_FIGURE_TEX_ATTRS = [
+    "_tex_positions", "_tex_attitudes", "_tex_rotation_matrices", "_tex_velocities",
+    "_tex_biases", "_tex_diagnostics", "_tex_angular_velocities", "_tex_linear_accelerations",
+    "_tex_imu_attitudes", "_tex_imu_rotation_matrices", "_tex_imu_angular_velocities",
+    "_tex_imu_linear_accelerations",
+]
+
+
 def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
     changed = False
     labels = list(enabled)
@@ -318,82 +328,64 @@ def slam_view(model: SlamViewModel) -> None:
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
+    # Building all ~12 matplotlib figures takes ~3s; doing it in one frame freezes the window
+    # right after the solver finishes. Materialize at most one new figure per frame so the view
+    # appears immediately and plots pop in one by one while the UI stays responsive.
+    render_budget = [1]
+
+    def show(tex_attr: str, render_fn: Callable[[], np.ndarray]) -> None:
+        tex = getattr(model, tex_attr)
+        if tex is None:
+            if render_budget[0] <= 0:
+                imgui.text("Rendering plot...")
+                return
+            render_budget[0] -= 1
+            tex = image_to_texture(render_fn())
+            setattr(model, tex_attr, tex)
+        imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+
     if _checkboxes(model.pos_enabled, "pos"):
         model._tex_positions = None
-    if model._tex_positions is None:
-        model._tex_positions = image_to_texture(_render_positions(result, model.pos_enabled))
-    tex = model._tex_positions
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_positions", lambda: _render_positions(result, model.pos_enabled))
 
     if _checkboxes(model.att_enabled, "att"):
         model._tex_attitudes = None
         model._tex_rotation_matrices = None
-    if model._tex_attitudes is None:
-        model._tex_attitudes = image_to_texture(_render_attitudes(result, model.att_enabled))
-    tex = model._tex_attitudes
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-
-    if model._tex_rotation_matrices is None:
-        model._tex_rotation_matrices = image_to_texture(_render_rotation_matrices(result, model.att_enabled))
-    tex = model._tex_rotation_matrices
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_attitudes", lambda: _render_attitudes(result, model.att_enabled))
+    show("_tex_rotation_matrices", lambda: _render_rotation_matrices(result, model.att_enabled))
 
     if _checkboxes(model.vel_enabled, "vel"):
         model._tex_velocities = None
-    if model._tex_velocities is None:
-        model._tex_velocities = image_to_texture(_render_velocities(result, model.vel_enabled))
-    tex = model._tex_velocities
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_velocities", lambda: _render_velocities(result, model.vel_enabled))
 
     if _checkboxes(model.bias_enabled, "bias"):
         model._tex_biases = None
-    if model._tex_biases is None:
-        model._tex_biases = image_to_texture(_render_biases(result, model.bias_enabled))
-    tex = model._tex_biases
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_biases", lambda: _render_biases(result, model.bias_enabled))
 
-    if model._tex_diagnostics is None:
-        model._tex_diagnostics = image_to_texture(_render_gtsam_diagnostics(result))
-    tex = model._tex_diagnostics
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_diagnostics", lambda: _render_gtsam_diagnostics(result))
 
     if _checkboxes(model.omega_enabled, "omega"):
         model._tex_angular_velocities = None
-    if model._tex_angular_velocities is None:
-        model._tex_angular_velocities = image_to_texture(_render_angular_velocities(result, model.omega_enabled))
-    tex = model._tex_angular_velocities
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_angular_velocities", lambda: _render_angular_velocities(result, model.omega_enabled))
 
     if _checkboxes(model.lin_acc_enabled, "lin_acc"):
         model._tex_linear_accelerations = None
-    if model._tex_linear_accelerations is None:
-        model._tex_linear_accelerations = image_to_texture(_render_linear_accelerations(result, model.lin_acc_enabled))
-    tex = model._tex_linear_accelerations
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_linear_accelerations", lambda: _render_linear_accelerations(result, model.lin_acc_enabled))
     g = result.extra.gravity
     imgui.text(f"Gravity: [{g[0]:.4f}, {g[1]:.4f}, {g[2]:.4f}]")
 
     imgui.separator()
     imgui.text("IMU (Body Frame)")
 
-    if model._tex_imu_attitudes is None:
-        model._tex_imu_attitudes = image_to_texture(_render_imu_attitudes(result))
-    tex = model._tex_imu_attitudes
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-
-    if model._tex_imu_rotation_matrices is None:
-        model._tex_imu_rotation_matrices = image_to_texture(_render_imu_rotation_matrices(result))
-    tex = model._tex_imu_rotation_matrices
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-
-    if model._tex_imu_angular_velocities is None:
-        model._tex_imu_angular_velocities = image_to_texture(_render_imu_angular_velocities(result))
-    tex = model._tex_imu_angular_velocities
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
-
-    if model._tex_imu_linear_accelerations is None:
-        model._tex_imu_linear_accelerations = image_to_texture(_render_imu_linear_accelerations(result))
-    tex = model._tex_imu_linear_accelerations
-    imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
+    show("_tex_imu_attitudes", lambda: _render_imu_attitudes(result))
+    show("_tex_imu_rotation_matrices", lambda: _render_imu_rotation_matrices(result))
+    show("_tex_imu_angular_velocities", lambda: _render_imu_angular_velocities(result))
+    show("_tex_imu_linear_accelerations", lambda: _render_imu_linear_accelerations(result))
 
     imgui.end_child()
+
+    # Idling (the default) throttles redraws when there's no input, which would stall the
+    # per-frame figure rendering above. Keep frames flowing while any figure is still pending,
+    # then restore idling once everything is built.
+    pending = any(getattr(model, attr) is None for attr in _FIGURE_TEX_ATTRS)
+    hello_imgui.get_runner_params().fps_idling.enable_idling = not pending
