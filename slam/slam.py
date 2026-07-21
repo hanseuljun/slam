@@ -406,6 +406,17 @@ def _scan_keyframes(
     # them response-ordered). The covisibility ratio is scale-free (baseline and current are both
     # capped the same way), so placement is essentially unchanged at a fraction of the cost.
     PROBE_N = 500
+    # Never anchor a graph node on a "dead-vision" frame -- one with too few stereo matches to
+    # triangulate/observe landmarks (motion blur, low texture). Such a keyframe gets no landmark
+    # reprojection factors, so its pose leans entirely on a noisy chained PnP + the IMU factor;
+    # ISAM2 then reconciles their disagreement by spiking the gyro bias, corrupting the pose and
+    # injecting a permanent trajectory offset (see the ~20 s failure on MH_02_easy). The floor is
+    # ~1st percentile of per-frame stereo-match counts, so it only rejects the genuinely starved
+    # tail, not ordinary low-overlap keyframes. Dead nodes are dropped after selection (below).
+    MIN_KF_MATCHES = 80
+
+    def _stereo_count(frame_idx: int) -> int:
+        return len(stereo_matching_result.frames[frame_idx].matches)
 
     keyframes = [0]
     poses: list[Optional[np.ndarray]] = [None] * N
@@ -460,6 +471,20 @@ def _scan_keyframes(
 
     if keyframes[-1] != N - 1:
         keyframes.append(N - 1)
+
+    # Drop interior keyframes that landed on dead vision -- rather than pin a pose on a starved
+    # frame, merge its neighbours so the IMU factor carries the gap (extend the IMU-only interval).
+    # Keep the frame-0 anchor and the terminal node. Bound the merged gap so removing a run of dead
+    # frames can't open an unbounded IMU-only stretch; if it would, keep that node as the least-bad
+    # option to cap preintegration drift.
+    DROP_MAX_GAP = 2 * MAX_GAP
+    kept = [keyframes[0]]
+    for k in keyframes[1:-1]:
+        if _stereo_count(k) < MIN_KF_MATCHES and (k - kept[-1]) <= DROP_MAX_GAP:
+            continue
+        kept.append(k)
+    kept.append(keyframes[-1])
+    keyframes = kept
     # Forward-fill any frame that never received a pose (rare: skipped by an exception jump).
     last = np.eye(4)
     filled = []
