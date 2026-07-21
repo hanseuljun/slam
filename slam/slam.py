@@ -557,9 +557,16 @@ def _run_gtsam(
     # so its error accumulates like a random walk -> scale the sigmas by sqrt(gap) per interval,
     # where gap is that interval's frame count. Built inside the loop since gaps now vary.
     PNP_STEP_SIGMAS  = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
-    # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead
-    # of being pinned to a single constant, so real time-varying bias doesn't leak into drift.
-    BIAS_BETWEEN_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+    # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead of
+    # being pinned to a single constant. The accumulated std over an interval of duration dt is
+    # (diffusion_density * sqrt(dt)) per axis, so it is built inside the loop (keyframe gaps vary).
+    # The gyro term uses the IMU datasheet's physical diffusion (EuRoC ADIS16448, imu0/sensor.yaml)
+    # -- orders of magnitude tighter than the old blanket sigma=0.1, which permitted ~1 rad/s
+    # jumps per keyframe and let the optimizer absorb a pose/rotation error by spiking the gyro
+    # bias (the ~20 s MH_02_easy failure). Forcing that residual into the (vision-correctable) pose
+    # instead. The accel term stays loose (it also soaks up unmodeled gravity/scale error).
+    GYRO_BIAS_RW     = 1.9393e-05   # [rad/s^2/sqrt(Hz)] gyroscope_random_walk from imu0/sensor.yaml
+    ACCEL_BIAS_SIGMA = 0.1          # per-keyframe accel-bias random-walk sigma (unchanged)
     # Fallback regularizer for a keyframe that ends up with neither a PnP between-factor nor any
     # landmark reprojection factor -- e.g. fast motion where feature tracks break and the chained
     # PnP fails. Such a pose would hang off only its IMU factor (yaw about gravity unobservable),
@@ -691,8 +698,13 @@ def _run_gtsam(
             pim.integrateMeasurement(imu_lin_accs[k], imu_ang_vels[k], dt)
 
         new_factors.add(gtsam.ImuFactor(X(j), V(j), X(j + 1), V(j + 1), B(j), pim))
+        # Bias random-walk over this interval's duration: sigma = density * sqrt(dt) per axis,
+        # ordered [accel(3), gyro(3)] to match imuBias.ConstantBias's tangent.
+        dt_kf = float(cam_timestamps_ns[kf_next] - cam_timestamps_ns[kf_i]) * 1e-9
+        bias_between_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array(
+            [ACCEL_BIAS_SIGMA] * 3 + [GYRO_BIAS_RW * np.sqrt(dt_kf)] * 3))
         new_factors.add(gtsam.BetweenFactorConstantBias(
-            B(j), B(j + 1), gtsam.imuBias.ConstantBias(), BIAS_BETWEEN_NOISE))
+            B(j), B(j + 1), gtsam.imuBias.ConstantBias(), bias_between_noise))
 
         nav_j     = pim.predict(gtsam.NavState(pose_i, vel_i), bias_i)
         pose_init = nav_j.pose()
