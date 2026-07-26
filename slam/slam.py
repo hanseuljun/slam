@@ -591,6 +591,48 @@ def _run_gtsam(
     tracks = _build_landmark_tracks(
         data, feature_detection_result, stereo_matching_result, keyframe_indices,
         MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX, FUND_RANSAC_PX)
+
+    # MIN_KF_MATCHES (in _scan_keyframes) only rejects a keyframe with too few *stereo*
+    # (cam0-cam1, same-instant) matches. A keyframe can clear that easily -- plenty of L/R
+    # overlap -- and still land almost no landmark *tracks*, if temporal (frame-to-frame)
+    # matching is what's failing: a lighting swing or glare patch that changes the scene's
+    # appearance between keyframes without touching stereo overlap at all. Such a node gets
+    # too few reprojection factors to pin its pose, so ISAM2 reconciles the shortfall against
+    # the IMU factor by pulling the (deliberately loose, see ACCEL_BIAS_SIGMA above) accel
+    # bias instead -- the accel-bias runaway + position drift seen on MH_04_difficult ~46s.
+    # Floor is ~5th percentile of per-keyframe landmark counts on a clean run, so it only
+    # rejects the genuinely track-starved tail, not ordinary low-structure keyframes.
+    MIN_KF_LANDMARKS = 100
+    DROP_MAX_GAP = 30
+    landmark_counts_per_node = [0] * K
+    for obs in tracks.values():
+        for o in obs:
+            landmark_counts_per_node[o[0]] += 1
+    if any(c < MIN_KF_LANDMARKS for c in landmark_counts_per_node[1:-1]):
+        kept_positions = [0]
+        for pos in range(1, K - 1):
+            if (landmark_counts_per_node[pos] < MIN_KF_LANDMARKS
+                    and (keyframe_indices[pos] - keyframe_indices[kept_positions[-1]]) <= DROP_MAX_GAP):
+                continue
+            kept_positions.append(pos)
+        kept_positions.append(K - 1)
+        if len(kept_positions) != K:
+            # Re-key the *already-built* tracks onto the surviving nodes instead of asking
+            # _build_landmark_tracks to re-derive temporal matches over the now-wider gaps
+            # between them: that would re-run frame-to-frame descriptor matching across a
+            # bigger baseline exactly where appearance is already unstable, trading one
+            # starved node for worse tracks at every surviving neighbour (verified: rebuilding
+            # made position error worse, not better -- 0.62m -> 1.15m by t=50s on this dataset).
+            old_to_new = {old: new for new, old in enumerate(kept_positions)}
+            remapped_tracks = {}
+            for tid, obs in tracks.items():
+                filtered = [(old_to_new[o[0]], o[1], o[2], o[3]) for o in obs if o[0] in old_to_new]
+                if len(filtered) >= MIN_TRACK_LEN:
+                    remapped_tracks[tid] = filtered
+            tracks = remapped_tracks
+            keyframe_indices = [keyframe_indices[p] for p in kept_positions]
+            K = len(keyframe_indices)
+
     # node -> track ids observed there; and per-interval covisibility for the PnP gate.
     nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
     node_seen: list[set[int]] = [set() for _ in range(K)]
