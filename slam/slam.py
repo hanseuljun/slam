@@ -14,6 +14,8 @@ from slam.imu_initialization import ImuInitializationResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
+RPE_DELTA_S = 1.0  # RPE window: how far apart (in time) the two poses being compared are [s]
+
 
 @dataclass
 class SlamGroundTruthResult:
@@ -54,6 +56,18 @@ class SlamGtsamResult:
     velocities: np.ndarray
     biases: np.ndarray  # per-keyframe IMU bias, shape (K, 6): [accel(3), gyro(3)]
     position_errors: np.ndarray  # per-keyframe position error vs nearest GT sample [m], shape (K,)
+    # ATE: batch (whole-trajectory) yaw+translation alignment, then per-keyframe error. Yaw-only
+    # (not full 3D rotation) because gravity makes roll/pitch observable for a VIO system; letting
+    # the alignment absorb them would hide real error instead of exposing it. See Zhang &
+    # Scaramuzza, "A Tutorial on Quantitative Trajectory Evaluation for VIO", IROS 2018.
+    ate_position_errors: np.ndarray  # shape (K,) [m]
+    ate_rotation_errors: np.ndarray  # shape (K,) [deg]
+    # RPE: relative motion error over a fixed time window, alignment-free by construction (a
+    # constant misalignment cancels out of a relative transform), so it isolates local/per-step
+    # accuracy from the cumulative drift ATE reports. NaN where no keyframe falls within the
+    # window of the trajectory's end.
+    rpe_translation_errors: np.ndarray  # shape (K,) [m]
+    rpe_rotation_errors: np.ndarray  # shape (K,) [deg]
     reprojection_rmse: np.ndarray  # per-keyframe landmark reprojection RMSE [px], shape (K,)
     landmark_counts: np.ndarray  # per-keyframe number of observed landmarks, shape (K,)
     angular_velocity_times: np.ndarray
@@ -103,6 +117,84 @@ def _align_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         [-v[1], v[0], 0.0],
     ])
     return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
+
+
+def _rotation_angle_deg(rotation_matrix: np.ndarray) -> float:
+    """Geodesic angle of a rotation matrix (its distance from identity), in degrees."""
+    cos_angle = np.clip((np.trace(rotation_matrix) - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cos_angle)))
+
+
+def _yaw_translation_align(est_positions: np.ndarray, gt_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Least-squares rotation-about-z (yaw) + translation aligning est_positions to gt_positions.
+
+    Restricted to yaw rather than a full 3D (Umeyama) rotation: both trajectories are already
+    gravity-aligned (nav frame's z is "up"), and for a VIO system gravity makes roll/pitch
+    observable, so a full-rotation alignment could quietly absorb a real roll/pitch error instead
+    of reporting it. Closed form: for fixed yaw the optimal translation is the centroid offset;
+    substituting that in reduces the remaining 1D optimization to maximizing
+    A*cos(theta) + B*sin(theta), solved by theta = atan2(B, A).
+
+    Only observable when the trajectory has real horizontal spread: fit purely from positions, so
+    over a short or near-stationary window (e.g. EuRoC's static lead-in before takeoff) the
+    horizontal signal is too small to pin theta down, and the resulting yaw -- and therefore
+    ate_rotation_errors -- can be noisy or biased even though the fit is the true least-squares
+    optimum for that window. Not a defect in the estimate; a property of evaluating too short/still
+    a stretch. Prefer windows with a few meters of horizontal travel when reading ATE rotation.
+    """
+    p_mean, q_mean = est_positions.mean(axis=0), gt_positions.mean(axis=0)
+    p, q = est_positions - p_mean, gt_positions - q_mean
+    a = float(np.sum(q[:, 0] * p[:, 0] + q[:, 1] * p[:, 1]))
+    b = float(np.sum(q[:, 1] * p[:, 0] - q[:, 0] * p[:, 1]))
+    theta = np.arctan2(b, a)
+    c, s = np.cos(theta), np.sin(theta)
+    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    t = q_mean - R @ p_mean
+    return R, t
+
+
+def _compute_ate(
+    positions: np.ndarray, rotation_matrices: np.ndarray,
+    gt_positions: np.ndarray, gt_rotation_matrices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Absolute Trajectory Error: batch-align the whole estimated trajectory to ground truth
+    once (yaw + translation), then report per-keyframe position/rotation error after that single
+    alignment -- comparable to how other VIO/SLAM systems' ATE is usually reported."""
+    R, t = _yaw_translation_align(positions, gt_positions)
+    aligned_positions = positions @ R.T + t
+    position_errors = np.linalg.norm(aligned_positions - gt_positions, axis=1)
+    aligned_rotations = np.einsum('ij,kjl->kil', R, rotation_matrices)
+    rotation_errors = np.array([
+        _rotation_angle_deg(gt_rotation_matrices[i].T @ aligned_rotations[i])
+        for i in range(len(positions))
+    ])
+    return position_errors, rotation_errors
+
+
+def _compute_rpe(
+    times: np.ndarray, positions: np.ndarray, rotation_matrices: np.ndarray,
+    gt_positions: np.ndarray, gt_rotation_matrices: np.ndarray, delta_s: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Relative Pose Error: for each keyframe, compare the estimated relative motion over the
+    next delta_s seconds to ground truth's relative motion over the same interval. Needs no
+    alignment -- a constant misalignment cancels out of a relative (inv(T_i) @ T_j) transform --
+    so unlike ATE this isolates local/per-step accuracy from cumulative drift."""
+    K = len(times)
+    translation_errors = np.full(K, np.nan)
+    rotation_errors = np.full(K, np.nan)
+    for i in range(K):
+        if times[i] + delta_s > times[-1]:
+            continue
+        j = int(np.argmin(np.abs(times - (times[i] + delta_s))))
+        if j <= i:
+            continue
+        rel_est = np.linalg.inv(rotation_matrices[i]) @ (positions[j] - positions[i])
+        rel_est_R = rotation_matrices[i].T @ rotation_matrices[j]
+        rel_gt = gt_rotation_matrices[i].T @ (gt_positions[j] - gt_positions[i])
+        rel_gt_R = gt_rotation_matrices[i].T @ gt_rotation_matrices[j]
+        translation_errors[i] = float(np.linalg.norm(rel_est - rel_gt))
+        rotation_errors[i] = _rotation_angle_deg(rel_gt_R.T @ rel_est_R)
+    return translation_errors, rotation_errors
 
 
 def _get_ground_truth_result(
@@ -883,8 +975,24 @@ def _get_gtsam_result(
     # consistent with how positions are overlaid against GT in the view.
     gt_timestamps_ns = np.array([s.timestamp_ns for s in data.ground_truth_samples])
     gt_positions = np.array([s.position for s in data.ground_truth_samples])
+    gt_rotation_matrices_all = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in data.ground_truth_samples])
     nearest_gt = np.argmin(np.abs(cam_timestamps_ns[:, None] - gt_timestamps_ns[None, :]), axis=1)
     position_errors = np.linalg.norm(world_T_body_poses[:, :3, 3] - gt_positions[nearest_gt], axis=1)
+
+    # ATE / RPE use the *raw*, un-anchored poses (before T_comp): T_comp is a full 6-DOF
+    # transform derived from one GT sample's quaternion, so it can rotate the "up" axis away from
+    # true gravity-up -- the raw poses are still exactly the gravity-aligned nav frame _run_gtsam
+    # built, which _yaw_translation_align's roll/pitch-observable assumption depends on. RPE would
+    # be unaffected either way (a constant transform cancels out of a relative pose), but ATE's
+    # yaw-only alignment would not be consistent applied to the already-anchored poses.
+    raw_positions = np.array([p[:3, 3] for p in poses])
+    raw_rotation_matrices = np.array([p[:3, :3] for p in poses])
+    gt_positions_at_kf = gt_positions[nearest_gt]
+    gt_rotation_matrices_at_kf = gt_rotation_matrices_all[nearest_gt]
+    ate_position_errors, ate_rotation_errors = _compute_ate(
+        raw_positions, raw_rotation_matrices, gt_positions_at_kf, gt_rotation_matrices_at_kf)
+    rpe_translation_errors, rpe_rotation_errors = _compute_rpe(
+        times, raw_positions, raw_rotation_matrices, gt_positions_at_kf, gt_rotation_matrices_at_kf, RPE_DELTA_S)
 
     angular_velocities = []
     linear_accelerations = []
@@ -908,6 +1016,10 @@ def _get_gtsam_result(
         velocities=velocities_np,
         biases=np.array(biases),
         position_errors=position_errors,
+        ate_position_errors=ate_position_errors,
+        ate_rotation_errors=ate_rotation_errors,
+        rpe_translation_errors=rpe_translation_errors,
+        rpe_rotation_errors=rpe_rotation_errors,
         reprojection_rmse=reprojection_rmse,
         landmark_counts=landmark_counts,
         angular_velocity_times=times[:-1],

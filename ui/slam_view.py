@@ -10,7 +10,7 @@ from imgui_bundle import imgui, hello_imgui
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.imu_initialization import ImuInitializationResult
-from slam.slam import SlamResult, SlamSolver
+from slam.slam import RPE_DELTA_S, SlamResult, SlamSolver
 from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
@@ -131,6 +131,41 @@ def _plot_gtsam_diagnostics(times: np.ndarray, position_errors: np.ndarray,
     return fig
 
 
+def _plot_ate_rpe(times: np.ndarray, ate_position_errors: np.ndarray, ate_rotation_errors: np.ndarray,
+                   rpe_translation_errors: np.ndarray, rpe_rotation_errors: np.ndarray, rpe_delta_s: float) -> plt.Figure:
+    fig, (ax_ate_pos, ax_ate_rot, ax_rpe_trans, ax_rpe_rot) = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+    fig.suptitle('ATE / RPE (batch-aligned, yaw + translation)')
+
+    ate_rmse = float(np.sqrt(np.mean(ate_position_errors ** 2))) if len(ate_position_errors) else float('nan')
+    ax_ate_pos.plot(times, ate_position_errors, color='tab:red', marker='.', label='ATE position error')
+    ax_ate_pos.axhline(ate_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {ate_rmse:.3f} m')
+    ax_ate_pos.set_ylabel('ATE pos [m]')
+    ax_ate_pos.legend()
+
+    ate_rot_rmse = float(np.sqrt(np.mean(ate_rotation_errors ** 2))) if len(ate_rotation_errors) else float('nan')
+    ax_ate_rot.plot(times, ate_rotation_errors, color='tab:orange', marker='.', label='ATE rotation error')
+    ax_ate_rot.axhline(ate_rot_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {ate_rot_rmse:.3f} deg')
+    ax_ate_rot.set_ylabel('ATE rot [deg]')
+    ax_ate_rot.legend()
+
+    valid = ~np.isnan(rpe_translation_errors)
+    rpe_trans_rmse = float(np.sqrt(np.mean(rpe_translation_errors[valid] ** 2))) if np.any(valid) else float('nan')
+    ax_rpe_trans.plot(times, rpe_translation_errors, color='tab:blue', marker='.', label=f'RPE translation ({rpe_delta_s:g}s window)')
+    ax_rpe_trans.axhline(rpe_trans_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rpe_trans_rmse:.3f} m')
+    ax_rpe_trans.set_ylabel('RPE trans [m]')
+    ax_rpe_trans.legend()
+
+    rpe_rot_rmse = float(np.sqrt(np.mean(rpe_rotation_errors[valid] ** 2))) if np.any(valid) else float('nan')
+    ax_rpe_rot.plot(times, rpe_rotation_errors, color='tab:green', marker='.', label=f'RPE rotation ({rpe_delta_s:g}s window)')
+    ax_rpe_rot.axhline(rpe_rot_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rpe_rot_rmse:.3f} deg')
+    ax_rpe_rot.set_ylabel('RPE rot [deg]')
+    ax_rpe_rot.set_xlabel('Time [s]')
+    ax_rpe_rot.legend()
+
+    plt.tight_layout()
+    return fig
+
+
 def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Angular Velocity in World Frame') -> plt.Figure:
     fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
     fig.suptitle(title)
@@ -191,6 +226,13 @@ def _render_gtsam_diagnostics(results: SlamResult) -> np.ndarray:
         g.times, g.position_errors, g.reprojection_rmse, g.landmark_counts))
 
 
+def _render_ate_rpe(results: SlamResult) -> np.ndarray:
+    g = results.gtsam
+    return figure_to_image(_plot_ate_rpe(
+        g.times, g.ate_position_errors, g.ate_rotation_errors,
+        g.rpe_translation_errors, g.rpe_rotation_errors, RPE_DELTA_S))
+
+
 def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
     all_series = [
         (results.imu.times, results.extra.linear_accelerations_in_world, 'imu'),
@@ -240,6 +282,7 @@ class SlamViewModel:
         self._tex_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_biases: Optional[hello_imgui.TextureGpu] = None
         self._tex_diagnostics: Optional[hello_imgui.TextureGpu] = None
+        self._tex_ate_rpe: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_attitudes: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_rotation_matrices: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
@@ -262,7 +305,7 @@ class SlamViewModel:
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,
                     self._tex_linear_accelerations, self._tex_angular_velocities, self._tex_velocities,
-                    self._tex_biases, self._tex_diagnostics,
+                    self._tex_biases, self._tex_diagnostics, self._tex_ate_rpe,
                     self._tex_imu_attitudes, self._tex_imu_rotation_matrices,
                     self._tex_imu_angular_velocities, self._tex_imu_linear_accelerations]:
             if tex is not None:
@@ -275,6 +318,7 @@ class SlamViewModel:
         self._tex_velocities = None
         self._tex_biases = None
         self._tex_diagnostics = None
+        self._tex_ate_rpe = None
         self._tex_imu_attitudes = None
         self._tex_imu_rotation_matrices = None
         self._tex_imu_angular_velocities = None
@@ -291,7 +335,7 @@ class SlamViewModel:
 # has finished rendering (see the idling toggle at the end of slam_view).
 _FIGURE_TEX_ATTRS = [
     "_tex_positions", "_tex_attitudes", "_tex_rotation_matrices", "_tex_velocities",
-    "_tex_biases", "_tex_diagnostics", "_tex_angular_velocities", "_tex_linear_accelerations",
+    "_tex_biases", "_tex_diagnostics", "_tex_ate_rpe", "_tex_angular_velocities", "_tex_linear_accelerations",
     "_tex_imu_attitudes", "_tex_imu_rotation_matrices", "_tex_imu_angular_velocities",
     "_tex_imu_linear_accelerations",
 ]
@@ -365,6 +409,7 @@ def slam_view(model: SlamViewModel) -> None:
     show("_tex_biases", lambda: _render_biases(result, model.bias_enabled))
 
     show("_tex_diagnostics", lambda: _render_gtsam_diagnostics(result))
+    show("_tex_ate_rpe", lambda: _render_ate_rpe(result))
 
     if _checkboxes(model.omega_enabled, "omega"):
         model._tex_angular_velocities = None
