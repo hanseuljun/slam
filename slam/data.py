@@ -154,7 +154,23 @@ class EuRoCMAVData:
         cam0_timestamps_ns = read_timestamps(path / "cam0" / "data.csv")
         cam1_timestamps_ns = read_timestamps(path / "cam1" / "data.csv")
         if cam0_timestamps_ns != cam1_timestamps_ns:
-            raise ValueError("cam0 and cam1 timestamps do not match")
+            # Some sequences (e.g. MH_04_difficult) have one camera capture a few extra
+            # frames the other never recorded. Keep only frames present in both, in order,
+            # so cam_timestamps_ns stays a valid index into both cam0 and cam1 images.
+            common = set(cam0_timestamps_ns) & set(cam1_timestamps_ns)
+            dropped0 = len(cam0_timestamps_ns) - len(common)
+            dropped1 = len(cam1_timestamps_ns) - len(common)
+            cam0_timestamps_ns = [t for t in cam0_timestamps_ns if t in common]
+            cam1_timestamps_ns = [t for t in cam1_timestamps_ns if t in common]
+            if cam0_timestamps_ns != cam1_timestamps_ns:
+                raise ValueError(
+                    "cam0 and cam1 timestamps do not match even after dropping unmatched frames "
+                    "(the shared frames are ordered differently in each camera's data.csv)"
+                )
+            print(
+                f"{path}: cam0/cam1 timestamps did not match; dropped {dropped0} unmatched cam0 "
+                f"frame(s) and {dropped1} unmatched cam1 frame(s), kept {len(common)} shared frames"
+            )
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
         ground_truth_samples = read_ground_truth_samples(path / "state_groundtruth_estimate0" / "data.csv")
         leica_samples = read_leica_samples(path / "leica0" / "data.csv")
