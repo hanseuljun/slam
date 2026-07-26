@@ -22,9 +22,7 @@ class ConfigViewModel:
 def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     labels = [Path(p).parent.name for p in model.data_paths]
     imgui.set_next_item_width(180)
-    changed, model.selected_index = imgui.combo("##data_path", model.selected_index, labels)
-    if changed:
-        on_run()
+    _, model.selected_index = imgui.combo("##data_path", model.selected_index, labels)
     imgui.same_line()
     imgui.text("Start (s)")
     imgui.same_line()
