@@ -125,6 +125,20 @@ def _rotation_angle_deg(rotation_matrix: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cos_angle)))
 
 
+def _nearest_sorted_indices(sorted_reference: np.ndarray, queries: np.ndarray) -> np.ndarray:
+    """For each query, the index into sorted_reference whose value is closest -- same result as
+    argmin(abs(sorted_reference[:, None] - queries[None, :]), axis=0), but via binary search
+    instead of a dense (len(sorted_reference) x len(queries)) broadcast. That broadcast is O(n*m)
+    in both time and memory: matching ~29k IMU samples against ~29k ground-truth samples over a
+    145s sequence built an 836M-element array (~6.7GB, plus another same-sized array for the abs())
+    for a single nearest-timestamp lookup. This is O((n + m) log n) time, O(m) memory.
+    """
+    idx = np.searchsorted(sorted_reference, queries, side="left")
+    idx = np.clip(idx, 1, len(sorted_reference) - 1)
+    left, right = sorted_reference[idx - 1], sorted_reference[idx]
+    return idx - ((queries - left) <= (right - queries))
+
+
 def _yaw_translation_align(est_positions: np.ndarray, gt_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Least-squares rotation-about-z (yaw) + translation aligning est_positions to gt_positions.
 
@@ -976,7 +990,7 @@ def _get_gtsam_result(
     gt_timestamps_ns = np.array([s.timestamp_ns for s in data.ground_truth_samples])
     gt_positions = np.array([s.position for s in data.ground_truth_samples])
     gt_rotation_matrices_all = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in data.ground_truth_samples])
-    nearest_gt = np.argmin(np.abs(cam_timestamps_ns[:, None] - gt_timestamps_ns[None, :]), axis=1)
+    nearest_gt = _nearest_sorted_indices(gt_timestamps_ns, cam_timestamps_ns)
     position_errors = np.linalg.norm(world_T_body_poses[:, :3, 3] - gt_positions[nearest_gt], axis=1)
 
     # ATE / RPE use the *raw*, un-anchored poses (before T_comp): T_comp is a full 6-DOF
@@ -1040,7 +1054,7 @@ def _get_extra_result(
     gt_samples = [s for s in data.ground_truth_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
     gt_timestamps_ns = np.array([s.timestamp_ns for s in gt_samples])
     imu_timestamps_ns = np.array([s.timestamp_ns for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns])
-    closest_gt_indices = np.argmin(np.abs(gt_timestamps_ns[:, None] - imu_timestamps_ns[None, :]), axis=0)
+    closest_gt_indices = _nearest_sorted_indices(gt_timestamps_ns, imu_timestamps_ns)
     linear_accelerations_in_world = np.array([
         gt_result.rotation_matrices[idx] @ acc
         for idx, acc in zip(closest_gt_indices, imu_result.linear_accelerations)
