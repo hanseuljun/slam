@@ -173,10 +173,16 @@ class EuRoCMAVData:
             )
         imu_samples = read_imu_samples(path / "imu0" / "data.csv")
         ground_truth_samples = read_ground_truth_samples(path / "state_groundtruth_estimate0" / "data.csv")
-        leica_samples = read_leica_samples(path / "leica0" / "data.csv")
+        # Machine Hall sequences carry an external Leica total-station position track under
+        # leica0; Vicon Room sequences instead carry a Vicon pose track under vicon0. Both
+        # data.csv files start with the same [timestamp, x, y, z] columns (Vicon's has
+        # orientation columns after that, which read_leica_samples ignores), so either one
+        # parses into LeicaSample as-is.
+        external_tracker_dir = "leica0" if (path / "leica0").exists() else "vicon0"
+        leica_samples = read_leica_samples(path / external_tracker_dir / "data.csv")
         cam0_extrinsics = read_extrinsics(path / "cam0" / "sensor.yaml")
         cam1_extrinsics = read_extrinsics(path / "cam1" / "sensor.yaml")
-        leica_extrinsics = read_extrinsics(path / "leica0" / "sensor.yaml")
+        leica_extrinsics = read_extrinsics(path / external_tracker_dir / "sensor.yaml")
         cam0_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam0" / "sensor.yaml")
         cam1_intrinsics = CameraIntrinsics.from_sensor_yaml(path / "cam1" / "sensor.yaml")
         with open(path / "cam0" / "sensor.yaml", "r") as f:

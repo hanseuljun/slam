@@ -18,6 +18,9 @@ _DATA_PATHS = [
     "data/machine_hall/MH_03_medium/mav0",
     "data/machine_hall/MH_04_difficult/mav0",
     "data/machine_hall/MH_05_difficult/mav0",
+    "data/vicon_room1/V1_01_easy/mav0",
+    "data/vicon_room1/V1_02_medium/mav0",
+    "data/vicon_room1/V1_03_difficult/mav0",
 ]
 
 
