@@ -1,9 +1,7 @@
-import copyreg
 from dataclasses import dataclass
-import multiprocessing as mp
 import time
 import traceback
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import cv2
 import gtsam
@@ -14,18 +12,6 @@ from slam.feature_detection import FeatureDetectionResult
 from slam.imu_initialization import ImuInitializationResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
-
-
-def _pickle_keypoint(kp: cv2.KeyPoint):
-    return cv2.KeyPoint, (kp.pt[0], kp.pt[1], kp.size, kp.angle, kp.response, kp.octave, kp.class_id)
-
-
-def _pickle_dmatch(dm: cv2.DMatch):
-    return cv2.DMatch, (dm.queryIdx, dm.trainIdx, dm.imgIdx, dm.distance)
-
-
-copyreg.pickle(cv2.KeyPoint, _pickle_keypoint)
-copyreg.pickle(cv2.DMatch, _pickle_dmatch)
 
 
 @dataclass
@@ -973,25 +959,6 @@ def _compute(
     )
 
 
-def _worker_entry(
-    data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
-    stereo_matching_result: StereoMatchingResult,
-    progress_val: Any,
-    label_arr: Any,
-    result_queue: Any,
-) -> None:
-    def set_progress(value: float, label: str) -> None:
-        progress_val.value = value
-        label_arr.value = label.encode('utf-8')[:255]
-
-    try:
-        result = _compute(data, feature_detection_result, stereo_matching_result, set_progress)
-        result_queue.put(('ok', result))
-    except Exception:
-        result_queue.put(('err', traceback.format_exc()))
-
-
 class SlamSolver:
     def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
         self._data = data
@@ -1000,35 +967,19 @@ class SlamSolver:
         self.result: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
-        self._progress_val = mp.Value('d', 0.0)
-        self._label_arr = mp.Array('c', 256)
-        self._result_queue = mp.Queue()
-
-    @property
-    def progress(self) -> float:
-        return self._progress_val.value
-
-    @property
-    def progress_label(self) -> str:
-        return self._label_arr.value.decode('utf-8', errors='replace')
+        self.progress: float = 0.0
+        self.progress_label: str = ""
 
     def run(self) -> None:
-        process = mp.Process(
-            target=_worker_entry,
-            args=(
-                self._data, self._feature_detection_result, self._stereo_matching_result,
-                self._progress_val, self._label_arr, self._result_queue,
-            ),
-            daemon=True,
-        )
-        process.start()
+        def set_progress(value: float, label: str) -> None:
+            self.progress = value
+            self.progress_label = label
+
+        # Runs on the caller's background thread (see SlamViewModel.start), sharing this
+        # process's memory: no spawn, no reimport, no pickling data across a process boundary.
         try:
-            kind, value = self._result_queue.get()
-            if kind == 'ok':
-                self.result = value
-            else:
-                self.error = value
-        except Exception as e:
-            self.error = str(e)
+            self.result = _compute(self._data, self._feature_detection_result, self._stereo_matching_result, set_progress)
+        except Exception:
+            self.error = traceback.format_exc()
         finally:
             self.loading = False
