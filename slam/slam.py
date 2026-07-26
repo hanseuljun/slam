@@ -547,13 +547,17 @@ def _run_gtsam(
     # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead of
     # being pinned to a single constant. The accumulated std over an interval of duration dt is
     # (diffusion_density * sqrt(dt)) per axis, so it is built inside the loop (keyframe gaps vary).
-    # The gyro term uses the IMU datasheet's physical diffusion (EuRoC ADIS16448, imu0/sensor.yaml)
-    # -- orders of magnitude tighter than the old blanket sigma=0.1, which permitted ~1 rad/s
-    # jumps per keyframe and let the optimizer absorb a pose/rotation error by spiking the gyro
-    # bias (the ~20 s MH_02_easy failure). Forcing that residual into the (vision-correctable) pose
-    # instead. The accel term stays loose (it also soaks up unmodeled gravity/scale error).
-    GYRO_BIAS_RW     = 1.9393e-05   # [rad/s^2/sqrt(Hz)] gyroscope_random_walk from imu0/sensor.yaml
-    ACCEL_BIAS_SIGMA = 0.1          # per-keyframe accel-bias random-walk sigma (unchanged)
+    # Both terms use the IMU datasheet's physical diffusion (EuRoC ADIS16448, imu0/sensor.yaml).
+    # The gyro term was tightened first -- the old blanket sigma=0.1 permitted ~1 rad/s jumps per
+    # keyframe and let the optimizer absorb a pose/rotation error by spiking the gyro bias (the
+    # ~20 s MH_02_easy failure), forcing that residual into the (vision-correctable) pose instead.
+    # The accel term used to stay at the same loose blanket 0.1 (with no sqrt(dt) scaling at all)
+    # to "soak up unmodeled gravity/scale error" -- but that let accel bias free-walk in axes vision
+    # can't correct (e.g. z on a near-level flight segment, where there's almost no vertical
+    # parallax to check it against), producing a near-linear position drift over tens of seconds.
+    # Tightened to the same physical-diffusion treatment as gyro.
+    GYRO_BIAS_RW  = 1.9393e-05   # [rad/s^2/sqrt(Hz)]  gyroscope_random_walk from imu0/sensor.yaml
+    ACCEL_BIAS_RW = 3.0000e-03   # [m/s^3/sqrt(Hz)]    accelerometer_random_walk from imu0/sensor.yaml
     # Fallback regularizer for a keyframe that ends up with neither a PnP between-factor nor any
     # landmark reprojection factor -- e.g. fast motion where feature tracks break and the chained
     # PnP fails. Such a pose would hang off only its IMU factor (yaw about gravity unobservable),
@@ -598,8 +602,8 @@ def _run_gtsam(
     # matching is what's failing: a lighting swing or glare patch that changes the scene's
     # appearance between keyframes without touching stereo overlap at all. Such a node gets
     # too few reprojection factors to pin its pose, so ISAM2 reconciles the shortfall against
-    # the IMU factor by pulling the (deliberately loose, see ACCEL_BIAS_SIGMA above) accel
-    # bias instead -- the accel-bias runaway + position drift seen on MH_04_difficult ~46s.
+    # the IMU factor by pulling the accel bias instead (see ACCEL_BIAS_RW above) -- the
+    # accel-bias runaway + position drift seen on MH_04_difficult ~46s.
     # Floor is ~5th percentile of per-keyframe landmark counts on a clean run, so it only
     # rejects the genuinely track-starved tail, not ordinary low-structure keyframes.
     MIN_KF_LANDMARKS = 100
@@ -731,7 +735,7 @@ def _run_gtsam(
         # ordered [accel(3), gyro(3)] to match imuBias.ConstantBias's tangent.
         dt_kf = float(cam_timestamps_ns[kf_next] - cam_timestamps_ns[kf_i]) * 1e-9
         bias_between_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array(
-            [ACCEL_BIAS_SIGMA] * 3 + [GYRO_BIAS_RW * np.sqrt(dt_kf)] * 3))
+            [ACCEL_BIAS_RW * np.sqrt(dt_kf)] * 3 + [GYRO_BIAS_RW * np.sqrt(dt_kf)] * 3))
         new_factors.add(gtsam.BetweenFactorConstantBias(
             B(j), B(j + 1), gtsam.imuBias.ConstantBias(), bias_between_noise))
 
