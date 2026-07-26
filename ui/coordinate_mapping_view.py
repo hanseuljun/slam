@@ -85,6 +85,7 @@ def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
 class CoordinateMappingViewModel:
     def __init__(self, data: EuRoCMAVData) -> None:
         self._data = data
+        self._cancel_event = threading.Event()
         self._checker: Optional[CoordinateMappingChecker] = None
         self._feature_detection_result: Optional[FeatureDetectionResult] = None
         self._stereo_matching_result: Optional[StereoMatchingResult] = None
@@ -109,6 +110,7 @@ class CoordinateMappingViewModel:
         self._stereo_matching_result = stereo_matching_result
         self._checker = CoordinateMappingChecker(
             self._data, feature_detection_result, stereo_matching_result,
+            cancel_event=self._cancel_event,
         )
         self._result = None
         self._loading = True
@@ -122,9 +124,15 @@ class CoordinateMappingViewModel:
         self._match_texture = None
         threading.Thread(target=self._compute, daemon=True).start()
 
+    def stop(self) -> None:
+        self._cancel_event.set()
+
     def _compute(self) -> None:
         try:
-            self._result = self._checker.run()
+            result = self._checker.run()
+            if self._cancel_event.is_set():
+                return
+            self._result = result
             self.match_index_max = max(0, len(self._result.frames[0].matches) - 1)
         except Exception as e:
             self._error = str(e)

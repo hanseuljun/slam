@@ -56,6 +56,14 @@ class RootViewModel:
         self.slam_view_model.start(self.feature_detection_result, result)
 
     def restart(self) -> None:
+        # Signal every in-flight background solver to stop before touching any state it reads
+        # from (self.data, view models) — otherwise a stale thread from the previous dataset can
+        # still be running when the new one is loaded and deliver a result built from the old
+        # dataset into the new pipeline (e.g. wrong image paths for its frame timestamps).
+        self.feature_detection_view_model.stop()
+        self.stereo_matching_view_model.stop()
+        self.coordinate_mapping_view_model.stop()
+        self.imu_initialization_view_model.stop()
         self.slam_view_model.stop()
         self.data = EuRoCMAVData.load(Path(self.time_range_view_model.data_path_str))
         self.data_view_model = DataViewModel(self.data)

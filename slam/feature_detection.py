@@ -1,7 +1,9 @@
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -25,10 +27,14 @@ class FeatureDetectionResult:
 
 
 class FeatureDetectionSolver:
-    def __init__(self, data: EuRoCMAVData, start_s: float = 0.0, duration_s: float = 5.0) -> None:
+    def __init__(
+        self, data: EuRoCMAVData, start_s: float = 0.0, duration_s: float = 5.0,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         self._data = data
         self._start_s = start_s
         self._duration_s = duration_s
+        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.progress: float = 0.0
 
     def _process_frame(self, ts: int) -> FeatureDetectionFrame:
@@ -60,6 +66,9 @@ class FeatureDetectionSolver:
             }
             completed = 0
             for future in as_completed(future_to_index):
+                if self._cancel_event.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
                 i = future_to_index[future]
                 frames[i] = future.result()
                 completed += 1

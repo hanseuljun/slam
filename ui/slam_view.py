@@ -282,6 +282,8 @@ class SlamViewModel:
         threading.Thread(target=self._solver.run, daemon=True).start()
 
     def stop(self) -> None:
+        if self._solver is not None:
+            self._solver.cancel()
         self._solver = None
 
 

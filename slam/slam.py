@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import threading
 import time
 import traceback
 from typing import Callable, Optional
@@ -959,19 +960,32 @@ def _compute(
     )
 
 
+class _SolveCancelled(Exception):
+    pass
+
+
 class SlamSolver:
-    def __init__(self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult) -> None:
+    def __init__(
+        self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
+        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.result: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
         self.progress: float = 0.0
         self.progress_label: str = ""
 
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
     def run(self) -> None:
         def set_progress(value: float, label: str) -> None:
+            if self._cancel_event.is_set():
+                raise _SolveCancelled()
             self.progress = value
             self.progress_label = label
 
@@ -979,6 +993,8 @@ class SlamSolver:
         # process's memory: no spawn, no reimport, no pickling data across a process boundary.
         try:
             self.result = _compute(self._data, self._feature_detection_result, self._stereo_matching_result, set_progress)
+        except _SolveCancelled:
+            pass
         except Exception:
             self.error = traceback.format_exc()
         finally:

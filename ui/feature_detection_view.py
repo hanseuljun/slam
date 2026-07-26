@@ -19,7 +19,8 @@ class FeatureDetectionViewModel:
     ) -> None:
         self._data = data
         self._on_result = on_result
-        self._solver = FeatureDetectionSolver(data, start_s, duration_s)
+        self._cancel_event = threading.Event()
+        self._solver = FeatureDetectionSolver(data, start_s, duration_s, cancel_event=self._cancel_event)
         self._result: Optional[FeatureDetectionResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None
@@ -31,6 +32,8 @@ class FeatureDetectionViewModel:
     def _compute(self) -> None:
         try:
             result = self._solver.run()
+            if self._cancel_event.is_set():
+                return
             self._result = result
             self._on_result(result)
         except Exception as e:
@@ -44,6 +47,9 @@ class FeatureDetectionViewModel:
         self._started = True
         self._loading = True
         threading.Thread(target=self._compute, daemon=True).start()
+
+    def stop(self) -> None:
+        self._cancel_event.set()
 
     def current_texture(self) -> Optional[hello_imgui.TextureGpu]:
         if self._result is None:

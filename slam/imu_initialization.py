@@ -1,4 +1,6 @@
+import threading
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -18,9 +20,13 @@ class ImuInitializationResult:
 
 
 class ImuInitializationSolver:
-    def __init__(self, data: EuRoCMAVData, window_s: float = 1.0) -> None:
+    def __init__(
+        self, data: EuRoCMAVData, window_s: float = 1.0,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         self._data = data
         self._window_s = window_s
+        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
 
     def run(self) -> ImuInitializationResult:
         samples = self._data.imu_samples
@@ -40,6 +46,8 @@ class ImuInitializationSolver:
         best_score = np.inf
         best_start = 0
         for i in range(n - window):
+            if self._cancel_event.is_set():
+                break
             score = np.var(ang_vel_norms[i:i + window]) + np.var(lin_acc_norms[i:i + window])
             if score < best_score:
                 best_score = score

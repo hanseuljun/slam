@@ -34,6 +34,7 @@ def _plot_norms(result: ImuInitializationResult) -> plt.Figure:
 class ImuInitializationViewModel:
     def __init__(self, data: EuRoCMAVData) -> None:
         self._data = data
+        self._cancel_event = threading.Event()
         self._result: Optional[ImuInitializationResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None
@@ -46,13 +47,19 @@ class ImuInitializationViewModel:
         self._texture = None
         threading.Thread(
             target=self._compute,
-            args=(ImuInitializationSolver(self._data),),
+            args=(ImuInitializationSolver(self._data, cancel_event=self._cancel_event),),
             daemon=True,
         ).start()
 
+    def stop(self) -> None:
+        self._cancel_event.set()
+
     def _compute(self, solver: ImuInitializationSolver) -> None:
         try:
-            self._result = solver.run()
+            result = solver.run()
+            if self._cancel_event.is_set():
+                return
+            self._result = result
         except Exception as e:
             self._error = str(e)
         finally:

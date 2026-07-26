@@ -14,6 +14,7 @@ class StereoMatchingViewModel:
     def __init__(self, data: EuRoCMAVData, on_result: Callable[[StereoMatchingResult], None]) -> None:
         self._data = data
         self._on_result = on_result
+        self._cancel_event = threading.Event()
         self._solver: Optional[StereoMatchingSolver] = None
         self._feature_detection_result: Optional[FeatureDetectionResult] = None
         self._result: Optional[StereoMatchingResult] = None
@@ -28,7 +29,7 @@ class StereoMatchingViewModel:
 
     def start(self, feature_detection_result: FeatureDetectionResult) -> None:
         self._feature_detection_result = feature_detection_result
-        self._solver = StereoMatchingSolver(self._data, feature_detection_result)
+        self._solver = StereoMatchingSolver(self._data, feature_detection_result, cancel_event=self._cancel_event)
         self._result = None
         self._loading = True
         self._error = None
@@ -37,9 +38,14 @@ class StereoMatchingViewModel:
         self._texture = None
         threading.Thread(target=self._compute, daemon=True).start()
 
+    def stop(self) -> None:
+        self._cancel_event.set()
+
     def _compute(self) -> None:
         try:
             result = self._solver.run()
+            if self._cancel_event.is_set():
+                return
             self._result = result
             self.match_index_max = max(0, len(result.frames[0].matches) - 1)
             self._on_result(result)

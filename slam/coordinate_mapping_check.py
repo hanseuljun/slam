@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -52,10 +53,12 @@ class CoordinateMappingChecker:
         data: EuRoCMAVData,
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
+        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.progress: float = 0.0
 
     def run(self) -> CoordinateMappingCheckResult:
@@ -89,6 +92,8 @@ class CoordinateMappingChecker:
         bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 
         for k in range(n - 1):
+            if self._cancel_event.is_set():
+                break
             self.progress = k / (n - 1)
 
             sm_k = sm_result.frames[k]
