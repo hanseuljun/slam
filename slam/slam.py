@@ -312,8 +312,10 @@ def _run_pnp_step(
     if not success:
         raise RuntimeError(f"cv2.solvePnPRansac failed. len(object_points): {len(object_points)}")
 
-    inlier_object_points = object_points[inliers.flatten()]
-    inlier_image_points = image_points[inliers.flatten()]
+    # cv2's stub types `inliers` too loosely for numpy's __getitem__ overloads to match, even
+    # though this is ordinary integer-array indexing at runtime.
+    inlier_object_points = object_points[inliers.flatten()]  # type: ignore[index]
+    inlier_image_points = image_points[inliers.flatten()]  # type: ignore[index]
     projected, _ = cv2.projectPoints(inlier_object_points, rotation_vector, translation_vector, intrinsics_matrix, dist_coeffs)
     reprojection_error = np.mean(np.linalg.norm(inlier_image_points - projected.reshape(-1, 2), axis=1))
 
@@ -554,7 +556,10 @@ def _scan_keyframes(
         step = np.eye(4)
         step[:3, :3], _ = cv2.Rodrigues(rvec)
         step[:3, 3] = tvec.flatten()
-        poses[i] = poses[ref_idx] @ step
+        # poses[ref_idx] is always populated by the time it's read here (poses[0] is seeded
+        # above, and ref_idx only ever points at an already-visited frame) -- Pylance can't
+        # prove that invariant from the list's `Optional[np.ndarray]` element type.
+        poses[i] = poses[ref_idx] @ step  # type: ignore[operator]
 
         if ref_covis is None:  # first frame after a keyframe sets the covisibility baseline
             ref_covis = num_matches
