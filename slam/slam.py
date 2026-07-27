@@ -11,6 +11,7 @@ import numpy as np
 from slam.data import EuRoCMAVData, ImuSample
 from slam.feature_detection import FeatureDetectionResult
 from slam.imu_initialization import ImuInitializationResult
+from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
 from slam.stereo_matching import StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
@@ -390,20 +391,62 @@ class LandmarkObservation:
     point_cam0: np.ndarray
 
 
+# Match a keyframe's stereo-matched cam0 keypoint to the optical-flow track currently sitting on
+# it, if any. A track is seeded from an ORB keypoint (optical_flow.py) and drifts sub-pixel from
+# there via KLT, so it rarely lands exactly on a keypoint re-detected fresh at a later frame --
+# but a real corner keeps getting re-detected close to where the track still is, so a small pixel
+# radius is enough to identify it without any descriptor matching. ORB keypoints can still cluster
+# tightly enough that two of them both fall within this radius of the same track (common on richly
+# textured regions), so _snap_obs_to_tracks additionally enforces one obs per track.
+LANDMARK_SNAP_PX = 3.0
+
+
+def _snap_obs_to_tracks(fd, sm, optical_flow_frame: OpticalFlowFrame) -> dict[int, int]:
+    """obs index (into sm.matches) -> optical-flow track id, for the nearest live track within
+    LANDMARK_SNAP_PX, if any. Each track claims at most one obs (its closest) -- ORB keypoints can
+    cluster tightly enough that two of them both land within the snap radius of the same track;
+    without this a track could pick up two observations at the same keyframe, which breaks the
+    one-observation-per-node assumption the rest of _build_landmark_tracks and _run_gtsam rely on.
+    """
+    if not sm.matches or not optical_flow_frame.track_uv:
+        return {}
+    obs_pts = np.array([fd.cam0_keypoints[m.queryIdx].pt for m in sm.matches], dtype=np.float32)
+    track_ids = list(optical_flow_frame.track_uv.keys())
+    track_pts = np.array([optical_flow_frame.track_uv[tid] for tid in track_ids], dtype=np.float32)
+    d = np.linalg.norm(obs_pts[:, None, :] - track_pts[None, :, :], axis=2)
+    nearest = d.argmin(axis=1)
+    nearest_dist = d[np.arange(len(obs_pts)), nearest]
+    obs_to_flow_tid: dict[int, int] = {}
+    claimed_tracks: set[int] = set()
+    for i in np.argsort(nearest_dist):
+        if nearest_dist[i] >= LANDMARK_SNAP_PX:
+            break
+        track_id = track_ids[nearest[i]]
+        if track_id in claimed_tracks:
+            continue
+        obs_to_flow_tid[int(i)] = track_id
+        claimed_tracks.add(track_id)
+    return obs_to_flow_tid
+
+
 def _build_landmark_tracks(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
+    optical_flow_result: OpticalFlowResult,
     keyframe_indices: list[int],
     min_track_len: int,
     depth_min: float,
     depth_max: float,
-    fund_ransac_px: float,
 ) -> dict[int, list[LandmarkObservation]]:
     """Chain stereo-matched features across keyframes into persistent landmark tracks.
 
     Only cam0-cam1 stereo inliers are tracked, so every observation carries a metric depth for
     initialization; observations are pre-undistorted so they match a Cal3_S2 pinhole model.
+    Correspondence across keyframes comes from optical flow's already-tracked ids (a track id is
+    valid correspondence through every intermediate frame, not just the two keyframes being
+    linked) instead of re-matching ORB descriptors keyframe-to-keyframe -- the same fast-rotation
+    failure mode OpticalFlowSolver's docstring documents for that approach.
     """
     K0 = data.cam0_intrinsics.to_matrix()
     K1 = data.cam1_intrinsics.to_matrix()
@@ -412,61 +455,45 @@ def _build_landmark_tracks(
     dist1 = np.array([data.cam1_intrinsics.k1, data.cam1_intrinsics.k2,
                       data.cam1_intrinsics.p1, data.cam1_intrinsics.p2])
 
-    # Per node: the stereo-inlier descriptors (for matching) and observations.
-    node_descs: list[np.ndarray] = []
+    # Per node: this keyframe's stereo-inlier observations, and which live optical-flow track (if
+    # any) each one corresponds to.
     node_obs: list[list[LandmarkObservation]] = []
+    node_obs_flow_tid: list[list[Optional[int]]] = []
     for jj, frame in enumerate(keyframe_indices):
         sm = stereo_matching_result.frames[frame]
         fd = feature_detection_result.frames[frame]
         if not sm.matches:
-            node_descs.append(np.zeros((0, 32), dtype=np.uint8))
             node_obs.append([])
+            node_obs_flow_tid.append([])
             continue
         q_idx = [m.queryIdx for m in sm.matches]
         t_idx = [m.trainIdx for m in sm.matches]
-        descs = fd.cam0_descriptors[q_idx]
         uv0 = np.array([fd.cam0_keypoints[i].pt for i in q_idx], dtype=np.float64)
         uv1 = np.array([fd.cam1_keypoints[i].pt for i in t_idx], dtype=np.float64)
         uv0u = cv2.undistortPoints(uv0.reshape(-1, 1, 2), K0, dist0, P=K0).reshape(-1, 2)
         uv1u = cv2.undistortPoints(uv1.reshape(-1, 1, 2), K1, dist1, P=K1).reshape(-1, 2)
         pts = sm.points_3d.T  # (M, 3), column i <-> sm.matches[i]
-        node_descs.append(descs)
         node_obs.append([LandmarkObservation(jj, uv0u[i], uv1u[i], pts[i]) for i in range(len(sm.matches))])
 
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+        obs_to_flow_tid = _snap_obs_to_tracks(fd, sm, optical_flow_result.frames[frame])
+        node_obs_flow_tid.append([obs_to_flow_tid.get(i) for i in range(len(sm.matches))])
+
     tracks: dict[int, list[LandmarkObservation]] = {}
     next_tid = 0
-    prev_obs_to_tid: dict[int, int] = {}  # obs-index at node jj-1 -> track id
+    prev_flow_tid_to_tid: dict[int, int] = {}  # optical-flow track id (at node jj-1) -> our track id
     for jj in range(len(keyframe_indices)):
-        cur_obs_to_tid: dict[int, int] = {}
-        if jj > 0 and len(node_descs[jj - 1]) and len(node_descs[jj]):
-            raw = bf.knnMatch(node_descs[jj - 1], node_descs[jj], k=2)
-            good = [pair[0] for pair in raw
-                    if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
-            # Geometric gate: keep only matches consistent with a two-view epipolar geometry
-            # (fundamental-matrix RANSAC on the undistorted cam0 points). Descriptor + ratio
-            # matching alone leaves gross mismatches that would otherwise seed bad landmarks
-            # and inflate reprojection error; the epipolar constraint removes them without
-            # needing any pose estimate.
-            if len(good) >= 8:
-                pts_prev = np.array([node_obs[jj - 1][m.queryIdx].uv0 for m in good])
-                pts_cur = np.array([node_obs[jj][m.trainIdx].uv0 for m in good])
-                _, mask = cv2.findFundamentalMat(
-                    pts_prev, pts_cur, cv2.FM_RANSAC, fund_ransac_px, 0.99)
-                if mask is not None:
-                    good = [m for m, keep in zip(good, mask.ravel()) if keep]
-            for m in good:
-                p, c = m.queryIdx, m.trainIdx
-                if c in cur_obs_to_tid:
-                    continue
-                tid = prev_obs_to_tid.get(p)
-                if tid is None:
-                    tid = next_tid
-                    next_tid += 1
-                    tracks[tid] = [node_obs[jj - 1][p]]
-                cur_obs_to_tid[c] = tid
-                tracks[tid].append(node_obs[jj][c])
-        prev_obs_to_tid = cur_obs_to_tid
+        cur_flow_tid_to_tid: dict[int, int] = {}
+        for landmark_obs, flow_tid in zip(node_obs[jj], node_obs_flow_tid[jj]):
+            if flow_tid is None:
+                continue
+            tid = prev_flow_tid_to_tid.get(flow_tid)
+            if tid is None:
+                tid = next_tid
+                next_tid += 1
+                tracks[tid] = []
+            tracks[tid].append(landmark_obs)
+            cur_flow_tid_to_tid[flow_tid] = tid
+        prev_flow_tid_to_tid = cur_flow_tid_to_tid
 
     # Keep only tracks long enough to bundle-adjust and whose first (init) depth is sane.
     kept: dict[int, list[LandmarkObservation]] = {}
@@ -607,6 +634,7 @@ def _run_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
+    optical_flow_result: OpticalFlowResult,
     imu_samples: list[ImuSample],
     gravity: np.ndarray,
     keyframe_indices: list[int],
@@ -695,7 +723,6 @@ def _run_gtsam(
     PNP_FALLBACK_COVIS = 15   # if a keyframe pair shares >= this many landmarks, drop PnP
     PX_SIGMA        = 1.5     # reprojection sigma [px]
     DEPTH_MIN, DEPTH_MAX = 0.3, 40.0
-    FUND_RANSAC_PX  = 2.0     # epipolar (fundamental-matrix RANSAC) inlier threshold [px]
     # cam0/cam1 pinhole calibrations (measurements are pre-undistorted) and body<-cam poses.
     cam0_K = gtsam.Cal3_S2(data.cam0_intrinsics.fx, data.cam0_intrinsics.fy, 0.0,
                            data.cam0_intrinsics.cx, data.cam0_intrinsics.cy)
@@ -715,8 +742,8 @@ def _run_gtsam(
 
     on_progress(0.0, "Building landmark tracks...")
     tracks = _build_landmark_tracks(
-        data, feature_detection_result, stereo_matching_result, keyframe_indices,
-        MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX, FUND_RANSAC_PX)
+        data, feature_detection_result, stereo_matching_result, optical_flow_result, keyframe_indices,
+        MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX)
 
     # MIN_KF_MATCHES (in _scan_keyframes) only rejects a keyframe with too few *stereo*
     # (cam0-cam1, same-instant) matches. A keyframe can clear that easily -- plenty of L/R
@@ -966,6 +993,7 @@ def _get_gtsam_result(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
+    optical_flow_result: OpticalFlowResult,
     first_timestamp_ns: int,
     min_timestamp_ns: int,
     max_timestamp_ns: int,
@@ -980,7 +1008,7 @@ def _get_gtsam_result(
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
     # _run_gtsam gets [0.00, 0.95] of this stage; the trajectory alignment below takes the rest.
     poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
-        data, feature_detection_result, stereo_matching_result, imu_samples, gravity,
+        data, feature_detection_result, stereo_matching_result, optical_flow_result, imu_samples, gravity,
         keyframe_indices, on_progress=lambda p, lbl: on_progress(p * 0.95, lbl))
     on_progress(0.96, "Aligning to ground truth...")
     K = len(poses)
@@ -1087,6 +1115,7 @@ def _compute(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
+    optical_flow_result: OpticalFlowResult,
     set_progress: Callable[[float, str], None],
 ) -> SlamResult:
     first_timestamp_ns = data.cam_timestamps_ns[0]
@@ -1131,7 +1160,8 @@ def _compute(
 
     gtsam_t0 = time.monotonic()
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
+        data, feature_detection_result, stereo_matching_result, optical_flow_result,
+        first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
         gravity=gravity, keyframe_indices=keyframe_indices,
         on_progress=lambda p, lbl: set_progress(0.45 + p * (0.97 - 0.45), lbl),
     )
@@ -1155,12 +1185,14 @@ class _SolveCancelled(Exception):
 
 class SlamSolver:
     def __init__(
-        self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult,
+        self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult, optical_flow_result: OpticalFlowResult,
         cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
+        self._optical_flow_result = optical_flow_result
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.result: Optional[SlamResult] = None
         self.loading: bool = True
@@ -1181,7 +1213,9 @@ class SlamSolver:
         # Runs on the caller's background thread (see SlamViewModel.start), sharing this
         # process's memory: no spawn, no reimport, no pickling data across a process boundary.
         try:
-            self.result = _compute(self._data, self._feature_detection_result, self._stereo_matching_result, set_progress)
+            self.result = _compute(
+                self._data, self._feature_detection_result, self._stereo_matching_result,
+                self._optical_flow_result, set_progress)
         except _SolveCancelled:
             pass
         except Exception:

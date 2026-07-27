@@ -82,6 +82,13 @@ class Pipeline:
 
     def _on_optical_flow_result(self, result: OpticalFlowResult) -> None:
         self.optical_flow_result = result
+        # Always set by now: optical flow only starts (from _on_stereo_matching_result) after
+        # both of these are -- Pylance can't prove that invariant from the Optional types.
+        assert self.feature_detection_result is not None
+        assert self.stereo_matching_result is not None
+        # SLAM waits on optical flow too now: _build_landmark_tracks links landmark observations
+        # across keyframes using optical flow's track ids instead of re-matching ORB descriptors.
+        self.slam_view_model.start(self.feature_detection_result, self.stereo_matching_result, result)
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
@@ -94,7 +101,6 @@ class Pipeline:
         self.optical_flow_view_model.start(self.feature_detection_result, result)
         if self._run_coordinate_mapping_check:
             self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
-        self.slam_view_model.start(self.feature_detection_result, result)
 
 
 class RootViewModel:
