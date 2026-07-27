@@ -78,7 +78,6 @@ class Pipeline:
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
-        self.optical_flow_view_model.start(result)
         self.stereo_matching_view_model.start(result)
 
     def _on_optical_flow_result(self, result: OpticalFlowResult) -> None:
@@ -90,6 +89,9 @@ class Pipeline:
         # set it, and stereo matching starts strictly after that -- Pylance can't prove that
         # invariant from the attribute's Optional type.
         assert self.feature_detection_result is not None
+        # Optical flow runs after stereo matching (rather than in parallel with it) so it can
+        # reuse stereo matching's per-frame cam0<->cam1 match instead of redoing it for seeding.
+        self.optical_flow_view_model.start(self.feature_detection_result, result)
         if self._run_coordinate_mapping_check:
             self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
         self.slam_view_model.start(self.feature_detection_result, result)

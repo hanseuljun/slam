@@ -10,6 +10,7 @@ from imgui_bundle import hello_imgui, imgui  # pyright: ignore[reportMissingModu
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.optical_flow import OpticalFlowResult, OpticalFlowSolver
+from slam.stereo_matching import StereoMatchingResult
 from ui.utils import image_to_texture
 
 _TRACK_COLOR = (0, 255, 0)
@@ -31,8 +32,11 @@ class OpticalFlowViewModel:
         self._cached_trail_length: int = -1
         self._texture: Optional[hello_imgui.TextureGpu] = None
 
-    def start(self, feature_detection_result: FeatureDetectionResult) -> None:
-        self._solver = OpticalFlowSolver(self._data, feature_detection_result, cancel_event=self._cancel_event)
+    def start(
+        self, feature_detection_result: FeatureDetectionResult, stereo_matching_result: StereoMatchingResult,
+    ) -> None:
+        self._solver = OpticalFlowSolver(
+            self._data, feature_detection_result, stereo_matching_result, cancel_event=self._cancel_event)
         self._result = None
         self._loading = True
         self._error = None
@@ -87,7 +91,7 @@ class OpticalFlowViewModel:
 
 def optical_flow_view(model: OpticalFlowViewModel) -> None:
     if model._solver is None:
-        imgui.text("Waiting for feature detection...")
+        imgui.text("Waiting for stereo matching...")
         return
     if model._loading:
         imgui.text("Computing optical flow...")

@@ -8,7 +8,7 @@ import numpy as np
 
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
-from slam.stereo_matching import match_and_triangulate_stereo
+from slam.stereo_matching import StereoMatchingResult
 
 # Pyramidal Lucas-Kanade parameters. 21x21/3 levels is the standard VIO choice (e.g. VINS-Mono) --
 # large enough a window to survive motion blur, enough pyramid levels to handle a fast frame's
@@ -66,23 +66,27 @@ class OpticalFlowSolver:
 
     Seed points are drawn from this frame's already-detected ORB keypoints (feature_detection.py)
     rather than a separate detector call, reusing work already done upstream. A candidate only
-    becomes a track if it also finds a valid, epipolar-consistent cam0<->cam1 stereo match (the
-    same geometry stereo_matching.py uses, via match_and_triangulate_stereo) -- this gives every
-    track a metric depth at birth instead of seeding blind, undepthed points, and the match is
-    only ever computed once, at seed time (see OpticalFlowFrame.seeded_point_cam0).
+    becomes a track if it also has a valid, epipolar-consistent cam0<->cam1 stereo match -- this
+    gives every track a metric depth at birth instead of seeding blind, undepthed points. That
+    match comes from StereoMatchingResult (this solver runs as a step *after* stereo matching,
+    which already computes the same cam0<->cam1 match for every keypoint in the frame) rather than
+    matching seed candidates itself -- redoing that match here would be pure duplicated work.
     """
 
     def __init__(
         self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult,
         cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
+        self._stereo_matching_result = stereo_matching_result
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.progress: float = 0.0
 
     def run(self) -> OpticalFlowResult:
         frames = self._feature_detection_result.frames
+        stereo_frames = self._stereo_matching_result.frames
         n = len(frames)
         result_frames: list[OpticalFlowFrame] = []
         t0 = time.monotonic()
@@ -92,7 +96,7 @@ class OpticalFlowSolver:
         prev_ids = np.zeros((0,), dtype=np.int64)
         next_track_id = 0
 
-        for i, fd in enumerate(frames):
+        for i, (fd, sm_frame) in enumerate(zip(frames, stereo_frames)):
             if self._cancel_event.is_set():
                 break
             cur_img = cv2.imread(str(self._data.get_cam0_image_path(fd.timestamp_ns)), cv2.IMREAD_GRAYSCALE)
@@ -120,39 +124,36 @@ class OpticalFlowSolver:
                 cur_ids = np.zeros((0,), dtype=np.int64)
 
             seeded_point_cam0: dict[int, np.ndarray] = {}
-            if len(cur_pts) < TARGET_TRACK_COUNT and fd.cam0_keypoints:
-                candidate_idx = list(range(len(fd.cam0_keypoints)))
-                candidate_pts = np.array([fd.cam0_keypoints[k].pt for k in candidate_idx], dtype=np.float32)
-                if len(cur_pts):
+            need = TARGET_TRACK_COUNT - len(cur_pts)
+            if need > 0 and sm_frame.matches:
+                depth_ok = (sm_frame.points_3d[2] > SEED_DEPTH_MIN) & (sm_frame.points_3d[2] < SEED_DEPTH_MAX)
+                candidates = [
+                    (m, sm_frame.points_3d[:, col])
+                    for col, m in enumerate(sm_frame.matches) if depth_ok[col]
+                ]
+
+                if candidates and len(cur_pts):
                     alive = cur_pts.reshape(-1, 2)
+                    candidate_pts = np.array(
+                        [fd.cam0_keypoints[m.queryIdx].pt for m, _ in candidates], dtype=np.float32)
                     d = np.linalg.norm(candidate_pts[:, None, :] - alive[None, :, :], axis=2)
                     far_enough = d.min(axis=1) >= MIN_TRACK_SEPARATION_PX
-                    candidate_idx = [k for k, keep_k in zip(candidate_idx, far_enough) if keep_k]
+                    candidates = [c for c, keep_k in zip(candidates, far_enough) if keep_k]
 
-                if candidate_idx:
-                    cand_cam0_kps = [fd.cam0_keypoints[k] for k in candidate_idx]
-                    cand_cam0_descs = fd.cam0_descriptors[candidate_idx]
-                    stereo_matches, points_3d = match_and_triangulate_stereo(
-                        self._data, cand_cam0_kps, cand_cam0_descs, fd.cam1_keypoints, fd.cam1_descriptors)
-                    depth_ok = (points_3d[2] > SEED_DEPTH_MIN) & (points_3d[2] < SEED_DEPTH_MAX)
-                    stereo_matches = [m for m, ok in zip(stereo_matches, depth_ok) if ok]
-                    points_3d = points_3d[:, depth_ok]
+                new_pts_list = []
+                new_ids_list = []
+                for m, point_3d in candidates[:need]:
+                    tid = next_track_id
+                    next_track_id += 1
+                    new_pts_list.append(fd.cam0_keypoints[m.queryIdx].pt)
+                    new_ids_list.append(tid)
+                    seeded_point_cam0[tid] = point_3d
 
-                    need = TARGET_TRACK_COUNT - len(cur_pts)
-                    new_pts_list = []
-                    new_ids_list = []
-                    for col, m in enumerate(stereo_matches[:need]):
-                        tid = next_track_id
-                        next_track_id += 1
-                        new_pts_list.append(cand_cam0_kps[m.queryIdx].pt)
-                        new_ids_list.append(tid)
-                        seeded_point_cam0[tid] = points_3d[:, col]
-
-                    if new_pts_list:
-                        new_pts = np.array(new_pts_list, dtype=np.float32).reshape(-1, 1, 2)
-                        new_ids = np.array(new_ids_list, dtype=np.int64)
-                        cur_pts = np.vstack([cur_pts, new_pts]) if len(cur_pts) else new_pts
-                        cur_ids = np.concatenate([cur_ids, new_ids]) if len(cur_ids) else new_ids
+                if new_pts_list:
+                    new_pts = np.array(new_pts_list, dtype=np.float32).reshape(-1, 1, 2)
+                    new_ids = np.array(new_ids_list, dtype=np.int64)
+                    cur_pts = np.vstack([cur_pts, new_pts]) if len(cur_pts) else new_pts
+                    cur_ids = np.concatenate([cur_ids, new_ids]) if len(cur_ids) else new_ids
 
             track_uv = {int(tid): (float(pt[0, 0]), float(pt[0, 1])) for tid, pt in zip(cur_ids, cur_pts)}
             result_frames.append(OpticalFlowFrame(
