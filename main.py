@@ -149,12 +149,12 @@ def root_view(model: RootViewModel) -> None:
             feature_detection_view(pipeline.feature_detection_view_model)
             imgui.end_tab_item()
 
-        if imgui.begin_tab_item("Optical Flow")[0]:
-            optical_flow_view(pipeline.optical_flow_view_model)
-            imgui.end_tab_item()
-
         if imgui.begin_tab_item("Stereo Matching")[0]:
             stereo_matching_view(pipeline.stereo_matching_view_model)
+            imgui.end_tab_item()
+
+        if imgui.begin_tab_item("Optical Flow")[0]:
+            optical_flow_view(pipeline.optical_flow_view_model)
             imgui.end_tab_item()
 
         if model.time_range_view_model.run_coordinate_mapping_check:
