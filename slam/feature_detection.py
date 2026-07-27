@@ -38,11 +38,13 @@ class FeatureDetectionSolver:
         self.progress: float = 0.0
 
     def _process_frame(self, ts: int) -> FeatureDetectionFrame:
-        orb = cv2.ORB_create(nfeatures=2000)
+        orb = cv2.ORB.create(nfeatures=2000)
         cam0_img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
         cam1_img = cv2.imread(str(self._data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        cam0_keypoints, cam0_descriptors = orb.detectAndCompute(cam0_img, None)
-        cam1_keypoints, cam1_descriptors = orb.detectAndCompute(cam1_img, None)
+        # cv2's stub types `mask` as non-Optional MatLike, but passing None (no mask) is the
+        # standard, correct OpenCV idiom -- the stub is just missing the `| None`.
+        cam0_keypoints, cam0_descriptors = orb.detectAndCompute(cam0_img, None)  # type: ignore[call-overload]
+        cam1_keypoints, cam1_descriptors = orb.detectAndCompute(cam1_img, None)  # type: ignore[call-overload]
         return FeatureDetectionFrame(
             timestamp_ns=ts,
             cam0_keypoints=list(cam0_keypoints),

@@ -7,7 +7,11 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from imgui_bundle import imgui, hello_imgui
+from matplotlib.figure import Figure
+# hello_imgui is registered into sys.modules dynamically at runtime (imgui_bundle/__init__.py's
+# _publish()), not via a normal static submodule -- Pylance can't verify that against source,
+# even though its real .pyi stub (imgui_bundle/hello_imgui.pyi) is still used for type info.
+from imgui_bundle import imgui, hello_imgui  # pyright: ignore[reportMissingModuleSource]
 
 from slam.coordinate_mapping_check import (
     CoordinateMappingCheckResult,
@@ -26,7 +30,7 @@ def _match_color(i: int, total: int) -> tuple[int, int, int]:
     return (int(color_bgr[0]), int(color_bgr[1]), int(color_bgr[2]))
 
 
-def _plot_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool]) -> plt.Figure:
+def _plot_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool]) -> Figure:
     times = result.times
     mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
     mean_icp_errors = np.array([np.mean(f.icp_projection_errors) if f.icp_projection_errors else float('nan') for f in result.frames])
@@ -122,14 +126,14 @@ class CoordinateMappingViewModel:
         self.show_projected = True
         self._cache_key = ()
         self._match_texture = None
-        threading.Thread(target=self._compute, daemon=True).start()
+        threading.Thread(target=self._compute, args=(self._checker,), daemon=True).start()
 
     def stop(self) -> None:
         self._cancel_event.set()
 
-    def _compute(self) -> None:
+    def _compute(self, checker: CoordinateMappingChecker) -> None:
         try:
-            result = self._checker.run()
+            result = checker.run()
             if self._cancel_event.is_set():
                 return
             self._result = result
@@ -170,10 +174,13 @@ class CoordinateMappingViewModel:
                 flags = cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
                 if img_matches is not None:
                     flags |= cv2.DrawMatchesFlags_DRAW_OVER_OUTIMG
-                img_matches = cv2.drawMatches(
+                # cv2's stub types `outImg` as non-Optional MatLike, but passing None on the
+                # first iteration (no prior image to draw over) is the standard OpenCV idiom --
+                # the stub is just missing the `| None`.
+                img_matches = cv2.drawMatches(  # type: ignore[call-overload]
                     cam0_img_k, kps_k,
                     cam0_img_k1, fd_k1.cam0_keypoints,
-                    [m], img_matches,
+                    [m], img_matches,  # type: ignore[arg-type]
                     matchColor=color,
                     flags=flags,
                 )
