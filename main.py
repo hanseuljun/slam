@@ -1,7 +1,10 @@
 from pathlib import Path
 from typing import Optional
 
-from imgui_bundle import imgui, hello_imgui, immapp
+# hello_imgui is registered into sys.modules dynamically at runtime (imgui_bundle/__init__.py's
+# _publish()), not via a normal static submodule -- Pylance can't verify that against source,
+# even though its real .pyi stub (imgui_bundle/hello_imgui.pyi) is still used for type info.
+from imgui_bundle import imgui, hello_imgui, immapp  # pyright: ignore[reportMissingModuleSource]
 
 from slam import EuRoCMAVData, FeatureDetectionResult, OpticalFlowResult, StereoMatchingResult
 from ui.coordinate_mapping_view import CoordinateMappingViewModel, coordinate_mapping_view
@@ -26,8 +29,8 @@ _DATA_PATHS = [
 
 
 class Pipeline:
-    """Owns the feature detection -> stereo matching -> (coordinate mapping, SLAM) chain for one
-    loaded dataset. One object per run: constructing a Pipeline wires every stage's on_result
+    """Owns the feature detection -> (optical flow, stereo matching) -> (coordinate mapping, SLAM)
+    chain for one loaded dataset. One object per run: constructing a Pipeline wires every stage's on_result
     callback to the next stage on *this* instance, so a callback firing late from a superseded
     Pipeline can only ever touch that Pipeline's own (by-then-cancelled) view models, never a
     newer one's -- restarting is "stop this Pipeline, build a new one," not "rewire a shared set
@@ -52,8 +55,8 @@ class Pipeline:
 
         self.feature_detection_view_model = FeatureDetectionViewModel(
             data, on_result=self._on_feature_detection_result, start_s=start_s, duration_s=duration_s)
-        self.stereo_matching_view_model = StereoMatchingViewModel(data, on_result=self._on_stereo_matching_result)
         self.optical_flow_view_model = OpticalFlowViewModel(data, on_result=self._on_optical_flow_result)
+        self.stereo_matching_view_model = StereoMatchingViewModel(data, on_result=self._on_stereo_matching_result)
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
         self.imu_initialization_view_model = ImuInitializationViewModel(data)
         self.slam_view_model = SlamViewModel(data)
@@ -67,22 +70,26 @@ class Pipeline:
         # Every stage, in one place: adding a stage here is the only thing needed to make
         # restart() stop it too, instead of a second call site that's easy to forget.
         self.feature_detection_view_model.stop()
-        self.stereo_matching_view_model.stop()
         self.optical_flow_view_model.stop()
+        self.stereo_matching_view_model.stop()
         self.coordinate_mapping_view_model.stop()
         self.imu_initialization_view_model.stop()
         self.slam_view_model.stop()
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
-        self.stereo_matching_view_model.start(result)
         self.optical_flow_view_model.start(result)
+        self.stereo_matching_view_model.start(result)
 
     def _on_optical_flow_result(self, result: OpticalFlowResult) -> None:
         self.optical_flow_result = result
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
+        # Always set by now: this callback only fires after _on_feature_detection_result already
+        # set it, and stereo matching starts strictly after that -- Pylance can't prove that
+        # invariant from the attribute's Optional type.
+        assert self.feature_detection_result is not None
         if self._run_coordinate_mapping_check:
             self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
         self.slam_view_model.start(self.feature_detection_result, result)
@@ -140,12 +147,12 @@ def root_view(model: RootViewModel) -> None:
             feature_detection_view(pipeline.feature_detection_view_model)
             imgui.end_tab_item()
 
-        if imgui.begin_tab_item("Stereo Matching")[0]:
-            stereo_matching_view(pipeline.stereo_matching_view_model)
-            imgui.end_tab_item()
-
         if imgui.begin_tab_item("Optical Flow")[0]:
             optical_flow_view(pipeline.optical_flow_view_model)
+            imgui.end_tab_item()
+
+        if imgui.begin_tab_item("Stereo Matching")[0]:
+            stereo_matching_view(pipeline.stereo_matching_view_model)
             imgui.end_tab_item()
 
         if model.time_range_view_model.run_coordinate_mapping_check:

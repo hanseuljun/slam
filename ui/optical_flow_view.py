@@ -2,7 +2,10 @@ import threading
 from typing import Callable, Optional
 
 import cv2
-from imgui_bundle import hello_imgui, imgui
+# hello_imgui is registered into sys.modules dynamically at runtime (imgui_bundle/__init__.py's
+# _publish()), not via a normal static submodule -- Pylance can't verify that against source,
+# even though its real .pyi stub (imgui_bundle/hello_imgui.pyi) is still used for type info.
+from imgui_bundle import hello_imgui, imgui  # pyright: ignore[reportMissingModuleSource]
 
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
@@ -37,14 +40,14 @@ class OpticalFlowViewModel:
         self._cached_index = -1
         self._cached_trail_length = -1
         self._texture = None
-        threading.Thread(target=self._compute, daemon=True).start()
+        threading.Thread(target=self._compute, args=(self._solver,), daemon=True).start()
 
     def stop(self) -> None:
         self._cancel_event.set()
 
-    def _compute(self) -> None:
+    def _compute(self, solver: OpticalFlowSolver) -> None:
         try:
-            result = self._solver.run()
+            result = solver.run()
             if self._cancel_event.is_set():
                 return
             self._result = result
