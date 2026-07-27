@@ -3,10 +3,11 @@ from typing import Optional
 
 from imgui_bundle import imgui, hello_imgui, immapp
 
-from slam import EuRoCMAVData, FeatureDetectionResult, StereoMatchingResult
+from slam import EuRoCMAVData, FeatureDetectionResult, OpticalFlowResult, StereoMatchingResult
 from ui.coordinate_mapping_view import CoordinateMappingViewModel, coordinate_mapping_view
 from ui.data_view import DataViewModel, data_view
 from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
+from ui.optical_flow_view import OpticalFlowViewModel, optical_flow_view
 from ui.slam_view import SlamViewModel, slam_view
 from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
 from ui.config_view import ConfigViewModel, config_view
@@ -45,12 +46,14 @@ class Pipeline:
         self.data = data
         self.feature_detection_result: Optional[FeatureDetectionResult] = None
         self.stereo_matching_result: Optional[StereoMatchingResult] = None
+        self.optical_flow_result: Optional[OpticalFlowResult] = None
         self._run_coordinate_mapping_check = run_coordinate_mapping_check
         self._run_imu_initialization = run_imu_initialization
 
         self.feature_detection_view_model = FeatureDetectionViewModel(
             data, on_result=self._on_feature_detection_result, start_s=start_s, duration_s=duration_s)
         self.stereo_matching_view_model = StereoMatchingViewModel(data, on_result=self._on_stereo_matching_result)
+        self.optical_flow_view_model = OpticalFlowViewModel(data, on_result=self._on_optical_flow_result)
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
         self.imu_initialization_view_model = ImuInitializationViewModel(data)
         self.slam_view_model = SlamViewModel(data)
@@ -65,6 +68,7 @@ class Pipeline:
         # restart() stop it too, instead of a second call site that's easy to forget.
         self.feature_detection_view_model.stop()
         self.stereo_matching_view_model.stop()
+        self.optical_flow_view_model.stop()
         self.coordinate_mapping_view_model.stop()
         self.imu_initialization_view_model.stop()
         self.slam_view_model.stop()
@@ -72,6 +76,10 @@ class Pipeline:
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
         self.stereo_matching_view_model.start(result)
+        self.optical_flow_view_model.start(result)
+
+    def _on_optical_flow_result(self, result: OpticalFlowResult) -> None:
+        self.optical_flow_result = result
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result
@@ -134,6 +142,10 @@ def root_view(model: RootViewModel) -> None:
 
         if imgui.begin_tab_item("Stereo Matching")[0]:
             stereo_matching_view(pipeline.stereo_matching_view_model)
+            imgui.end_tab_item()
+
+        if imgui.begin_tab_item("Optical Flow")[0]:
+            optical_flow_view(pipeline.optical_flow_view_model)
             imgui.end_tab_item()
 
         if model.time_range_view_model.run_coordinate_mapping_check:
