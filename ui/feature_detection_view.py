@@ -50,6 +50,15 @@ class FeatureDetectionViewModel:
 
     def stop(self) -> None:
         self._cancel_event.set()
+        # Drop the callback into the owning Pipeline: it's a bound method, so holding onto it
+        # keeps Pipeline <-> this view model alive as a reference cycle even after the Pipeline
+        # itself is replaced on dataset switch. A cycle can only be freed by the *cyclic* GC, which
+        # runs on whatever thread happens to trigger it -- e.g. a ThreadPoolExecutor worker from
+        # the next dataset's stereo matching -- and its texture destructors call glDeleteTextures,
+        # which segfaults off the main/GL thread. Clearing this breaks the cycle so everything
+        # (including any cached texture) is freed by plain refcounting, synchronously, on
+        # whichever thread calls stop() -- restart() calls it from the main thread.
+        self._on_result = lambda _: None
 
     def current_texture(self) -> Optional[hello_imgui.TextureGpu]:
         if self._result is None:

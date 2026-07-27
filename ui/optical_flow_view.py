@@ -48,6 +48,9 @@ class OpticalFlowViewModel:
 
     def stop(self) -> None:
         self._cancel_event.set()
+        # Breaks the Pipeline <-> view-model reference cycle formed by holding this bound-method
+        # callback -- see the longer explanation on FeatureDetectionViewModel.stop().
+        self._on_result = lambda _: None
 
     def _compute(self, solver: OpticalFlowSolver) -> None:
         try:
