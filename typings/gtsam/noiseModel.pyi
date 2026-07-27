@@ -4,8 +4,6 @@
 # .gtsam.noiseModel import *` (the auto-generated original of this file) resolved to nothing.
 # Declared here by hand instead, covering the members actually used in this project plus their
 # immediate siblings for completeness.
-from typing import overload
-
 import numpy as np
 
 class Base: ...

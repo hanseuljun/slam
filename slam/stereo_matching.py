@@ -147,4 +147,8 @@ class StereoMatchingSolver:
                 completed += 1
                 self.progress = completed / n
         elapsed_s = time.monotonic() - t0
-        return StereoMatchingResult(frames=frames, elapsed_s=elapsed_s)
+        # Cancellation can break out of the loop above before every slot is filled; the caller
+        # always discards a result once it sees its own cancel_event set, but drop the unfilled
+        # slots here too so the return type stays honestly non-Optional either way.
+        completed_frames = [f for f in frames if f is not None]
+        return StereoMatchingResult(frames=completed_frames, elapsed_s=elapsed_s)
