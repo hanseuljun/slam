@@ -8,9 +8,9 @@ from imgui_bundle import imgui
 @dataclass
 class ConfigViewModel:
     data_paths: list[str] = field(default_factory=list)
-    selected_index: int = 6
+    selected_index: int = 7
     start_s: float = 0.0
-    duration_s: float = 50.0
+    duration_s: float = 200.0
     run_coordinate_mapping_check: bool = False
     run_imu_initialization: bool = False
 
