@@ -397,8 +397,13 @@ class LandmarkObservation:
 # but a real corner keeps getting re-detected close to where the track still is, so a small pixel
 # radius is enough to identify it without any descriptor matching. ORB keypoints can still cluster
 # tightly enough that two of them both fall within this radius of the same track (common on richly
-# textured regions), so _snap_obs_to_tracks additionally enforces one obs per track.
-LANDMARK_SNAP_PX = 3.0
+# textured regions), so _snap_obs_to_tracks additionally enforces one obs per track. 3.0 was too
+# tight on V1_03_difficult's fast-rotation segments (KLT drift between keyframes up to MAX_GAP=15
+# frames apart exceeded it, dropping real correspondences and starving keyframes of landmarks --
+# fewer, sparser tracks hurt rotation accuracy more than the snap collisions they avoided). Kept
+# comfortably under optical_flow.MIN_TRACK_SEPARATION_PX (8px) so it still can't straddle two
+# distinct live tracks.
+LANDMARK_SNAP_PX = 6.0
 
 
 def _snap_obs_to_tracks(fd, sm, optical_flow_frame: OpticalFlowFrame) -> dict[int, int]:
