@@ -25,6 +25,9 @@ _DATA_PATHS = [
     "data/vicon_room1/V1_01_easy/mav0",
     "data/vicon_room1/V1_02_medium/mav0",
     "data/vicon_room1/V1_03_difficult/mav0",
+    "data/vicon_room2/V2_01_easy/mav0",
+    "data/vicon_room2/V2_02_medium/mav0",
+    "data/vicon_room2/V2_03_difficult/mav0",
 ]
 
 
