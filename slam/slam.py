@@ -653,6 +653,12 @@ def _run_gtsam(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
+    # Phase-2 loop-closure prototype (see tmp/investigate/v2_03_loop_closure_phase2.py): each tuple
+    # is (from_frame_idx, to_frame_idx, body_relative_pose_4x4, rot_sigma_rad, trans_sigma_m).
+    # Frame indices (not node indices) so callers don't need to know how MIN_KF_LANDMARKS re-keying
+    # below will renumber nodes -- resolved to nodes internally once keyframe_indices is final.
+    # Defaults to a no-op: omitting this leaves _run_gtsam's output byte-for-byte unchanged.
+    extra_loop_closures: Optional[list[tuple[int, int, np.ndarray, float, float]]] = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -815,6 +821,17 @@ def _run_gtsam(
             keyframe_indices = [keyframe_indices[p] for p in kept_positions]
             K = len(keyframe_indices)
 
+    # Resolve loop-closure endpoints to final node indices now that re-keying (above) has settled
+    # keyframe_indices -- keyed by the *to* node, since that's when the factor becomes addable
+    # (its *from* node, always earlier, is already in the graph by then).
+    loop_closures_by_node: dict[int, list[tuple[int, np.ndarray, float, float]]] = {}
+    if extra_loop_closures:
+        kf_arr = np.array(keyframe_indices)
+        for from_frame, to_frame, rel_pose, rot_sigma, trans_sigma in extra_loop_closures:
+            from_node = int(np.argmin(np.abs(kf_arr - from_frame)))
+            to_node = int(np.argmin(np.abs(kf_arr - to_frame)))
+            loop_closures_by_node.setdefault(to_node, []).append((from_node, rel_pose, rot_sigma, trans_sigma))
+
     # node -> track ids observed there; and per-interval covisibility for the PnP gate.
     nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
     node_seen: list[set[int]] = [set() for _ in range(K)]
@@ -976,6 +993,14 @@ def _run_gtsam(
         # factor and make ISAM2 indeterminate. Anchor it with a weak prior at the IMU prediction.
         if not pnp_added and n_proj_at_next == 0:
             new_factors.add(gtsam.PriorFactorPose3(X(j + 1), pose_init, FALLBACK_POSE_NOISE))
+
+        for from_node, rel_pose, rot_sigma, trans_sigma in loop_closures_by_node.get(j + 1, []):
+            delta = gtsam.Pose3(gtsam.Rot3(rel_pose[:3, :3]), gtsam.Point3(*rel_pose[:3, 3]))
+            loop_noise = gtsam.noiseModel.Robust.Create(
+                gtsam.noiseModel.mEstimator.Huber.Create(1.345),
+                gtsam.noiseModel.Diagonal.Sigmas(np.array([rot_sigma] * 3 + [trans_sigma] * 3)))
+            new_factors.add(gtsam.BetweenFactorPose3(X(from_node), X(j + 1), delta, loop_noise))
+
         isam2.update(new_factors, new_values)
 
     print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
