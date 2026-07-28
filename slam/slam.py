@@ -398,8 +398,8 @@ class LandmarkObservation:
 # radius is enough to identify it without any descriptor matching. ORB keypoints can still cluster
 # tightly enough that two of them both fall within this radius of the same track (common on richly
 # textured regions), so _snap_obs_to_tracks additionally enforces one obs per track. 3.0 was too
-# tight on V1_03_difficult's fast-rotation segments (KLT drift between keyframes up to MAX_GAP=15
-# frames apart exceeded it, dropping real correspondences and starving keyframes of landmarks --
+# tight on V1_03_difficult's fast-rotation segments (KLT drift between keyframes up to MAX_GAP_S=0.75s
+# (15 frames at the nominal 20Hz cam rate) apart exceeded it, dropping real correspondences and starving keyframes of landmarks --
 # fewer, sparser tracks hurt rotation accuracy more than the snap collisions they avoided). Kept
 # comfortably under optical_flow.MIN_TRACK_SEPARATION_PX (8px) so it still can't straddle two
 # distinct live tracks.
@@ -534,7 +534,12 @@ def _scan_keyframes(
     trajectory for the PnP diagnostic view.
     """
     MIN_GAP = 3                     # never place keyframes closer than this (avoid duplicate nodes)
-    MAX_GAP = 15                    # force a keyframe at least this often (bound IMU preint. drift)
+    # Time-based, not frame-count: a frame-count cap silently doubles its effective time span
+    # whenever the camera's actual frame rate drops below the nominal 20Hz it was tuned for (e.g.
+    # cam0 dropping to ~10Hz during V2_03_difficult's ~65-75s exposure glitch), which is exactly
+    # when this bound on IMU-only preintegration drift matters most. 0.75s = 15 frames at 20Hz,
+    # matching the original tuning.
+    MAX_GAP_S = 0.75                # force a keyframe at least this often (bound IMU preint. drift)
     COVIS_RATIO = 0.6               # new keyframe once covisibility falls below this * baseline
     TRANS_THRESH = 0.2              # ... or once translation since the reference exceeds this [m]
     ROT_THRESH = np.deg2rad(10.0)   # ... or rotation exceeds this [rad]
@@ -599,8 +604,10 @@ def _scan_keyframes(
         gap = i - ref_idx
         translation = float(np.linalg.norm(tvec))
         rotation = float(np.linalg.norm(rvec))
+        elapsed_s = (stereo_matching_result.frames[i].timestamp_ns
+                     - stereo_matching_result.frames[ref_idx].timestamp_ns) / 1e9
 
-        force = gap >= MAX_GAP
+        force = elapsed_s >= MAX_GAP_S
         allow = gap >= MIN_GAP
         weak = num_matches < COVIS_RATIO * ref_covis
         moved = translation > TRANS_THRESH or rotation > ROT_THRESH
@@ -617,11 +624,13 @@ def _scan_keyframes(
     # frame, merge its neighbours so the IMU factor carries the gap (extend the IMU-only interval).
     # Keep the frame-0 anchor and the terminal node. Bound the merged gap so removing a run of dead
     # frames can't open an unbounded IMU-only stretch; if it would, keep that node as the least-bad
-    # option to cap preintegration drift.
-    DROP_MAX_GAP = 2 * MAX_GAP
+    # option to cap preintegration drift. Time-based (see MAX_GAP_S above) for the same reason.
+    DROP_MAX_GAP_S = 2 * MAX_GAP_S
     kept = [keyframes[0]]
     for k in keyframes[1:-1]:
-        if _stereo_count(k) < MIN_KF_MATCHES and (k - kept[-1]) <= DROP_MAX_GAP:
+        elapsed_s = (stereo_matching_result.frames[k].timestamp_ns
+                     - stereo_matching_result.frames[kept[-1]].timestamp_ns) / 1e9
+        if _stereo_count(k) < MIN_KF_MATCHES and elapsed_s <= DROP_MAX_GAP_S:
             continue
         kept.append(k)
     kept.append(keyframes[-1])
@@ -768,7 +777,12 @@ def _run_gtsam(
     # decides drops from pre-drop counts, never re-checking whether a survivor still clears
     # MIN_TRACK_LEN after its neighbours are gone) -- but 60 keeps this specific stretch intact.
     MIN_KF_LANDMARKS = 60
-    DROP_MAX_GAP = 30
+    # Time-based, not frame-count, for the same reason as _scan_keyframes' MAX_GAP_S: a
+    # frame-count cap silently doubles its effective time span whenever the camera's actual frame
+    # rate drops below the nominal 20Hz it was tuned for (e.g. cam0 dropping to ~10Hz during
+    # V2_03_difficult's ~65-75s exposure glitch). 1.5s = 30 frames at 20Hz, matching the original
+    # tuning.
+    DROP_MAX_GAP_S = 1.5
     landmark_counts_per_node = [0] * K
     for obs in tracks.values():
         for o in obs:
@@ -776,8 +790,10 @@ def _run_gtsam(
     if any(c < MIN_KF_LANDMARKS for c in landmark_counts_per_node[1:-1]):
         kept_positions = [0]
         for pos in range(1, K - 1):
+            elapsed_s = (cam_timestamps_ns[keyframe_indices[pos]]
+                         - cam_timestamps_ns[keyframe_indices[kept_positions[-1]]]) / 1e9
             if (landmark_counts_per_node[pos] < MIN_KF_LANDMARKS
-                    and (keyframe_indices[pos] - keyframe_indices[kept_positions[-1]]) <= DROP_MAX_GAP):
+                    and elapsed_s <= DROP_MAX_GAP_S):
                 continue
             kept_positions.append(pos)
         kept_positions.append(K - 1)
