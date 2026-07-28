@@ -329,6 +329,98 @@ def _run_pnp_step(
     return rotation_vector, translation_vector, len(temporal_good_matches), reprojection_error
 
 
+@dataclass(frozen=True)
+class LoopClosureCandidate:
+    from_frame: int              # earlier keyframe (into stereo_matching_result.frames)
+    to_frame: int                # later keyframe ("query") that revisits from_frame
+    body_relative_pose: np.ndarray  # 4x4, from_frame_body <- to_frame_body
+    num_matches: int
+    reprojection_error: float
+
+
+# Sanity bound on a verified closure's recovered translation magnitude: no real revisit inside a
+# single EuRoC room traverses farther than this. Needed because verification (num_matches,
+# reprojection_error) does not by itself catch a degenerate PnP/RANSAC solution -- an
+# instrumented sweep on V2_03_difficult found ~1.1% of otherwise-plausible-looking verified pairs
+# come back with translation magnitudes in the millions of meters (obvious RANSAC garbage from a
+# bad point configuration), and neither of the other two signals flagged them.
+LOOP_CLOSURE_MAX_TRANSLATION_M = 20.0
+
+
+def _find_loop_closures(
+    data: EuRoCMAVData,
+    feature_detection_result: FeatureDetectionResult,
+    stereo_matching_result: StereoMatchingResult,
+    keyframe_indices: list[int],
+    min_temporal_gap_s: float = 10.0,
+    min_matches: int = 200,
+) -> list[LoopClosureCandidate]:
+    """For every keyframe, check whether it revisits an earlier one: plain ORB descriptor match
+    count as the place-recognition signal (no bag-of-words dependency needed at this scale --
+    validated on ~320 keyframes in seconds), then PnP/RANSAC geometric verification via the same
+    _run_pnp_step already used for temporal matching elsewhere in this module.
+
+    Only the single best-scoring earlier candidate is kept per query -- several near-duplicate
+    keyframes usually all score well for the same physical revisit, and inserting all of them
+    would add redundant, near-identical factors rather than more information. A candidate is only
+    returned if it clears min_matches (an instrumented precision/recall sweep on V2_03_difficult
+    found ~84-92% precision, measured as correct relative-pose recovery rather than raw position
+    proximity, at 150-300) *and* the translation-magnitude sanity check above.
+    """
+    K = len(keyframe_indices)
+    first_ts = data.cam_timestamps_ns[0]
+    kf_times = np.array([
+        (stereo_matching_result.frames[k].timestamp_ns - first_ts) / 1e9 for k in keyframe_indices])
+    body_T_cam0 = data.cam0_extrinsics
+    cam0_T_body = np.linalg.inv(body_T_cam0)
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    candidates: list[LoopClosureCandidate] = []
+    for q in range(K):
+        q_frame = keyframe_indices[q]
+        q_desc = feature_detection_result.frames[q_frame].cam0_descriptors
+        if q_desc is None or len(q_desc) == 0:
+            continue
+        earlier = [c for c in range(q) if kf_times[q] - kf_times[c] >= min_temporal_gap_s]
+        if not earlier:
+            continue
+
+        best_score, best_c = -1, -1
+        for c in earlier:
+            c_desc = feature_detection_result.frames[keyframe_indices[c]].cam0_descriptors
+            if c_desc is None or len(c_desc) == 0:
+                continue
+            raw = bf.knnMatch(c_desc, q_desc, k=2)
+            score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
+            if score > best_score:
+                best_score, best_c = score, c
+        if best_score < min_matches:
+            continue
+
+        c_frame = keyframe_indices[best_c]
+        c_sm = stereo_matching_result.frames[c_frame]
+        c_fd = feature_detection_result.frames[c_frame]
+        q_fd = feature_detection_result.frames[q_frame]
+        if not c_sm.matches:
+            continue
+        try:
+            rvec, tvec, num_matches, reproj_err = _run_pnp_step(
+                data, c_sm.points_3d, c_sm.matches,
+                c_fd.cam0_descriptors, q_fd.cam0_keypoints, q_fd.cam0_descriptors)
+        except Exception:
+            continue
+        if num_matches < min_matches or float(np.linalg.norm(tvec)) > LOOP_CLOSURE_MAX_TRANSLATION_M:
+            continue
+
+        pnp_cam0 = np.eye(4)
+        pnp_cam0[:3, :3], _ = cv2.Rodrigues(rvec)
+        pnp_cam0[:3, 3] = tvec.flatten()
+        rel_pose_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
+        candidates.append(LoopClosureCandidate(c_frame, q_frame, rel_pose_body, num_matches, float(reproj_err)))
+
+    return candidates
+
+
 def _get_pnp_result(
     data: EuRoCMAVData,
     stereo_matching_result: StereoMatchingResult,
@@ -653,12 +745,24 @@ def _run_gtsam(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
-    # Phase-2 loop-closure prototype (see tmp/investigate/v2_03_loop_closure_phase2.py): each tuple
-    # is (from_frame_idx, to_frame_idx, body_relative_pose_4x4, rot_sigma_rad, trans_sigma_m).
+    # Loop-closure prototype (see tmp/investigate/v2_03_loop_closure_phase*.py): each tuple is
+    # (from_frame_idx, to_frame_idx, body_relative_pose_4x4, rot_sigma_rad, trans_sigma_m, noise_mode).
     # Frame indices (not node indices) so callers don't need to know how MIN_KF_LANDMARKS re-keying
     # below will renumber nodes -- resolved to nodes internally once keyframe_indices is final.
+    # noise_mode in {"gaussian", "huber", "dcs"}: Phase 2 found Huber's linear (not quadratic) loss
+    # caps a *correct* closure's pull once the prior disagreement is many multiples of sigma (which
+    # it always is, right after a long blackout) -- "gaussian" fixed that but offers no protection
+    # if verification (see _find_loop_closures) ever lets a false positive through. "dcs" (Dynamic
+    # Covariance Scaling, Agarwal et al. 2013) is the Phase 3 answer: behaves like "gaussian" for
+    # residuals near the expected scale, but smoothly down-weights (like a switchable constraint)
+    # if the residual turns out to be persistently large -- unlike Huber's fixed linear cap that
+    # penalizes a huge-but-correct residual identically to a huge-and-wrong one.
     # Defaults to a no-op: omitting this leaves _run_gtsam's output byte-for-byte unchanged.
-    extra_loop_closures: Optional[list[tuple[int, int, np.ndarray, float, float]]] = None,
+    extra_loop_closures: Optional[list[tuple[int, int, np.ndarray, float, float, str]]] = None,
+    # Test-only introspection hook (see v2_03_loop_closure_phase2b.py): if provided, filled with
+    # {'isam2': isam2} so a caller can run its own batch re-optimization over the full factor
+    # graph afterward, without _run_gtsam's return signature changing for existing callers.
+    debug_out: Optional[dict] = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -824,13 +928,14 @@ def _run_gtsam(
     # Resolve loop-closure endpoints to final node indices now that re-keying (above) has settled
     # keyframe_indices -- keyed by the *to* node, since that's when the factor becomes addable
     # (its *from* node, always earlier, is already in the graph by then).
-    loop_closures_by_node: dict[int, list[tuple[int, np.ndarray, float, float]]] = {}
+    loop_closures_by_node: dict[int, list[tuple[int, np.ndarray, float, float, str]]] = {}
     if extra_loop_closures:
         kf_arr = np.array(keyframe_indices)
-        for from_frame, to_frame, rel_pose, rot_sigma, trans_sigma in extra_loop_closures:
+        for from_frame, to_frame, rel_pose, rot_sigma, trans_sigma, noise_mode in extra_loop_closures:
             from_node = int(np.argmin(np.abs(kf_arr - from_frame)))
             to_node = int(np.argmin(np.abs(kf_arr - to_frame)))
-            loop_closures_by_node.setdefault(to_node, []).append((from_node, rel_pose, rot_sigma, trans_sigma))
+            loop_closures_by_node.setdefault(to_node, []).append(
+                (from_node, rel_pose, rot_sigma, trans_sigma, noise_mode))
 
     # node -> track ids observed there; and per-interval covisibility for the PnP gate.
     nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
@@ -994,11 +1099,27 @@ def _run_gtsam(
         if not pnp_added and n_proj_at_next == 0:
             new_factors.add(gtsam.PriorFactorPose3(X(j + 1), pose_init, FALLBACK_POSE_NOISE))
 
-        for from_node, rel_pose, rot_sigma, trans_sigma in loop_closures_by_node.get(j + 1, []):
+        for from_node, rel_pose, rot_sigma, trans_sigma, noise_mode in loop_closures_by_node.get(j + 1, []):
             delta = gtsam.Pose3(gtsam.Rot3(rel_pose[:3, :3]), gtsam.Point3(*rel_pose[:3, 3]))
-            loop_noise = gtsam.noiseModel.Robust.Create(
-                gtsam.noiseModel.mEstimator.Huber.Create(1.345),
-                gtsam.noiseModel.Diagonal.Sigmas(np.array([rot_sigma] * 3 + [trans_sigma] * 3)))
+            base_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([rot_sigma] * 3 + [trans_sigma] * 3))
+            if noise_mode == "huber":
+                loop_noise = gtsam.noiseModel.Robust.Create(
+                    gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
+            elif noise_mode == "dcs":
+                # DCS's scale factor is min(1, 2c / (c + ||r||^2)) where ||r||^2 is the whitened
+                # (chi-squared) residual -- so c must be calibrated to this factor's degrees of
+                # freedom (6, for a Pose3 BetweenFactor), not left at the textbook-example c=1.
+                # A genuinely-consistent 6-DOF residual has ||r||^2 around 6 on average; c=1
+                # measured this down to a ~0.29 scale for an *already-correct* closure (verified
+                # empirically: it made a 94-closure test on V2_03_difficult behave identically to
+                # having no closures at all). c=6 keeps full trust up to the expected value and
+                # only meaningfully down-weights past the ~12.6 (95th-percentile chi2_6) mark --
+                # i.e. genuine outliers, not closures merely large-but-correct after a long
+                # blackout.
+                loop_noise = gtsam.noiseModel.Robust.Create(
+                    gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
+            else:
+                loop_noise = base_noise
             new_factors.add(gtsam.BetweenFactorPose3(X(from_node), X(j + 1), delta, loop_noise))
 
         isam2.update(new_factors, new_values)
@@ -1038,6 +1159,9 @@ def _run_gtsam(
             if seen:
                 n_lm[o.node] += 1
     reprojection_rmse = np.where(n_px > 0, np.sqrt(sq_px / np.maximum(n_px, 1)), np.nan)
+
+    if debug_out is not None:
+        debug_out['isam2'] = isam2
 
     return poses, velocities, biases, reprojection_rmse, n_lm, keyframe_indices
 
