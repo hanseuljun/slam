@@ -760,7 +760,14 @@ def _run_gtsam(
     # accel-bias runaway + position drift seen on MH_04_difficult ~46s.
     # Floor is ~5th percentile of per-keyframe landmark counts on a clean run, so it only
     # rejects the genuinely track-starved tail, not ordinary low-structure keyframes.
-    MIN_KF_LANDMARKS = 100
+    # Lowered from 100 -> 60: on V2_02_medium's ~74-78s fast vertical maneuver, 100 was
+    # dropping every keyframe in a multi-second, uniformly-mediocre (60-97 landmark) stretch
+    # except the one forced to survive by DROP_MAX_GAP -- but that survivor's own tracks
+    # depended on the just-dropped neighbours, so it came out with 0 landmarks (worse than
+    # if the gate had left the stretch alone). Not a full fix -- the gate is non-causal (it
+    # decides drops from pre-drop counts, never re-checking whether a survivor still clears
+    # MIN_TRACK_LEN after its neighbours are gone) -- but 60 keeps this specific stretch intact.
+    MIN_KF_LANDMARKS = 60
     DROP_MAX_GAP = 30
     landmark_counts_per_node = [0] * K
     for obs in tracks.values():
