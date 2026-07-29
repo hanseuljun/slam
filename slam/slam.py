@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import os
 import threading
 import time
 import traceback
@@ -388,55 +390,100 @@ def _find_loop_closures(
     body_T_cam0 = data.cam0_extrinsics
     cam0_T_body = np.linalg.inv(body_T_cam0)
 
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    # This is O(K^2) (query q checks q earlier candidates), so cumulative pairs-so-far / total
-    # pairs tracks actual work done -- a plain q/K would report progress linearly while the real
-    # per-query cost keeps growing, rushing to ~50% then crawling for the back half.
-    total_pairs = K * (K - 1) / 2
-    candidates: list[LoopClosureCandidate] = []
-    for q in range(K):
-        if on_progress is not None:
-            on_progress((q * (q - 1) / 2) / total_pairs if total_pairs > 0 else 1.0)
-        q_frame = keyframe_indices[q]
-        q_desc = feature_detection_result.frames[q_frame].cam0_descriptors
-        if q_desc is None or len(q_desc) == 0:
-            continue
-        earlier = [c for c in range(q) if kf_times[q] - kf_times[c] >= min_temporal_gap_s]
-        if not earlier:
-            continue
+    # The O(K^2) coarse scoring pass only needs a similarity *count*, not a precise match -- same
+    # rationale as _scan_keyframes' own PROBE_N=500 probe. ORB returns keypoints response-ordered,
+    # so the strongest ~PROBE_N carry most of the discriminative signal; brute-force Hamming cost
+    # scales with descriptor-count^2 per pair, so this alone cuts that dominant cost by roughly
+    # (2000/PROBE_N)^2 ~= 16x. Truncated scoring alone changes which candidate "wins" per query
+    # often enough to measurably weaken results (verified: mean ATE after a real closure went
+    # from 0.16m to 0.67m on V2_03_difficult, using truncated-only scoring) -- so it's used only
+    # to build a cheap shortlist here; SHORTLIST_N candidates are then re-scored with full
+    # descriptors (O(SHORTLIST_N) extra full comparisons per query, not O(earlier) of them) before
+    # picking the actual winner, recovering full-descriptor-quality selection at a small fraction
+    # of the original O(K^2) full-descriptor cost. Final PnP verification (below, once per query
+    # on that winner -- O(K), not O(K^2)) was always full-descriptor and is unaffected either way.
+    PROBE_N = 500
+    SHORTLIST_N = 5
+    earlier_lists = [
+        [c for c in range(q) if kf_times[q] - kf_times[c] >= min_temporal_gap_s] for q in range(K)]
+    total_pairs = sum(len(e) for e in earlier_lists)
+    completed_pairs = 0
 
-        best_score, best_c = -1, -1
+    def _process_query(q: int) -> Optional[LoopClosureCandidate]:
+        q_frame = keyframe_indices[q]
+        q_desc_full = feature_detection_result.frames[q_frame].cam0_descriptors
+        if q_desc_full is None or len(q_desc_full) == 0:
+            return None
+        q_desc_probe = q_desc_full[:PROBE_N]
+        earlier = earlier_lists[q]
+        if not earlier:
+            return None
+
+        # Own BFMatcher per call (not shared across threads) -- matches this module's existing
+        # convention (e.g. FeatureDetectionSolver._process_frame's per-call cv2.ORB.create()) of
+        # not sharing an OpenCV object across worker threads.
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+        probe_scores: list[tuple[int, int]] = []  # (score, c), truncated descriptors
         for c in earlier:
-            c_desc = feature_detection_result.frames[keyframe_indices[c]].cam0_descriptors
-            if c_desc is None or len(c_desc) == 0:
+            c_desc_full = feature_detection_result.frames[keyframe_indices[c]].cam0_descriptors
+            if c_desc_full is None or len(c_desc_full) == 0:
                 continue
-            raw = bf.knnMatch(c_desc, q_desc, k=2)
+            raw = bf.knnMatch(c_desc_full[:PROBE_N], q_desc_probe, k=2)
+            score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
+            probe_scores.append((score, c))
+        if not probe_scores:
+            return None
+
+        # Re-score the shortlist with full descriptors and pick the true best among them.
+        probe_scores.sort(key=lambda x: -x[0])
+        best_score, best_c = -1, -1
+        for _, c in probe_scores[:SHORTLIST_N]:
+            c_desc_full = feature_detection_result.frames[keyframe_indices[c]].cam0_descriptors
+            raw = bf.knnMatch(c_desc_full, q_desc_full, k=2)
             score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
             if score > best_score:
                 best_score, best_c = score, c
         if best_score < min_matches:
-            continue
+            return None
 
         c_frame = keyframe_indices[best_c]
         c_sm = stereo_matching_result.frames[c_frame]
         c_fd = feature_detection_result.frames[c_frame]
         q_fd = feature_detection_result.frames[q_frame]
         if not c_sm.matches:
-            continue
+            return None
         try:
             rvec, tvec, num_matches, reproj_err = _run_pnp_step(
                 data, c_sm.points_3d, c_sm.matches,
                 c_fd.cam0_descriptors, q_fd.cam0_keypoints, q_fd.cam0_descriptors)
         except Exception:
-            continue
+            return None
         if num_matches < min_matches or float(np.linalg.norm(tvec)) > LOOP_CLOSURE_MAX_TRANSLATION_M:
-            continue
+            return None
 
         pnp_cam0 = np.eye(4)
         pnp_cam0[:3, :3], _ = cv2.Rodrigues(rvec)
         pnp_cam0[:3, 3] = tvec.flatten()
         rel_pose_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
-        candidates.append(LoopClosureCandidate(c_frame, q_frame, rel_pose_body, num_matches, float(reproj_err)))
+        return LoopClosureCandidate(c_frame, q_frame, rel_pose_body, num_matches, float(reproj_err))
+
+    # Embarrassingly parallel -- each query's search is independent of every other's. Matches
+    # FeatureDetectionSolver/StereoMatchingSolver's existing ThreadPoolExecutor(cpu_count())
+    # pattern for this same shape of per-item-independent workload.
+    candidates: list[LoopClosureCandidate] = []
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        future_to_q = {executor.submit(_process_query, q): q for q in range(K)}
+        for future in as_completed(future_to_q):
+            q = future_to_q[future]
+            result = future.result()
+            if result is not None:
+                candidates.append(result)
+            completed_pairs += len(earlier_lists[q])
+            if on_progress is not None:
+                # Pairs-weighted, not query-count-weighted: cost is O(earlier-candidates), which
+                # grows with q, so a plain completed/K would rush early (short searches finish
+                # fast) then crawl for the later, more expensive queries.
+                on_progress(completed_pairs / total_pairs if total_pairs > 0 else 1.0)
 
     return _consolidate_loop_closure_clusters(data, stereo_matching_result, candidates)
 
