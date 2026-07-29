@@ -272,8 +272,9 @@ def _render_imu_linear_accelerations(results: SlamResult) -> np.ndarray:
 
 
 class SlamViewModel:
-    def __init__(self, data: EuRoCMAVData) -> None:
+    def __init__(self, data: EuRoCMAVData, run_loop_closure: bool = False) -> None:
         self._data = data
+        self._run_loop_closure = run_loop_closure
         self._solver: Optional[SlamSolver] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
         self._tex_attitudes: Optional[hello_imgui.TextureGpu] = None
@@ -303,7 +304,8 @@ class SlamViewModel:
         optical_flow_result: OpticalFlowResult,
     ) -> None:
         self._solver = SlamSolver(
-            self._data, feature_detection_result, stereo_matching_result, optical_flow_result)
+            self._data, feature_detection_result, stereo_matching_result, optical_flow_result,
+            enable_loop_closure=self._run_loop_closure)
         # Stash old textures so GC doesn't run glDeleteTextures on this (non-render) thread.
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,

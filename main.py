@@ -48,6 +48,7 @@ class Pipeline:
         duration_s: float,
         run_coordinate_mapping_check: bool,
         run_imu_initialization: bool,
+        run_loop_closure: bool,
     ) -> None:
         self.data = data
         self.feature_detection_result: Optional[FeatureDetectionResult] = None
@@ -62,7 +63,7 @@ class Pipeline:
         self.stereo_matching_view_model = StereoMatchingViewModel(data, on_result=self._on_stereo_matching_result)
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
         self.imu_initialization_view_model = ImuInitializationViewModel(data)
-        self.slam_view_model = SlamViewModel(data)
+        self.slam_view_model = SlamViewModel(data, run_loop_closure=run_loop_closure)
 
     def start(self) -> None:
         self.feature_detection_view_model.start()
@@ -122,6 +123,7 @@ class RootViewModel:
             duration_s=cfg.duration_s,
             run_coordinate_mapping_check=cfg.run_coordinate_mapping_check,
             run_imu_initialization=cfg.run_imu_initialization,
+            run_loop_closure=cfg.run_loop_closure,
         )
 
     def restart(self) -> None:

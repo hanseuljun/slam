@@ -13,6 +13,7 @@ class ConfigViewModel:
     duration_s: float = 200.0
     run_coordinate_mapping_check: bool = False
     run_imu_initialization: bool = False
+    run_loop_closure: bool = False
 
     @property
     def data_path_str(self) -> str:
@@ -40,6 +41,15 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     imgui.same_line()
     _, model.run_imu_initialization = imgui.checkbox(
         "IMU Initialization", model.run_imu_initialization
+    )
+    imgui.same_line()
+    # Off by default: loop closure's candidate search is O(K^2) brute-force descriptor matching
+    # (not yet cheap enough to run unconditionally) and its candidate-consolidation step is
+    # validated-but-not-tuned (see slam.py's _consolidate_loop_closure_clusters docstring) --
+    # a clear win on one regression-check sequence, a real if smaller localized regression on
+    # another.
+    _, model.run_loop_closure = imgui.checkbox(
+        "Loop Closure", model.run_loop_closure
     )
     imgui.same_line()
     if imgui.button("Run Again"):
