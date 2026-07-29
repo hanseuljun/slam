@@ -5,6 +5,7 @@ from typing import Optional
 # _publish()), not via a normal static submodule -- Pylance can't verify that against source,
 # even though its real .pyi stub (imgui_bundle/hello_imgui.pyi) is still used for type info.
 from imgui_bundle import imgui, hello_imgui, immapp  # pyright: ignore[reportMissingModuleSource]
+from imgui_bundle import icons_fontawesome_6 as fa
 
 from slam import EuRoCMAVData, FeatureDetectionResult, OpticalFlowResult, StereoMatchingResult
 from ui.coordinate_mapping_view import CoordinateMappingViewModel, coordinate_mapping_view
@@ -114,6 +115,7 @@ class RootViewModel:
         self.data_view_model = DataViewModel(data)
         self.pipeline = self._new_pipeline(data)
         self.pipeline.start()
+        self.show_config: bool = True
 
     def _new_pipeline(self, data: EuRoCMAVData) -> Pipeline:
         cfg = self.time_range_view_model
@@ -136,6 +138,9 @@ class RootViewModel:
         self.pipeline.start()
 
 
+_CONFIG_SIDEBAR_WIDTH = 260
+
+
 def root_view(model: RootViewModel) -> None:
     viewport = imgui.get_main_viewport()
     imgui.set_next_window_pos(viewport.work_pos)
@@ -148,7 +153,33 @@ def root_view(model: RootViewModel) -> None:
         | imgui.WindowFlags_.no_scrollbar,
     )
 
-    config_view(model.time_range_view_model, model.restart)
+    # Hamburger toggles the config sidebar rather than always showing it, so the tab content
+    # below (plots especially) gets the full window width back when it's not needed. Lives
+    # inside the sidebar itself while it's open (so it reads as part of that panel), and falls
+    # back to the main area -- the only place left -- once the sidebar is closed, so there's
+    # always a way to bring it back.
+    if model.show_config:
+        # No built-in child border (that draws all four sides) -- only the edge against the
+        # main content should read as a divider, drawn manually after the child closes.
+        imgui.begin_child("##config_sidebar", (_CONFIG_SIDEBAR_WIDTH, 0), False)
+        if imgui.button(fa.ICON_FA_BARS):
+            model.show_config = not model.show_config
+        imgui.spacing()
+        imgui.separator()
+        imgui.spacing()
+        config_view(model.time_range_view_model, model.restart)
+        imgui.end_child()
+        rect_min = imgui.get_item_rect_min()
+        rect_max = imgui.get_item_rect_max()
+        imgui.get_window_draw_list().add_line(
+            (rect_max.x, rect_min.y), (rect_max.x, rect_max.y),
+            imgui.get_color_u32(imgui.Col_.border))
+    else:
+        if imgui.button(fa.ICON_FA_BARS):
+            model.show_config = not model.show_config
+
+    imgui.same_line()
+    imgui.begin_child("##main_content", (0, 0), False)
 
     pipeline = model.pipeline
     if imgui.begin_tab_bar("##tabs"):
@@ -183,6 +214,8 @@ def root_view(model: RootViewModel) -> None:
             imgui.end_tab_item()
 
         imgui.end_tab_bar()
+
+    imgui.end_child()
 
     imgui.end()
 

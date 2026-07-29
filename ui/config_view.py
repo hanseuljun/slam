@@ -21,28 +21,31 @@ class ConfigViewModel:
 
 
 def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
+    # Stacked vertically (rather than same_line()-chained) since this now renders in the
+    # collapsible left sidebar (see root_view in main.py) instead of a full-width top bar.
     labels = [Path(p).parent.name for p in model.data_paths]
-    imgui.set_next_item_width(180)
+    imgui.text("Dataset")
+    imgui.set_next_item_width(-1)
     _, model.selected_index = imgui.combo("##data_path", model.selected_index, labels)
-    imgui.same_line()
+
     imgui.text("Start (s)")
-    imgui.same_line()
-    imgui.set_next_item_width(150)
+    imgui.set_next_item_width(-1)
     _, model.start_s = imgui.input_float("##start_s", model.start_s, step=1.0)
-    imgui.same_line()
+
     imgui.text("Duration (s)")
-    imgui.same_line()
-    imgui.set_next_item_width(150)
+    imgui.set_next_item_width(-1)
     _, model.duration_s = imgui.input_float("##duration_s", model.duration_s, step=1.0)
-    imgui.same_line()
+
+    imgui.spacing()
+    imgui.separator()
+    imgui.spacing()
+
     _, model.run_coordinate_mapping_check = imgui.checkbox(
         "Coordinate Mapping Check", model.run_coordinate_mapping_check
     )
-    imgui.same_line()
     _, model.run_imu_initialization = imgui.checkbox(
         "IMU Initialization", model.run_imu_initialization
     )
-    imgui.same_line()
     # Off by default: loop closure's candidate search is O(K^2) brute-force descriptor matching
     # (not yet cheap enough to run unconditionally) and its candidate-consolidation step is
     # validated-but-not-tuned (see slam.py's _consolidate_loop_closure_clusters docstring) --
@@ -51,6 +54,7 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     _, model.run_loop_closure = imgui.checkbox(
         "Loop Closure", model.run_loop_closure
     )
-    imgui.same_line()
-    if imgui.button("Run Again"):
+
+    imgui.spacing()
+    if imgui.button("Run Again", (-1, 0)):
         on_run()
