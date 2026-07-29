@@ -346,6 +346,15 @@ class LoopClosureCandidate:
 # bad point configuration), and neither of the other two signals flagged them.
 LOOP_CLOSURE_MAX_TRANSLATION_M = 20.0
 
+# Noise for an auto-detected closure inserted into the real pose graph (see _run_gtsam's
+# enable_loop_closure). Plain Gaussian, not Huber or DCS: both were tested and found to cap or
+# outright zero a *correct* closure's pull once the prior disagreement is many multiples of
+# sigma, which it always is right after a long blackout -- see the Loop Closure plan's Phase 2/3
+# writeup. False-positive protection lives entirely in _find_loop_closures' verification gate
+# (match count + degeneracy check), not in this noise model.
+LOOP_CLOSURE_ROT_SIGMA = 0.02   # rad
+LOOP_CLOSURE_TRANS_SIGMA = 0.05  # m
+
 
 def _find_loop_closures(
     data: EuRoCMAVData,
@@ -360,12 +369,16 @@ def _find_loop_closures(
     validated on ~320 keyframes in seconds), then PnP/RANSAC geometric verification via the same
     _run_pnp_step already used for temporal matching elsewhere in this module.
 
-    Only the single best-scoring earlier candidate is kept per query -- several near-duplicate
-    keyframes usually all score well for the same physical revisit, and inserting all of them
-    would add redundant, near-identical factors rather than more information. A candidate is only
-    returned if it clears min_matches (an instrumented precision/recall sweep on V2_03_difficult
-    found ~84-92% precision, measured as correct relative-pose recovery rather than raw position
-    proximity, at 150-300) *and* the translation-magnitude sanity check above.
+    Only the single best-scoring earlier candidate is kept per query, and same-event clusters are
+    then consolidated (see _consolidate_loop_closure_clusters) into one representative each -- a
+    stay-put stretch has every one of its keyframes independently "rediscover" the same historical
+    match, and inserting all of them as separate factors overcounts what is really one correlated
+    observation as if it were N independent ones. A regression check on MH_02_easy and
+    MH_04_difficult found this artificially over-stiffens that part of the graph and perturbs
+    other, untouched regions through the shared IMU/bias chain. A candidate is only returned if it
+    clears min_matches (an instrumented precision/recall sweep on V2_03_difficult found ~84-92%
+    precision, measured as correct relative-pose recovery rather than raw position proximity, at
+    150-300) *and* the translation-magnitude sanity check above.
     """
     K = len(keyframe_indices)
     first_ts = data.cam_timestamps_ns[0]
@@ -418,7 +431,60 @@ def _find_loop_closures(
         rel_pose_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
         candidates.append(LoopClosureCandidate(c_frame, q_frame, rel_pose_body, num_matches, float(reproj_err)))
 
-    return candidates
+    return _consolidate_loop_closure_clusters(data, stereo_matching_result, candidates)
+
+
+# Candidates this close together in *both* query time and anchor time are treated as the same
+# revisit event rather than independent evidence -- chained (each candidate compared to the
+# previous one already placed in the cluster, not to the cluster's first member) so a slowly
+# drifting match target during a hover/settle still merges into one cluster even though its first
+# and last anchors may differ by more than this on their own.
+LOOP_CLOSURE_CLUSTER_GAP_S = 2.0
+
+
+def _consolidate_loop_closure_clusters(
+    data: EuRoCMAVData,
+    stereo_matching_result: StereoMatchingResult,
+    candidates: list[LoopClosureCandidate],
+) -> list[LoopClosureCandidate]:
+    """Collapse a run of candidates that are really one revisit event (e.g. every keyframe during
+    a stay-put stretch independently matching the same historical frame) into a single
+    representative -- the one with the most temporal matches. Keeps genuinely separate revisits
+    to a similar place, since those won't be adjacent in query time to begin with.
+
+    Improved, not resolved: re-checked against all three regression-check datasets after adding
+    this. MH_04_difficult's regression (from the original per-query, no-consolidation version) is
+    essentially gone (~12% worse than baseline in its known-sensitive ~46s region -> ~1% or
+    better). MH_02_easy is mixed -- some points improved, but its worst regression point barely
+    moved and the overall final-trajectory error got worse than the unconsolidated version (still
+    better than no closures at all, just not as good). And on V2_03_difficult itself (94 closures
+    -> 15), the correction is measurably weaker during the transition into the corrected region,
+    though still a >95% reduction from baseline overall. So some of what this collapses down was
+    real corrective signal, not pure redundancy -- collapsing every same-event cluster to exactly
+    one representative is too aggressive in at least one direction. LOOP_CLOSURE_CLUSTER_GAP_S=2.0
+    and "keep only the single best match per cluster" are both first guesses, not tuned values;
+    likely next step is keeping a small spread of representatives per cluster instead of one.
+    """
+    if not candidates:
+        return []
+    first_ts = data.cam_timestamps_ns[0]
+
+    def t(frame_idx: int) -> float:
+        return (stereo_matching_result.frames[frame_idx].timestamp_ns - first_ts) / 1e9
+
+    ordered = sorted(candidates, key=lambda c: c.to_frame)
+    consolidated: list[LoopClosureCandidate] = []
+    cluster = [ordered[0]]
+    for c in ordered[1:]:
+        prev = cluster[-1]
+        same_event = (abs(t(c.to_frame) - t(prev.to_frame)) <= LOOP_CLOSURE_CLUSTER_GAP_S
+                      and abs(t(c.from_frame) - t(prev.from_frame)) <= LOOP_CLOSURE_CLUSTER_GAP_S)
+        if not same_event:
+            consolidated.append(max(cluster, key=lambda x: x.num_matches))
+            cluster = []
+        cluster.append(c)
+    consolidated.append(max(cluster, key=lambda x: x.num_matches))
+    return consolidated
 
 
 def _get_pnp_result(
@@ -745,19 +811,29 @@ def _run_gtsam(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
-    # Loop-closure prototype (see tmp/investigate/v2_03_loop_closure_phase*.py): each tuple is
-    # (from_frame_idx, to_frame_idx, body_relative_pose_4x4, rot_sigma_rad, trans_sigma_m, noise_mode).
-    # Frame indices (not node indices) so callers don't need to know how MIN_KF_LANDMARKS re-keying
-    # below will renumber nodes -- resolved to nodes internally once keyframe_indices is final.
-    # noise_mode in {"gaussian", "huber", "dcs"}: Phase 2 found Huber's linear (not quadratic) loss
-    # caps a *correct* closure's pull once the prior disagreement is many multiples of sigma (which
-    # it always is, right after a long blackout) -- "gaussian" fixed that but offers no protection
-    # if verification (see _find_loop_closures) ever lets a false positive through. "dcs" (Dynamic
-    # Covariance Scaling, Agarwal et al. 2013) is the Phase 3 answer: behaves like "gaussian" for
-    # residuals near the expected scale, but smoothly down-weights (like a switchable constraint)
-    # if the residual turns out to be persistently large -- unlike Huber's fixed linear cap that
-    # penalizes a huge-but-correct residual identically to a huge-and-wrong one.
-    # Defaults to a no-op: omitting this leaves _run_gtsam's output byte-for-byte unchanged.
+    # Run automated loop-closure detection (_find_loop_closures) and insert whatever it finds into
+    # this graph, using LOOP_CLOSURE_ROT_SIGMA/TRANS_SIGMA with plain Gaussian noise. Off by
+    # default: _find_loop_closures is O(K^2) brute-force descriptor matching, and the "keep one
+    # representative per revisit event" consolidation it does is validated-but-not-tuned (see
+    # _consolidate_loop_closure_clusters' docstring) -- it clearly helps on a real blackout and
+    # was regression-checked clean on one other sequence, but a second sequence still showed a
+    # real, if smaller, localized regression. Ignored if extra_loop_closures below is given
+    # explicitly (manual override always wins over auto-detection).
+    enable_loop_closure: bool = False,
+    # Manual override / test hook (see tmp/investigate/v2_03_loop_closure_phase*.py): each tuple
+    # is (from_frame_idx, to_frame_idx, body_relative_pose_4x4, rot_sigma_rad, trans_sigma_m,
+    # noise_mode). Frame indices (not node indices) so callers don't need to know how
+    # MIN_KF_LANDMARKS re-keying below will renumber nodes -- resolved to nodes internally once
+    # keyframe_indices is final. noise_mode in {"gaussian", "huber", "dcs"}: use "gaussian" --
+    # Huber's linear (not quadratic) loss caps a *correct* closure's pull once the prior
+    # disagreement is many multiples of sigma (which it always is, right after a long blackout),
+    # and DCS (Dynamic Covariance Scaling) turned out worse, not better: as a *redescending*
+    # estimator its influence doesn't just cap for large residuals, it vanishes -- it can't tell
+    # a huge-but-correct residual from a huge-and-wrong one and discards both. False-positive
+    # protection belongs in verification (_find_loop_closures' match-count + degeneracy gate),
+    # not in the inserted factor's own robustness.
+    # Defaults to a no-op: omitting both this and enable_loop_closure leaves _run_gtsam's output
+    # byte-for-byte unchanged.
     extra_loop_closures: Optional[list[tuple[int, int, np.ndarray, float, float, str]]] = None,
     # Test-only introspection hook (see v2_03_loop_closure_phase2b.py): if provided, filled with
     # {'isam2': isam2} so a caller can run its own batch re-optimization over the full factor
@@ -924,6 +1000,18 @@ def _run_gtsam(
             tracks = remapped_tracks
             keyframe_indices = [keyframe_indices[p] for p in kept_positions]
             K = len(keyframe_indices)
+
+    # Auto-detect closures against the *final* (post-re-keying) keyframe set, so a node dropped
+    # above for landmark starvation can't be picked as an endpoint. Manual extra_loop_closures
+    # (if given) always overrides auto-detection rather than adding to it -- keeps the test/
+    # override path from Phase 2/3 exact and predictable.
+    if enable_loop_closure and extra_loop_closures is None:
+        detected = _find_loop_closures(data, feature_detection_result, stereo_matching_result, keyframe_indices)
+        extra_loop_closures = [
+            (c.from_frame, c.to_frame, c.body_relative_pose,
+             LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")
+            for c in detected
+        ]
 
     # Resolve loop-closure endpoints to final node indices now that re-keying (above) has settled
     # keyframe_indices -- keyed by the *to* node, since that's when the factor becomes addable
@@ -1177,6 +1265,7 @@ def _get_gtsam_result(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
+    enable_loop_closure: bool = False,
 ) -> SlamGtsamResult:
     # Window the IMU to [min, max]; only this range is ever integrated. Leaving the whole t=0
     # prefix in (as `<= max` alone did) needlessly grows the array -- and, at larger start_s,
@@ -1186,7 +1275,8 @@ def _get_gtsam_result(
     # _run_gtsam gets [0.00, 0.95] of this stage; the trajectory alignment below takes the rest.
     poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
         data, feature_detection_result, stereo_matching_result, optical_flow_result, imu_samples, gravity,
-        keyframe_indices, on_progress=lambda p, lbl: on_progress(p * 0.95, lbl))
+        keyframe_indices, on_progress=lambda p, lbl: on_progress(p * 0.95, lbl),
+        enable_loop_closure=enable_loop_closure)
     on_progress(0.96, "Aligning to ground truth...")
     K = len(poses)
 
@@ -1294,6 +1384,7 @@ def _compute(
     stereo_matching_result: StereoMatchingResult,
     optical_flow_result: OpticalFlowResult,
     set_progress: Callable[[float, str], None],
+    enable_loop_closure: bool = False,
 ) -> SlamResult:
     first_timestamp_ns = data.cam_timestamps_ns[0]
     # SLAM runs on the frames sliced to the config's [start_s, start_s + duration_s] window,
@@ -1341,6 +1432,7 @@ def _compute(
         first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
         gravity=gravity, keyframe_indices=keyframe_indices,
         on_progress=lambda p, lbl: set_progress(0.45 + p * (0.97 - 0.45), lbl),
+        enable_loop_closure=enable_loop_closure,
     )
     gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
 
@@ -1365,12 +1457,19 @@ class SlamSolver:
         self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult, optical_flow_result: OpticalFlowResult,
         cancel_event: Optional[threading.Event] = None,
+        # Off by default: _find_loop_closures is O(K^2) brute-force descriptor matching (fine for
+        # an offline research run, not yet acceptable as an always-on interactive-tool cost), and
+        # its candidate-consolidation step is validated-but-not-tuned (see
+        # _consolidate_loop_closure_clusters' docstring) -- clear win on one regression-check
+        # sequence, real if smaller localized regression on another. Opt in explicitly.
+        enable_loop_closure: bool = False,
     ) -> None:
         self._data = data
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
         self._optical_flow_result = optical_flow_result
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
+        self._enable_loop_closure = enable_loop_closure
         self.result: Optional[SlamResult] = None
         self.loading: bool = True
         self.error: Optional[str] = None
@@ -1392,7 +1491,8 @@ class SlamSolver:
         try:
             self.result = _compute(
                 self._data, self._feature_detection_result, self._stereo_matching_result,
-                self._optical_flow_result, set_progress)
+                self._optical_flow_result, set_progress,
+                enable_loop_closure=self._enable_loop_closure)
         except _SolveCancelled:
             pass
         except Exception:
