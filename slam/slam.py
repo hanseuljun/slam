@@ -363,6 +363,7 @@ def _find_loop_closures(
     keyframe_indices: list[int],
     min_temporal_gap_s: float = 10.0,
     min_matches: int = 200,
+    on_progress: Optional[Callable[[float], None]] = None,
 ) -> list[LoopClosureCandidate]:
     """For every keyframe, check whether it revisits an earlier one: plain ORB descriptor match
     count as the place-recognition signal (no bag-of-words dependency needed at this scale --
@@ -388,8 +389,14 @@ def _find_loop_closures(
     cam0_T_body = np.linalg.inv(body_T_cam0)
 
     bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    # This is O(K^2) (query q checks q earlier candidates), so cumulative pairs-so-far / total
+    # pairs tracks actual work done -- a plain q/K would report progress linearly while the real
+    # per-query cost keeps growing, rushing to ~50% then crawling for the back half.
+    total_pairs = K * (K - 1) / 2
     candidates: list[LoopClosureCandidate] = []
     for q in range(K):
+        if on_progress is not None:
+            on_progress((q * (q - 1) / 2) / total_pairs if total_pairs > 0 else 1.0)
         q_frame = keyframe_indices[q]
         q_desc = feature_detection_result.frames[q_frame].cam0_descriptors
         if q_desc is None or len(q_desc) == 0:
@@ -866,9 +873,15 @@ def _run_gtsam(
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
     # Progress budget across this stage's sub-steps (fractions of the GTSAM phase):
-    #   landmark tracks    [0.00, 0.10]
-    #   ISAM2 forward loop [0.10, 0.92]
+    #   landmark tracks      [0.00, 0.10]                 (0.00, 0.08 if enable_loop_closure)
+    #   loop closure search  n/a                           (0.08, 0.20) -- only when enabled
+    #   ISAM2 forward loop   [0.10, 0.92]                  (0.20, 0.92 if enable_loop_closure)
     #   reprojection metrics [0.92, 1.00]
+    # Loop closure detection gets its own visible slice (rather than silently eating into another
+    # phase's budget) because it's O(K^2) brute-force descriptor matching and can itself run for
+    # minutes on a large keyframe count -- without this the progress bar would sit frozen on
+    # "Building landmark tracks..." or jump straight to ISAM2 with no indication of what's
+    # actually taking the time.
     # keyframe_indices (from the shared _scan_keyframes pass) maps graph node j -> original frame
     # index; gaps between them vary since nodes are chosen adaptively (covisibility + motion).
     K = len(keyframe_indices)
@@ -1004,9 +1017,15 @@ def _run_gtsam(
     # Auto-detect closures against the *final* (post-re-keying) keyframe set, so a node dropped
     # above for landmark starvation can't be picked as an endpoint. Manual extra_loop_closures
     # (if given) always overrides auto-detection rather than adding to it -- keeps the test/
-    # override path from Phase 2/3 exact and predictable.
-    if enable_loop_closure and extra_loop_closures is None:
-        detected = _find_loop_closures(data, feature_detection_result, stereo_matching_result, keyframe_indices)
+    # override path from Phase 2/3 exact and predictable. Tracked separately from
+    # enable_loop_closure so the progress budget below only carves out the detection slice when
+    # this call is actually the one running _find_loop_closures.
+    did_auto_detect_loop_closures = enable_loop_closure and extra_loop_closures is None
+    if did_auto_detect_loop_closures:
+        on_progress(0.08, "Detecting loop closures...")
+        detected = _find_loop_closures(
+            data, feature_detection_result, stereo_matching_result, keyframe_indices,
+            on_progress=lambda p: on_progress(0.08 + p * (0.20 - 0.08), "Detecting loop closures..."))
         extra_loop_closures = [
             (c.from_frame, c.to_frame, c.body_relative_pose,
              LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")
@@ -1097,8 +1116,9 @@ def _run_gtsam(
     v0.insert(B(0), gtsam.imuBias.ConstantBias())
     isam2.update(f0, v0)
 
+    isam2_progress_start = 0.20 if did_auto_detect_loop_closures else 0.10
     for j in range(K - 1):
-        on_progress(0.10 + (j / (K - 1)) * (0.92 - 0.10), "Optimizing (ISAM2)...")
+        on_progress(isam2_progress_start + (j / (K - 1)) * (0.92 - isam2_progress_start), "Optimizing (ISAM2)...")
         est = isam2.calculateEstimate()
         pose_i = est.atPose3(X(j))
         vel_i  = est.atVector(V(j))
