@@ -11,10 +11,10 @@ import gtsam
 import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
-from slam.feature_detection import FeatureDetectionResult
+from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
 from slam.imu_initialization import ImuInitializationResult
 from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
-from slam.stereo_matching import StereoMatchingResult
+from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
 RPE_DELTA_S = 1.0  # RPE window: how far apart (in time) the two poses being compared are [s]
@@ -97,6 +97,21 @@ class SlamResult:
 
 def _mats_to_rvecs(rotation_matrices: np.ndarray) -> np.ndarray:
     return np.array([cv2.Rodrigues(R)[0].flatten() for R in rotation_matrices])
+
+
+def _rvec_tvec_to_transform(rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3], _ = cv2.Rodrigues(rvec)
+    T[:3, 3] = tvec.flatten()
+    return T
+
+
+def _to_gtsam_pose3(T: np.ndarray) -> gtsam.Pose3:
+    return gtsam.Pose3(gtsam.Rot3(T[:3, :3]), gtsam.Point3(*T[:3, 3]))
+
+
+def _elapsed_s(timestamp_ns: int, reference_ns: int) -> float:
+    return (timestamp_ns - reference_ns) / 1e9
 
 
 def _align_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -221,7 +236,7 @@ def _get_ground_truth_result(
     max_timestamp_ns: int,
 ) -> SlamGroundTruthResult:
     samples = [s for s in data.ground_truth_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
-    times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
+    times = np.array([_elapsed_s(s.timestamp_ns, first_timestamp_ns) for s in samples])
     positions = np.array([s.position for s in samples])
     rotation_matrices = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in samples])
 
@@ -229,7 +244,7 @@ def _get_ground_truth_result(
     for j in range(len(samples) - 1):
         rotation = rotation_matrices[j].T @ rotation_matrices[j + 1]
         rotation_vector, _ = cv2.Rodrigues(rotation)
-        dt = (samples[j + 1].timestamp_ns - samples[j].timestamp_ns) / 1e9
+        dt = _elapsed_s(samples[j + 1].timestamp_ns, samples[j].timestamp_ns)
         angular_velocity = rotation_vector.flatten() / dt
         angular_velocities.append(angular_velocity)
     angular_velocities = np.array(angular_velocities)
@@ -239,7 +254,7 @@ def _get_ground_truth_result(
         positions=positions,
         attitudes=_mats_to_rvecs(rotation_matrices),
         rotation_matrices=rotation_matrices,
-        angular_velocity_times=np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples[:-1]]),
+        angular_velocity_times=np.array([_elapsed_s(s.timestamp_ns, first_timestamp_ns) for s in samples[:-1]]),
         angular_velocities=angular_velocities,
     )
 
@@ -253,7 +268,7 @@ def _get_imu_result(
     first_gt_timestamp_ns: int,
 ) -> SlamImuResult:
     samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
-    times = np.array([(s.timestamp_ns - first_timestamp_ns) / 1e9 for s in samples])
+    times = np.array([_elapsed_s(s.timestamp_ns, first_timestamp_ns) for s in samples])
     linear_accelerations = np.array([s.linear_acceleration for s in samples])
     angular_velocities = np.array([s.angular_velocity for s in samples])
     rotation_matrices_list = []
@@ -322,8 +337,8 @@ def _run_pnp_step(
     projected, _ = cv2.projectPoints(inlier_object_points, rotation_vector, translation_vector, intrinsics_matrix, dist_coeffs)
     reprojection_error = np.mean(np.linalg.norm(inlier_image_points - projected.reshape(-1, 2), axis=1))
 
-    # inversing the pose from cv2.solvePnPRansac as they are the inverse of
-    # what the rest of the code expects.
+    # cv2.solvePnPRansac returns the world<-camera transform; the rest of this module treats
+    # poses as camera<-world (a camera's pose expressed in world coordinates), so invert here.
     rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
     rotation_vector = -rotation_vector
     translation_vector = -rotation_matrix.T @ translation_vector
@@ -338,6 +353,32 @@ class LoopClosureCandidate:
     body_relative_pose: np.ndarray  # 4x4, from_frame_body <- to_frame_body
     num_matches: int
     reprojection_error: float
+
+
+@dataclass(frozen=True)
+class LoopClosureFactor:
+    """A closure ready to insert into the pose graph -- either auto-detected (converted from a
+    LoopClosureCandidate, see _run_gtsam) or supplied directly as a manual test/override hook
+    (_run_gtsam's extra_loop_closures). from_frame/to_frame are frame indices, not node indices --
+    see extra_loop_closures' docstring for why."""
+    from_frame: int
+    to_frame: int
+    body_relative_pose: np.ndarray  # 4x4, from_frame_body <- to_frame_body
+    rot_sigma: float   # rad
+    trans_sigma: float  # m
+    noise_mode: str    # "gaussian" | "huber" | "dcs" -- see _run_gtsam's noise construction
+
+
+@dataclass(frozen=True)
+class _LoopClosureEdge:
+    """LoopClosureFactor with its from_frame resolved to a graph node index, once _run_gtsam's
+    MIN_KF_LANDMARKS re-keying has settled which frames actually became nodes. to_node isn't
+    stored -- it's implicit in whatever key this edge is filed under in loop_closures_by_node."""
+    from_node: int
+    body_relative_pose: np.ndarray
+    rot_sigma: float
+    trans_sigma: float
+    noise_mode: str
 
 
 # Sanity bound on a verified closure's recovered translation magnitude: no real revisit inside a
@@ -386,7 +427,7 @@ def _find_loop_closures(
     K = len(keyframe_indices)
     first_ts = data.cam_timestamps_ns[0]
     kf_times = np.array([
-        (stereo_matching_result.frames[k].timestamp_ns - first_ts) / 1e9 for k in keyframe_indices])
+        _elapsed_s(stereo_matching_result.frames[k].timestamp_ns, first_ts) for k in keyframe_indices])
     body_T_cam0 = data.cam0_extrinsics
     cam0_T_body = np.linalg.inv(body_T_cam0)
 
@@ -461,9 +502,7 @@ def _find_loop_closures(
         if num_matches < min_matches or float(np.linalg.norm(tvec)) > LOOP_CLOSURE_MAX_TRANSLATION_M:
             return None
 
-        pnp_cam0 = np.eye(4)
-        pnp_cam0[:3, :3], _ = cv2.Rodrigues(rvec)
-        pnp_cam0[:3, 3] = tvec.flatten()
+        pnp_cam0 = _rvec_tvec_to_transform(rvec, tvec)
         rel_pose_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
         return LoopClosureCandidate(c_frame, q_frame, rel_pose_body, num_matches, float(reproj_err))
 
@@ -524,7 +563,7 @@ def _consolidate_loop_closure_clusters(
     first_ts = data.cam_timestamps_ns[0]
 
     def t(frame_idx: int) -> float:
-        return (stereo_matching_result.frames[frame_idx].timestamp_ns - first_ts) / 1e9
+        return _elapsed_s(stereo_matching_result.frames[frame_idx].timestamp_ns, first_ts)
 
     ordered = sorted(candidates, key=lambda c: c.to_frame)
     consolidated: list[LoopClosureCandidate] = []
@@ -569,7 +608,7 @@ def _get_pnp_result(
     pnp_world_T_body = np.array([T_comp @ T for T in pnp_body_poses])
 
     pnp_times = np.array([
-        (stereo_matching_result.frames[i].timestamp_ns - first_timestamp_ns) / 1e9
+        _elapsed_s(stereo_matching_result.frames[i].timestamp_ns, first_timestamp_ns)
         for i in range(len(pnp_world_T_body))
     ])
 
@@ -618,7 +657,9 @@ class LandmarkObservation:
 LANDMARK_SNAP_PX = 6.0
 
 
-def _snap_obs_to_tracks(fd, sm, optical_flow_frame: OpticalFlowFrame) -> dict[int, int]:
+def _snap_obs_to_tracks(
+    fd: FeatureDetectionFrame, sm: StereoMatchingFrame, optical_flow_frame: OpticalFlowFrame,
+) -> dict[int, int]:
     """obs index (into sm.matches) -> optical-flow track id, for the nearest live track within
     LANDMARK_SNAP_PX, if any. Each track claims at most one obs (its closest) -- ORB keypoints can
     cluster tightly enough that two of them both land within the snap radius of the same track;
@@ -712,7 +753,6 @@ def _build_landmark_tracks(
             cur_flow_tid_to_tid[flow_tid] = tid
         prev_flow_tid_to_tid = cur_flow_tid_to_tid
 
-    # Keep only tracks long enough to bundle-adjust and whose first (init) depth is sane.
     kept: dict[int, list[LandmarkObservation]] = {}
     for tid, obs in tracks.items():
         if len(obs) < min_track_len:
@@ -801,10 +841,7 @@ def _scan_keyframes(
             i = kf + 1
             continue
 
-        # Chain the reference->i transform onto the reference pose for the per-frame trajectory.
-        step = np.eye(4)
-        step[:3, :3], _ = cv2.Rodrigues(rvec)
-        step[:3, 3] = tvec.flatten()
+        step = _rvec_tvec_to_transform(rvec, tvec)
         # poses[ref_idx] is always populated by the time it's read here (poses[0] is seeded
         # above, and ref_idx only ever points at an already-visited frame) -- Pylance can't
         # prove that invariant from the list's `Optional[np.ndarray]` element type.
@@ -816,8 +853,8 @@ def _scan_keyframes(
         gap = i - ref_idx
         translation = float(np.linalg.norm(tvec))
         rotation = float(np.linalg.norm(rvec))
-        elapsed_s = (stereo_matching_result.frames[i].timestamp_ns
-                     - stereo_matching_result.frames[ref_idx].timestamp_ns) / 1e9
+        elapsed_s = _elapsed_s(stereo_matching_result.frames[i].timestamp_ns,
+                               stereo_matching_result.frames[ref_idx].timestamp_ns)
 
         force = elapsed_s >= MAX_GAP_S
         allow = gap >= MIN_GAP
@@ -840,8 +877,8 @@ def _scan_keyframes(
     DROP_MAX_GAP_S = 2 * MAX_GAP_S
     kept = [keyframes[0]]
     for k in keyframes[1:-1]:
-        elapsed_s = (stereo_matching_result.frames[k].timestamp_ns
-                     - stereo_matching_result.frames[kept[-1]].timestamp_ns) / 1e9
+        elapsed_s = _elapsed_s(stereo_matching_result.frames[k].timestamp_ns,
+                               stereo_matching_result.frames[kept[-1]].timestamp_ns)
         if _stereo_count(k) < MIN_KF_MATCHES and elapsed_s <= DROP_MAX_GAP_S:
             continue
         kept.append(k)
@@ -865,30 +902,20 @@ def _run_gtsam(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
-    # Run automated loop-closure detection (_find_loop_closures) and insert whatever it finds into
-    # this graph, using LOOP_CLOSURE_ROT_SIGMA/TRANS_SIGMA with plain Gaussian noise. Off by
-    # default: _find_loop_closures is O(K^2) brute-force descriptor matching, and the "keep one
-    # representative per revisit event" consolidation it does is validated-but-not-tuned (see
-    # _consolidate_loop_closure_clusters' docstring) -- it clearly helps on a real blackout and
-    # was regression-checked clean on one other sequence, but a second sequence still showed a
-    # real, if smaller, localized regression. Ignored if extra_loop_closures below is given
-    # explicitly (manual override always wins over auto-detection).
+    # Runs automated loop-closure detection (_find_loop_closures) and inserts whatever it finds
+    # into this graph, using LOOP_CLOSURE_ROT_SIGMA/TRANS_SIGMA with plain Gaussian noise. Off by
+    # default -- see SlamSolver.__init__'s enable_loop_closure for why. Ignored if
+    # extra_loop_closures below is given explicitly (manual override always wins over
+    # auto-detection).
     enable_loop_closure: bool = False,
-    # Manual override / test hook (see tmp/investigate/v2_03_loop_closure_phase*.py): each tuple
-    # is (from_frame_idx, to_frame_idx, body_relative_pose_4x4, rot_sigma_rad, trans_sigma_m,
-    # noise_mode). Frame indices (not node indices) so callers don't need to know how
-    # MIN_KF_LANDMARKS re-keying below will renumber nodes -- resolved to nodes internally once
-    # keyframe_indices is final. noise_mode in {"gaussian", "huber", "dcs"}: use "gaussian" --
-    # Huber's linear (not quadratic) loss caps a *correct* closure's pull once the prior
-    # disagreement is many multiples of sigma (which it always is, right after a long blackout),
-    # and DCS (Dynamic Covariance Scaling) turned out worse, not better: as a *redescending*
-    # estimator its influence doesn't just cap for large residuals, it vanishes -- it can't tell
-    # a huge-but-correct residual from a huge-and-wrong one and discards both. False-positive
-    # protection belongs in verification (_find_loop_closures' match-count + degeneracy gate),
-    # not in the inserted factor's own robustness.
+    # Manual override / test hook (see tmp/investigate/v2_03_loop_closure_phase*.py). Frame
+    # indices (not node indices) so callers don't need to know how MIN_KF_LANDMARKS re-keying
+    # below will renumber nodes -- resolved to nodes internally once keyframe_indices is final.
+    # noise_mode in {"gaussian", "huber", "dcs"} -- use "gaussian"; see the noise construction
+    # below (at the point of use) for why the other two underperform.
     # Defaults to a no-op: omitting both this and enable_loop_closure leaves _run_gtsam's output
     # byte-for-byte unchanged.
-    extra_loop_closures: Optional[list[tuple[int, int, np.ndarray, float, float, str]]] = None,
+    extra_loop_closures: Optional[list[LoopClosureFactor]] = None,
     # Test-only introspection hook (see v2_03_loop_closure_phase2b.py): if provided, filled with
     # {'isam2': isam2} so a caller can run its own batch re-optimization over the full factor
     # graph afterward, without _run_gtsam's return signature changing for existing callers.
@@ -1023,11 +1050,8 @@ def _run_gtsam(
     # decides drops from pre-drop counts, never re-checking whether a survivor still clears
     # MIN_TRACK_LEN after its neighbours are gone) -- but 60 keeps this specific stretch intact.
     MIN_KF_LANDMARKS = 60
-    # Time-based, not frame-count, for the same reason as _scan_keyframes' MAX_GAP_S: a
-    # frame-count cap silently doubles its effective time span whenever the camera's actual frame
-    # rate drops below the nominal 20Hz it was tuned for (e.g. cam0 dropping to ~10Hz during
-    # V2_03_difficult's ~65-75s exposure glitch). 1.5s = 30 frames at 20Hz, matching the original
-    # tuning.
+    # Time-based, not frame-count, for the same reason as _scan_keyframes' MAX_GAP_S. 1.5s = 30
+    # frames at 20Hz, matching the original tuning.
     DROP_MAX_GAP_S = 1.5
     landmark_counts_per_node = [0] * K
     for obs in tracks.values():
@@ -1036,8 +1060,8 @@ def _run_gtsam(
     if any(c < MIN_KF_LANDMARKS for c in landmark_counts_per_node[1:-1]):
         kept_positions = [0]
         for pos in range(1, K - 1):
-            elapsed_s = (cam_timestamps_ns[keyframe_indices[pos]]
-                         - cam_timestamps_ns[keyframe_indices[kept_positions[-1]]]) / 1e9
+            elapsed_s = _elapsed_s(cam_timestamps_ns[keyframe_indices[pos]],
+                                   cam_timestamps_ns[keyframe_indices[kept_positions[-1]]])
             if (landmark_counts_per_node[pos] < MIN_KF_LANDMARKS
                     and elapsed_s <= DROP_MAX_GAP_S):
                 continue
@@ -1074,22 +1098,23 @@ def _run_gtsam(
             data, feature_detection_result, stereo_matching_result, keyframe_indices,
             on_progress=lambda p: on_progress(0.08 + p * (0.20 - 0.08), "Detecting loop closures..."))
         extra_loop_closures = [
-            (c.from_frame, c.to_frame, c.body_relative_pose,
-             LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")
+            LoopClosureFactor(c.from_frame, c.to_frame, c.body_relative_pose,
+                              LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")
             for c in detected
         ]
 
     # Resolve loop-closure endpoints to final node indices now that re-keying (above) has settled
     # keyframe_indices -- keyed by the *to* node, since that's when the factor becomes addable
     # (its *from* node, always earlier, is already in the graph by then).
-    loop_closures_by_node: dict[int, list[tuple[int, np.ndarray, float, float, str]]] = {}
+    loop_closures_by_node: dict[int, list[_LoopClosureEdge]] = {}
     if extra_loop_closures:
         kf_arr = np.array(keyframe_indices)
-        for from_frame, to_frame, rel_pose, rot_sigma, trans_sigma, noise_mode in extra_loop_closures:
-            from_node = int(np.argmin(np.abs(kf_arr - from_frame)))
-            to_node = int(np.argmin(np.abs(kf_arr - to_frame)))
-            loop_closures_by_node.setdefault(to_node, []).append(
-                (from_node, rel_pose, rot_sigma, trans_sigma, noise_mode))
+        for factor in extra_loop_closures:
+            from_node = int(np.argmin(np.abs(kf_arr - factor.from_frame)))
+            to_node = int(np.argmin(np.abs(kf_arr - factor.to_frame)))
+            loop_closures_by_node.setdefault(to_node, []).append(_LoopClosureEdge(
+                from_node, factor.body_relative_pose, factor.rot_sigma, factor.trans_sigma,
+                factor.noise_mode))
 
     # node -> track ids observed there; and per-interval covisibility for the PnP gate.
     nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
@@ -1163,9 +1188,12 @@ def _run_gtsam(
     v0.insert(B(0), gtsam.imuBias.ConstantBias())
     isam2.update(f0, v0)
 
-    isam2_progress_start = 0.20 if did_auto_detect_loop_closures else 0.10
-    for j in range(K - 1):
-        on_progress(isam2_progress_start + (j / (K - 1)) * (0.92 - isam2_progress_start), "Optimizing (ISAM2)...")
+    def _add_keyframe_to_graph(j: int) -> None:
+        """Add keyframe j+1 to the graph: an IMU factor from the preintegrated window since
+        keyframe j, a chained-PnP between-factor when landmark covisibility isn't yet strong
+        enough to constrain the pose on its own, reprojection factors for any landmarks observed
+        at the new keyframe, and any loop-closure factors targeting it -- then commit the update.
+        """
         est = isam2.calculateEstimate()
         pose_i = est.atPose3(X(j))
         vel_i  = est.atVector(V(j))
@@ -1228,14 +1256,11 @@ def _run_gtsam(
                 except Exception:
                     pnp_ok = False
                     break
-                step = np.eye(4)
-                step[:3, :3], _ = cv2.Rodrigues(rvec)
-                step[:3, 3] = tvec.flatten()
-                pnp_cam0 = pnp_cam0 @ step
+                pnp_cam0 = pnp_cam0 @ _rvec_tvec_to_transform(rvec, tvec)
 
             if pnp_ok:
                 pnp_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
-                pnp_delta = gtsam.Pose3(gtsam.Rot3(pnp_body[:3, :3]), gtsam.Point3(*pnp_body[:3, 3]))
+                pnp_delta = _to_gtsam_pose3(pnp_body)
                 pnp_noise = gtsam.noiseModel.Diagonal.Sigmas(PNP_STEP_SIGMAS * np.sqrt(kf_next - kf_i))
                 new_factors.add(gtsam.BetweenFactorPose3(X(j), X(j + 1), pnp_delta, pnp_noise))
                 pose_init = pose_i.compose(pnp_delta)
@@ -1254,13 +1279,18 @@ def _run_gtsam(
         if not pnp_added and n_proj_at_next == 0:
             new_factors.add(gtsam.PriorFactorPose3(X(j + 1), pose_init, FALLBACK_POSE_NOISE))
 
-        for from_node, rel_pose, rot_sigma, trans_sigma, noise_mode in loop_closures_by_node.get(j + 1, []):
-            delta = gtsam.Pose3(gtsam.Rot3(rel_pose[:3, :3]), gtsam.Point3(*rel_pose[:3, 3]))
-            base_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([rot_sigma] * 3 + [trans_sigma] * 3))
-            if noise_mode == "huber":
+        for edge in loop_closures_by_node.get(j + 1, []):
+            delta = _to_gtsam_pose3(edge.body_relative_pose)
+            base_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([edge.rot_sigma] * 3 + [edge.trans_sigma] * 3))
+            if edge.noise_mode == "huber":
+                # Linear (not quadratic) loss beyond ~1.35 sigma -- caps a *correct* closure's
+                # pull once the prior disagreement is many multiples of sigma, which it always is
+                # right after a long blackout (measured: ~30% of the correction "gaussian" gets).
+                # Left in as an option; "gaussian" is what's actually used by auto-detection.
                 loop_noise = gtsam.noiseModel.Robust.Create(
                     gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
-            elif noise_mode == "dcs":
+            elif edge.noise_mode == "dcs":
                 # DCS's scale factor is min(1, 2c / (c + ||r||^2)) where ||r||^2 is the whitened
                 # (chi-squared) residual -- so c must be calibrated to this factor's degrees of
                 # freedom (6, for a Pose3 BetweenFactor), not left at the textbook-example c=1.
@@ -1275,9 +1305,14 @@ def _run_gtsam(
                     gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
             else:
                 loop_noise = base_noise
-            new_factors.add(gtsam.BetweenFactorPose3(X(from_node), X(j + 1), delta, loop_noise))
+            new_factors.add(gtsam.BetweenFactorPose3(X(edge.from_node), X(j + 1), delta, loop_noise))
 
         isam2.update(new_factors, new_values)
+
+    isam2_progress_start = 0.20 if did_auto_detect_loop_closures else 0.10
+    for j in range(K - 1):
+        on_progress(isam2_progress_start + (j / (K - 1)) * (0.92 - isam2_progress_start), "Optimizing (ISAM2)...")
+        _add_keyframe_to_graph(j)
 
     print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
           f"{n_proj_factors} reprojection factors")
@@ -1361,7 +1396,7 @@ def _get_gtsam_result(
     T_comp = world_T_body_first @ np.linalg.inv(poses[closest_cam_index])
     world_T_body_poses = np.array([T_comp @ T for T in poses])
 
-    times = np.array([(f.timestamp_ns - first_timestamp_ns) / 1e9 for f in kf_frames])
+    times = np.array([_elapsed_s(f.timestamp_ns, first_timestamp_ns) for f in kf_frames])
 
     # Per-keyframe position error vs the nearest ground-truth sample [m]. Poses are already
     # anchored to GT at closest_cam_index (T_comp), so this is a single-point-aligned error,
