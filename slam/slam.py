@@ -900,8 +900,17 @@ def _scan_keyframes(
             ref_idx, ref_covis = i, None
         i += 1
 
-    if keyframes[-1] != N - 1:
-        keyframes.append(N - 1)
+    # No forced keyframe at the last frame of the window. There used to be one
+    # (`if keyframes[-1] != N - 1: keyframes.append(N - 1)`), unconditionally anchoring a node at
+    # whatever frame the caller's [start_s, start_s + duration_s] window happened to end on. That
+    # requires knowing the data has ended -- true for this offline/windowed tool, never true for a
+    # live stream, which just keeps going. Not needed either way: MAX_GAP_S already guarantees a
+    # keyframe at least every 0.75s regardless of motion (`force = elapsed_s >= MAX_GAP_S` above),
+    # so the natural tail keyframe is never more than one MAX_GAP_S short of wherever the window
+    # actually ends -- a small, bounded difference, not an unrepresented trajectory segment. The
+    # per-frame dead-reckoning trajectory (`poses`, returned alongside keyframes) still covers
+    # every frame up to N-1 regardless; only the GTSAM graph's own last node can now land up to
+    # ~0.75s earlier than the requested window's end.
 
     # Drop interior keyframes that landed on dead vision -- rather than pin a pose on a starved
     # frame, merge its neighbours so the IMU factor carries the gap (extend the IMU-only interval).
