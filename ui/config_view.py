@@ -48,7 +48,7 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     )
     # Off by default: loop closure's candidate search is O(K^2) brute-force descriptor matching
     # (not yet cheap enough to run unconditionally) and its candidate-consolidation step is
-    # validated-but-not-tuned (see slam.py's _consolidate_loop_closure_clusters docstring) --
+    # validated-but-not-tuned (see slam.py's _LoopClosureDetector docstring) --
     # a clear win on one regression-check sequence, a real if smaller localized regression on
     # another.
     _, model.run_loop_closure = imgui.checkbox(

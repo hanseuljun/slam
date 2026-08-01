@@ -1,6 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-import os
 import threading
 import time
 import traceback
@@ -371,10 +369,10 @@ class LoopClosureFactor:
 
 @dataclass(frozen=True)
 class _LoopClosureEdge:
-    """LoopClosureFactor with its from_frame resolved to a graph node index, once _run_gtsam's
-    keyframe_indices is final. to_node isn't stored -- it's implicit in whatever key this edge is
-    filed under in loop_closures_by_node."""
+    """LoopClosureFactor (or an auto-detected LoopClosureCandidate) with both endpoints resolved
+    to graph node indices."""
     from_node: int
+    to_node: int
     body_relative_pose: np.ndarray
     rot_sigma: float
     trans_sigma: float
@@ -393,43 +391,66 @@ LOOP_CLOSURE_MAX_TRANSLATION_M = 20.0
 # enable_loop_closure). Plain Gaussian, not Huber or DCS: both were tested and found to cap or
 # outright zero a *correct* closure's pull once the prior disagreement is many multiples of
 # sigma, which it always is right after a long blackout -- see the Loop Closure plan's Phase 2/3
-# writeup. False-positive protection lives entirely in _find_loop_closures' verification gate
+# writeup. False-positive protection lives entirely in _LoopClosureDetector's verification gate
 # (match count + degeneracy check), not in this noise model.
 LOOP_CLOSURE_ROT_SIGMA = 0.02   # rad
 LOOP_CLOSURE_TRANS_SIGMA = 0.05  # m
 
 
-def _find_loop_closures(
-    data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
-    stereo_matching_result: StereoMatchingResult,
-    keyframe_indices: list[int],
-    min_temporal_gap_s: float = 10.0,
-    min_matches: int = 200,
-    on_progress: Optional[Callable[[float], None]] = None,
-) -> list[LoopClosureCandidate]:
-    """For every keyframe, check whether it revisits an earlier one: plain ORB descriptor match
-    count as the place-recognition signal (no bag-of-words dependency needed at this scale --
-    validated on ~320 keyframes in seconds), then PnP/RANSAC geometric verification via the same
-    _run_pnp_step already used for temporal matching elsewhere in this module.
+# Candidates this close together in *both* query time and anchor time are treated as the same
+# revisit event rather than independent evidence -- chained (each candidate compared to the
+# previous one already placed in the cluster, not to the cluster's first member) so a slowly
+# drifting match target during a hover/settle still merges into one cluster even though its first
+# and last anchors may differ by more than this on their own.
+LOOP_CLOSURE_CLUSTER_GAP_S = 2.0
+
+
+class _LoopClosureDetector:
+    """Detects loop closures one keyframe at a time, instead of scanning the whole finalized
+    keyframe set in a single batch pass. For every keyframe, checks whether it revisits an
+    earlier one: plain ORB descriptor match count as the place-recognition signal (no
+    bag-of-words dependency needed at this scale -- validated on ~320 keyframes in seconds), then
+    PnP/RANSAC geometric verification via the same _run_pnp_step already used for temporal
+    matching elsewhere in this module. add_keyframe(node, frame) only ever searches against nodes
+    0..node-1, already added -- never one added later.
 
     Only the single best-scoring earlier candidate is kept per query, and same-event clusters are
-    then consolidated (see _consolidate_loop_closure_clusters) into one representative each -- a
-    stay-put stretch has every one of its keyframes independently "rediscover" the same historical
-    match, and inserting all of them as separate factors overcounts what is really one correlated
-    observation as if it were N independent ones. A regression check on MH_02_easy and
-    MH_04_difficult found this artificially over-stiffens that part of the graph and perturbs
-    other, untouched regions through the shared IMU/bias chain. A candidate is only returned if it
-    clears min_matches (an instrumented precision/recall sweep on V2_03_difficult found ~84-92%
+    then consolidated into one representative each -- a stay-put stretch has every one of its
+    keyframes independently "rediscover" the same historical match, and inserting all of them as
+    separate factors overcounts what is really one correlated observation as if it were N
+    independent ones (verified: this artificially over-stiffens that part of the graph and
+    perturbs other, untouched regions through the shared IMU/bias chain, on a regression check
+    against MH_02_easy and MH_04_difficult). A candidate is only returned if it clears
+    min_matches (an instrumented precision/recall sweep on V2_03_difficult found ~84-92%
     precision, measured as correct relative-pose recovery rather than raw position proximity, at
-    150-300) *and* the translation-magnitude sanity check above.
+    150-300) *and* the translation-magnitude sanity check below.
+
+    Consolidation is a small streaming state machine: a cluster only closes -- and its
+    representative (the member with the most temporal matches) becomes a ready _LoopClosureEdge
+    -- once a later, non-matching candidate arrives (add_keyframe's return value) or the caller
+    calls flush() at the end of the run. That's a delay bounded by LOOP_CLOSURE_CLUSTER_GAP_S
+    worth of keyframes, not a whole-sequence lookahead: by the time a cluster closes, its own
+    to_node may be several keyframes in the past, but never one not yet added.
+    Improved, not resolved -- re-checked against all three regression-check datasets after adding
+    this consolidation. MH_04_difficult's regression (from an earlier per-query,
+    no-consolidation version) is essentially gone (~12% worse than baseline in its
+    known-sensitive ~46s region -> ~1% or better). MH_02_easy is mixed -- some points improved,
+    but its worst regression point barely moved and the overall final-trajectory error got worse
+    than the unconsolidated version (still better than no closures at all, just not as good). And
+    on V2_03_difficult itself (94 closures -> 15), the correction is measurably weaker during the
+    transition into the corrected region, though still a >95% reduction from baseline overall. So
+    some of what this collapses down was real corrective signal, not pure redundancy --
+    collapsing every same-event cluster to exactly one representative is too aggressive in at
+    least one direction. LOOP_CLOSURE_CLUSTER_GAP_S=2.0 and "keep only the single best match per
+    cluster" are both first guesses, not tuned values; likely next step is keeping a small spread
+    of representatives per cluster instead of one.
+
+    Trade-off vs the batch version this replaced: that version ran all K queries' searches on a
+    thread pool, since they're independent of each other. Here a query only exists once its own
+    keyframe is reached, so there's nothing left to parallelize across -- more sequential
+    wall-clock work for an equivalent offline run, in exchange for never touching a keyframe that
+    hasn't happened yet.
     """
-    K = len(keyframe_indices)
-    first_ts = data.cam_timestamps_ns[0]
-    kf_times = np.array([
-        _elapsed_s(stereo_matching_result.frames[k].timestamp_ns, first_ts) for k in keyframe_indices])
-    body_T_cam0 = data.cam0_extrinsics
-    cam0_T_body = np.linalg.inv(body_T_cam0)
 
     # The O(K^2) coarse scoring pass only needs a similarity *count*, not a precise match -- same
     # rationale as _scan_keyframes' own PROBE_N=500 probe. ORB returns keypoints response-ordered,
@@ -441,35 +462,66 @@ def _find_loop_closures(
     # to build a cheap shortlist here; SHORTLIST_N candidates are then re-scored with full
     # descriptors (O(SHORTLIST_N) extra full comparisons per query, not O(earlier) of them) before
     # picking the actual winner, recovering full-descriptor-quality selection at a small fraction
-    # of the original O(K^2) full-descriptor cost. Final PnP verification (below, once per query
-    # on that winner -- O(K), not O(K^2)) was always full-descriptor and is unaffected either way.
+    # of the original O(K^2) full-descriptor cost. Final PnP verification (once per query on that
+    # winner -- O(K) total, not O(K^2)) was always full-descriptor and is unaffected either way.
     PROBE_N = 500
     SHORTLIST_N = 5
-    earlier_lists = [
-        [c for c in range(q) if kf_times[q] - kf_times[c] >= min_temporal_gap_s] for q in range(K)]
-    total_pairs = sum(len(e) for e in earlier_lists)
-    completed_pairs = 0
 
-    def _process_query(q: int) -> Optional[LoopClosureCandidate]:
-        q_frame = keyframe_indices[q]
-        q_desc_full = feature_detection_result.frames[q_frame].cam0_descriptors
-        if q_desc_full is None or len(q_desc_full) == 0:
-            return None
-        q_desc_probe = q_desc_full[:PROBE_N]
-        earlier = earlier_lists[q]
+    def __init__(
+        self, data: EuRoCMAVData,
+        feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult,
+        min_temporal_gap_s: float = 10.0,
+        min_matches: int = 200,
+    ) -> None:
+        self._data = data
+        self._fd_result = feature_detection_result
+        self._sm_result = stereo_matching_result
+        self._min_temporal_gap_s = min_temporal_gap_s
+        self._min_matches = min_matches
+        self._body_T_cam0 = data.cam0_extrinsics
+        self._cam0_T_body = np.linalg.inv(self._body_T_cam0)
+        self._first_ts = data.cam_timestamps_ns[0]
+        self._kf_times: list[float] = []   # elapsed_s per node added so far
+        self._kf_frames: list[int] = []    # original frame index per node added so far
+        # (from_node, to_node, candidate) triples of the currently-open, not-yet-closed cluster.
+        self._open_cluster: list[tuple[int, int, LoopClosureCandidate]] = []
+
+    def add_keyframe(self, node: int, frame: int) -> list[_LoopClosureEdge]:
+        """Search for a revisit at this keyframe against every earlier one already added, then
+        feed any match into the consolidation state machine. Returns newly-finalized edges, if a
+        cluster just closed as a result -- its own to_node may be several keyframes in the past,
+        never one not yet added.
+        """
+        q_time = _elapsed_s(self._sm_result.frames[frame].timestamp_ns, self._first_ts)
+        result = self._search(node, frame, q_time)
+        self._kf_times.append(q_time)
+        self._kf_frames.append(frame)
+        if result is None:
+            return []
+        from_node, candidate = result
+        return self._offer(node, from_node, candidate)
+
+    def flush(self) -> list[_LoopClosureEdge]:
+        """Call once after the last add_keyframe: closes whatever cluster is still open."""
+        return self._close_cluster()
+
+    def _search(self, node: int, frame: int, q_time: float) -> Optional[tuple[int, LoopClosureCandidate]]:
+        earlier = [c for c in range(node) if q_time - self._kf_times[c] >= self._min_temporal_gap_s]
         if not earlier:
             return None
+        q_desc_full = self._fd_result.frames[frame].cam0_descriptors
+        if q_desc_full is None or len(q_desc_full) == 0:
+            return None
+        q_desc_probe = q_desc_full[:self.PROBE_N]
 
-        # Own BFMatcher per call (not shared across threads) -- matches this module's existing
-        # convention (e.g. FeatureDetectionSolver._process_frame's per-call cv2.ORB.create()) of
-        # not sharing an OpenCV object across worker threads.
         bf = cv2.BFMatcher(cv2.NORM_HAMMING)
         probe_scores: list[tuple[int, int]] = []  # (score, c), truncated descriptors
         for c in earlier:
-            c_desc_full = feature_detection_result.frames[keyframe_indices[c]].cam0_descriptors
+            c_desc_full = self._fd_result.frames[self._kf_frames[c]].cam0_descriptors
             if c_desc_full is None or len(c_desc_full) == 0:
                 continue
-            raw = bf.knnMatch(c_desc_full[:PROBE_N], q_desc_probe, k=2)
+            raw = bf.knnMatch(c_desc_full[:self.PROBE_N], q_desc_probe, k=2)
             score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
             probe_scores.append((score, c))
         if not probe_scores:
@@ -478,106 +530,56 @@ def _find_loop_closures(
         # Re-score the shortlist with full descriptors and pick the true best among them.
         probe_scores.sort(key=lambda x: -x[0])
         best_score, best_c = -1, -1
-        for _, c in probe_scores[:SHORTLIST_N]:
-            c_desc_full = feature_detection_result.frames[keyframe_indices[c]].cam0_descriptors
+        for _, c in probe_scores[:self.SHORTLIST_N]:
+            c_desc_full = self._fd_result.frames[self._kf_frames[c]].cam0_descriptors
             raw = bf.knnMatch(c_desc_full, q_desc_full, k=2)
             score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
             if score > best_score:
                 best_score, best_c = score, c
-        if best_score < min_matches:
+        if best_score < self._min_matches:
             return None
 
-        c_frame = keyframe_indices[best_c]
-        c_sm = stereo_matching_result.frames[c_frame]
-        c_fd = feature_detection_result.frames[c_frame]
-        q_fd = feature_detection_result.frames[q_frame]
+        c_frame = self._kf_frames[best_c]
+        c_sm = self._sm_result.frames[c_frame]
+        c_fd = self._fd_result.frames[c_frame]
+        q_fd = self._fd_result.frames[frame]
         if not c_sm.matches:
             return None
         try:
             rvec, tvec, num_matches, reproj_err = _run_pnp_step(
-                data, c_sm.points_3d, c_sm.matches,
+                self._data, c_sm.points_3d, c_sm.matches,
                 c_fd.cam0_descriptors, q_fd.cam0_keypoints, q_fd.cam0_descriptors)
         except Exception:
             return None
-        if num_matches < min_matches or float(np.linalg.norm(tvec)) > LOOP_CLOSURE_MAX_TRANSLATION_M:
+        if num_matches < self._min_matches or float(np.linalg.norm(tvec)) > LOOP_CLOSURE_MAX_TRANSLATION_M:
             return None
 
         pnp_cam0 = _rvec_tvec_to_transform(rvec, tvec)
-        rel_pose_body = body_T_cam0 @ pnp_cam0 @ cam0_T_body
-        return LoopClosureCandidate(c_frame, q_frame, rel_pose_body, num_matches, float(reproj_err))
+        rel_pose_body = self._body_T_cam0 @ pnp_cam0 @ self._cam0_T_body
+        return best_c, LoopClosureCandidate(c_frame, frame, rel_pose_body, num_matches, float(reproj_err))
 
-    # Embarrassingly parallel -- each query's search is independent of every other's. Matches
-    # FeatureDetectionSolver/StereoMatchingSolver's existing ThreadPoolExecutor(cpu_count())
-    # pattern for this same shape of per-item-independent workload.
-    candidates: list[LoopClosureCandidate] = []
-    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        future_to_q = {executor.submit(_process_query, q): q for q in range(K)}
-        for future in as_completed(future_to_q):
-            q = future_to_q[future]
-            result = future.result()
-            if result is not None:
-                candidates.append(result)
-            completed_pairs += len(earlier_lists[q])
-            if on_progress is not None:
-                # Pairs-weighted, not query-count-weighted: cost is O(earlier-candidates), which
-                # grows with q, so a plain completed/K would rush early (short searches finish
-                # fast) then crawl for the later, more expensive queries.
-                on_progress(completed_pairs / total_pairs if total_pairs > 0 else 1.0)
+    def _offer(self, to_node: int, from_node: int, candidate: LoopClosureCandidate) -> list[_LoopClosureEdge]:
+        if not self._open_cluster:
+            self._open_cluster = [(from_node, to_node, candidate)]
+            return []
+        prev_from, prev_to, _ = self._open_cluster[-1]
+        same_event = (abs(self._kf_times[to_node] - self._kf_times[prev_to]) <= LOOP_CLOSURE_CLUSTER_GAP_S
+                      and abs(self._kf_times[from_node] - self._kf_times[prev_from]) <= LOOP_CLOSURE_CLUSTER_GAP_S)
+        if same_event:
+            self._open_cluster.append((from_node, to_node, candidate))
+            return []
+        finalized = self._close_cluster()
+        self._open_cluster = [(from_node, to_node, candidate)]
+        return finalized
 
-    return _consolidate_loop_closure_clusters(data, stereo_matching_result, candidates)
-
-
-# Candidates this close together in *both* query time and anchor time are treated as the same
-# revisit event rather than independent evidence -- chained (each candidate compared to the
-# previous one already placed in the cluster, not to the cluster's first member) so a slowly
-# drifting match target during a hover/settle still merges into one cluster even though its first
-# and last anchors may differ by more than this on their own.
-LOOP_CLOSURE_CLUSTER_GAP_S = 2.0
-
-
-def _consolidate_loop_closure_clusters(
-    data: EuRoCMAVData,
-    stereo_matching_result: StereoMatchingResult,
-    candidates: list[LoopClosureCandidate],
-) -> list[LoopClosureCandidate]:
-    """Collapse a run of candidates that are really one revisit event (e.g. every keyframe during
-    a stay-put stretch independently matching the same historical frame) into a single
-    representative -- the one with the most temporal matches. Keeps genuinely separate revisits
-    to a similar place, since those won't be adjacent in query time to begin with.
-
-    Improved, not resolved: re-checked against all three regression-check datasets after adding
-    this. MH_04_difficult's regression (from the original per-query, no-consolidation version) is
-    essentially gone (~12% worse than baseline in its known-sensitive ~46s region -> ~1% or
-    better). MH_02_easy is mixed -- some points improved, but its worst regression point barely
-    moved and the overall final-trajectory error got worse than the unconsolidated version (still
-    better than no closures at all, just not as good). And on V2_03_difficult itself (94 closures
-    -> 15), the correction is measurably weaker during the transition into the corrected region,
-    though still a >95% reduction from baseline overall. So some of what this collapses down was
-    real corrective signal, not pure redundancy -- collapsing every same-event cluster to exactly
-    one representative is too aggressive in at least one direction. LOOP_CLOSURE_CLUSTER_GAP_S=2.0
-    and "keep only the single best match per cluster" are both first guesses, not tuned values;
-    likely next step is keeping a small spread of representatives per cluster instead of one.
-    """
-    if not candidates:
-        return []
-    first_ts = data.cam_timestamps_ns[0]
-
-    def t(frame_idx: int) -> float:
-        return _elapsed_s(stereo_matching_result.frames[frame_idx].timestamp_ns, first_ts)
-
-    ordered = sorted(candidates, key=lambda c: c.to_frame)
-    consolidated: list[LoopClosureCandidate] = []
-    cluster = [ordered[0]]
-    for c in ordered[1:]:
-        prev = cluster[-1]
-        same_event = (abs(t(c.to_frame) - t(prev.to_frame)) <= LOOP_CLOSURE_CLUSTER_GAP_S
-                      and abs(t(c.from_frame) - t(prev.from_frame)) <= LOOP_CLOSURE_CLUSTER_GAP_S)
-        if not same_event:
-            consolidated.append(max(cluster, key=lambda x: x.num_matches))
-            cluster = []
-        cluster.append(c)
-    consolidated.append(max(cluster, key=lambda x: x.num_matches))
-    return consolidated
+    def _close_cluster(self) -> list[_LoopClosureEdge]:
+        if not self._open_cluster:
+            return []
+        best_from, best_to, best = max(self._open_cluster, key=lambda x: x[2].num_matches)
+        self._open_cluster = []
+        return [_LoopClosureEdge(
+            best_from, best_to, best.body_relative_pose,
+            LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")]
 
 
 def _get_pnp_result(
@@ -913,7 +915,7 @@ def _run_gtsam(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
-    # Runs automated loop-closure detection (_find_loop_closures) and inserts whatever it finds
+    # Runs automated loop-closure detection (_LoopClosureDetector) and inserts whatever it finds
     # into this graph, using LOOP_CLOSURE_ROT_SIGMA/TRANS_SIGMA with plain Gaussian noise. Off by
     # default -- see SlamSolver.__init__'s enable_loop_closure for why. Ignored if
     # extra_loop_closures below is given explicitly (manual override always wins over
@@ -957,15 +959,12 @@ def _run_gtsam(
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
     # Progress budget across this stage's sub-steps (fractions of the GTSAM phase):
-    #   landmark tracks      [0.00, 0.10]                 (0.00, 0.08 if enable_loop_closure)
-    #   loop closure search  n/a                           (0.08, 0.20) -- only when enabled
-    #   ISAM2 forward loop   [0.10, 0.92]                  (0.20, 0.92 if enable_loop_closure)
+    #   setup                [0.00, 0.10]
+    #   ISAM2 forward loop   [0.10, 0.92]
     #   reprojection metrics [0.92, 1.00]
-    # Loop closure detection gets its own visible slice (rather than silently eating into another
-    # phase's budget) because it's O(K^2) brute-force descriptor matching and can itself run for
-    # minutes on a large keyframe count -- without this the progress bar would sit frozen on
-    # "Building landmark tracks..." or jump straight to ISAM2 with no indication of what's
-    # actually taking the time.
+    # No separate loop-closure-search slice: detection (when enabled) runs interleaved with the
+    # ISAM2 loop, one query per new keyframe, rather than as an upfront batch pass -- so its cost
+    # is already spread across the same range the loop's own progress reports advance through.
     # keyframe_indices (from the shared _scan_keyframes pass) maps graph node j -> original frame
     # index; gaps between them vary since nodes are chosen adaptively (covisibility + motion).
     K = len(keyframe_indices)
@@ -1068,25 +1067,11 @@ def _run_gtsam(
     #   Trade-off: keeps more keyframes (e.g. 391 vs 207 on V2_03_difficult's 0-200s window), so
     #   more ISAM2 work per run.
 
-    # Auto-detect closures against the keyframe set. Manual extra_loop_closures
-    # (if given) always overrides auto-detection rather than adding to it -- keeps the test/
-    # override path from Phase 2/3 exact and predictable. Tracked separately from
-    # enable_loop_closure so the progress budget below only carves out the detection slice when
-    # this call is actually the one running _find_loop_closures.
+    # Manual extra_loop_closures (if given) always overrides auto-detection rather than adding to
+    # it -- keeps the test/override path from Phase 2/3 exact and predictable. It's a batch,
+    # fully-offline API by nature (the caller already knows every closure up front), so it's
+    # resolved to node indices here, all at once, same as it always was.
     did_auto_detect_loop_closures = enable_loop_closure and extra_loop_closures is None
-    if did_auto_detect_loop_closures:
-        on_progress(0.08, "Detecting loop closures...")
-        detected = _find_loop_closures(
-            data, feature_detection_result, stereo_matching_result, keyframe_indices,
-            on_progress=lambda p: on_progress(0.08 + p * (0.20 - 0.08), "Detecting loop closures..."))
-        extra_loop_closures = [
-            LoopClosureFactor(c.from_frame, c.to_frame, c.body_relative_pose,
-                              LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")
-            for c in detected
-        ]
-
-    # Resolve loop-closure endpoints to node indices -- keyed by the *to* node, since that's when
-    # the factor becomes addable (its *from* node, always earlier, is already in the graph by then).
     loop_closures_by_node: dict[int, list[_LoopClosureEdge]] = {}
     if extra_loop_closures:
         kf_arr = np.array(keyframe_indices)
@@ -1094,8 +1079,44 @@ def _run_gtsam(
             from_node = int(np.argmin(np.abs(kf_arr - factor.from_frame)))
             to_node = int(np.argmin(np.abs(kf_arr - factor.to_frame)))
             loop_closures_by_node.setdefault(to_node, []).append(_LoopClosureEdge(
-                from_node, factor.body_relative_pose, factor.rot_sigma, factor.trans_sigma,
+                from_node, to_node, factor.body_relative_pose, factor.rot_sigma, factor.trans_sigma,
                 factor.noise_mode))
+
+    # Auto-detection, when it runs, is fed one keyframe at a time from inside the ISAM2 loop below
+    # (loop_detector.add_keyframe, alongside track_builder.add_keyframe) instead of scanning the
+    # whole finalized keyframe set up front -- see _LoopClosureDetector's docstring.
+    loop_detector = (
+        _LoopClosureDetector(data, feature_detection_result, stereo_matching_result)
+        if did_auto_detect_loop_closures else None)
+
+    def _add_loop_closure_edges(factors: gtsam.NonlinearFactorGraph, edges: list[_LoopClosureEdge]) -> None:
+        for edge in edges:
+            delta = _to_gtsam_pose3(edge.body_relative_pose)
+            base_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([edge.rot_sigma] * 3 + [edge.trans_sigma] * 3))
+            if edge.noise_mode == "huber":
+                # Linear (not quadratic) loss beyond ~1.35 sigma -- caps a *correct* closure's
+                # pull once the prior disagreement is many multiples of sigma, which it always is
+                # right after a long blackout (measured: ~30% of the correction "gaussian" gets).
+                # Left in as an option; "gaussian" is what's actually used by auto-detection.
+                loop_noise = gtsam.noiseModel.Robust.Create(
+                    gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
+            elif edge.noise_mode == "dcs":
+                # DCS's scale factor is min(1, 2c / (c + ||r||^2)) where ||r||^2 is the whitened
+                # (chi-squared) residual -- so c must be calibrated to this factor's degrees of
+                # freedom (6, for a Pose3 BetweenFactor), not left at the textbook-example c=1.
+                # A genuinely-consistent 6-DOF residual has ||r||^2 around 6 on average; c=1
+                # measured this down to a ~0.29 scale for an *already-correct* closure (verified
+                # empirically: it made a 94-closure test on V2_03_difficult behave identically to
+                # having no closures at all). c=6 keeps full trust up to the expected value and
+                # only meaningfully down-weights past the ~12.6 (95th-percentile chi2_6) mark --
+                # i.e. genuine outliers, not closures merely large-but-correct after a long
+                # blackout.
+                loop_noise = gtsam.noiseModel.Robust.Create(
+                    gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
+            else:
+                loop_noise = base_noise
+            factors.add(gtsam.BetweenFactorPose3(X(edge.from_node), X(edge.to_node), delta, loop_noise))
 
     # node -> track ids observed there; and per-interval covisibility for the PnP gate. Filled
     # incrementally as each node is added below (node 0 here, node j+1 inside
@@ -1108,6 +1129,8 @@ def _run_gtsam(
         node_seen[node].update(touched)
 
     _register_node_tracks(0, track_builder.add_keyframe(0, keyframe_indices[0]))
+    if loop_detector is not None:
+        loop_detector.add_keyframe(0, keyframe_indices[0])  # never closes a cluster on its own
 
     inserted_landmarks: set[int] = set()
     added_obs: set[tuple[int, int]] = set()
@@ -1190,6 +1213,11 @@ def _run_gtsam(
         # Extend landmark tracks to this node before anything below reads node_seen[j+1] or
         # tracks[tid] for it (strong_covis just below, then _process_node_landmarks).
         _register_node_tracks(j + 1, track_builder.add_keyframe(j + 1, keyframe_indices[j + 1]))
+        # Same for auto-detected loop closures: search for a revisit at this keyframe now, against
+        # whatever's been added so far. Anything this returns is edge(s) whose consolidation
+        # cluster just closed -- their own to_node may be an earlier node than j+1 (added and
+        # optimized in a previous update), not necessarily this one.
+        new_loop_edges = loop_detector.add_keyframe(j + 1, keyframe_indices[j + 1]) if loop_detector is not None else []
 
         new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
 
@@ -1269,40 +1297,26 @@ def _run_gtsam(
         if not pnp_added and n_proj_at_next == 0:
             new_factors.add(gtsam.PriorFactorPose3(X(j + 1), pose_init, FALLBACK_POSE_NOISE))
 
-        for edge in loop_closures_by_node.get(j + 1, []):
-            delta = _to_gtsam_pose3(edge.body_relative_pose)
-            base_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                np.array([edge.rot_sigma] * 3 + [edge.trans_sigma] * 3))
-            if edge.noise_mode == "huber":
-                # Linear (not quadratic) loss beyond ~1.35 sigma -- caps a *correct* closure's
-                # pull once the prior disagreement is many multiples of sigma, which it always is
-                # right after a long blackout (measured: ~30% of the correction "gaussian" gets).
-                # Left in as an option; "gaussian" is what's actually used by auto-detection.
-                loop_noise = gtsam.noiseModel.Robust.Create(
-                    gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
-            elif edge.noise_mode == "dcs":
-                # DCS's scale factor is min(1, 2c / (c + ||r||^2)) where ||r||^2 is the whitened
-                # (chi-squared) residual -- so c must be calibrated to this factor's degrees of
-                # freedom (6, for a Pose3 BetweenFactor), not left at the textbook-example c=1.
-                # A genuinely-consistent 6-DOF residual has ||r||^2 around 6 on average; c=1
-                # measured this down to a ~0.29 scale for an *already-correct* closure (verified
-                # empirically: it made a 94-closure test on V2_03_difficult behave identically to
-                # having no closures at all). c=6 keeps full trust up to the expected value and
-                # only meaningfully down-weights past the ~12.6 (95th-percentile chi2_6) mark --
-                # i.e. genuine outliers, not closures merely large-but-correct after a long
-                # blackout.
-                loop_noise = gtsam.noiseModel.Robust.Create(
-                    gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
-            else:
-                loop_noise = base_noise
-            new_factors.add(gtsam.BetweenFactorPose3(X(edge.from_node), X(j + 1), delta, loop_noise))
+        # Pre-resolved manual edges targeting exactly this node, plus whatever auto-detected edges
+        # just became ready above (which may target this node or an earlier one).
+        _add_loop_closure_edges(new_factors, loop_closures_by_node.pop(j + 1, []))
+        _add_loop_closure_edges(new_factors, new_loop_edges)
 
         isam2.update(new_factors, new_values)
 
-    isam2_progress_start = 0.20 if did_auto_detect_loop_closures else 0.10
     for j in range(K - 1):
-        on_progress(isam2_progress_start + (j / (K - 1)) * (0.92 - isam2_progress_start), "Optimizing (ISAM2)...")
+        on_progress(0.10 + (j / (K - 1)) * (0.92 - 0.10), "Optimizing (ISAM2)...")
         _add_keyframe_to_graph(j)
+
+    if loop_detector is not None:
+        # Whatever cluster was still open when the run ended (its to_node is necessarily <= K-1,
+        # already in the graph) -- add_keyframe only closes a cluster when a *later* candidate
+        # arrives, so the very last one never gets that chance without this.
+        final_edges = loop_detector.flush()
+        if final_edges:
+            tail_factors = gtsam.NonlinearFactorGraph()
+            _add_loop_closure_edges(tail_factors, final_edges)
+            isam2.update(tail_factors, gtsam.Values())
 
     print(f"landmarks: {len(inserted_landmarks)}/{len(tracks)} tracks used, "
           f"{n_proj_factors} reprojection factors")
@@ -1549,11 +1563,11 @@ class SlamSolver:
         self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult, optical_flow_result: OpticalFlowResult,
         cancel_event: Optional[threading.Event] = None,
-        # Off by default: _find_loop_closures is O(K^2) brute-force descriptor matching (fine for
+        # Off by default: _LoopClosureDetector is O(K^2) brute-force descriptor matching (fine for
         # an offline research run, not yet acceptable as an always-on interactive-tool cost), and
         # its candidate-consolidation step is validated-but-not-tuned (see
-        # _consolidate_loop_closure_clusters' docstring) -- clear win on one regression-check
-        # sequence, real if smaller localized regression on another. Opt in explicitly.
+        # _LoopClosureDetector's docstring) -- clear win on one regression-check sequence, real if
+        # smaller localized regression on another. Opt in explicitly.
         enable_loop_closure: bool = False,
     ) -> None:
         self._data = data
