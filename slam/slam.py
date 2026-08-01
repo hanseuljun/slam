@@ -1,3 +1,4 @@
+from collections import defaultdict
 from dataclasses import dataclass
 import threading
 import time
@@ -1011,6 +1012,127 @@ def _scan_keyframes(
     return keyframes, filled
 
 
+class _KeyframeScanner:
+    """Incremental version of the adaptive-keyframing PnP scan above (_scan_keyframes): the exact
+    same algorithm -- a per-frame PnP against a floating reference decides both keyframe placement
+    and a per-frame dead-reckoning pose -- restructured so a caller feeds it one frame at a time
+    (add_frame) as that frame's fd/sm becomes available, instead of handing it the fully
+    materialized [0, N) result up front.
+
+    add_frame(i) requires frame i's own fd/sm to already be present in the
+    feature_detection_result/stereo_matching_result passed to __init__ (both are the same
+    incrementally-growing containers the caller's own per-frame loop is building) -- a frame after
+    i is never touched. Returns the frame index(es), if any, that became a keyframe as a direct
+    result of processing frame i: almost always 0 or 1, occasionally 2 -- mirroring
+    _scan_keyframes' original while loop, which could resolve an earlier reference frame's fate
+    (via the exception-retry path) while handling the frame it was actually called for.
+    """
+    MIN_GAP = 3
+    MAX_GAP_S = 0.75
+    COVIS_RATIO = 0.6
+    TRANS_THRESH = 0.2
+    ROT_THRESH = np.deg2rad(10.0)
+    PROBE_N = 500
+    MIN_KF_MATCHES = 80
+    DROP_MAX_GAP_S = 2 * MAX_GAP_S
+
+    def __init__(
+        self, data: EuRoCMAVData,
+        feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult,
+        n: int,
+    ) -> None:
+        self._data = data
+        self._fd_result = feature_detection_result
+        self._sm_result = stereo_matching_result
+        self.keyframes: list[int] = [0]
+        # Pre-sized (not append-only): the original writes poses[kf] for whatever kf the
+        # exception-retry path resolves, which isn't always the highest index reached so far --
+        # see add_frame's docstring. Sizing to `n` up front is a memory reservation for this
+        # window's known frame count, not a read of any frame's content ahead of its own turn.
+        self._poses: list[Optional[np.ndarray]] = [None] * n
+        self._poses[0] = np.eye(4)
+        self._ref_idx = 0
+        self._ref_covis: Optional[int] = None
+
+    def _stereo_count(self, frame_idx: int) -> int:
+        return len(self._sm_result.frames[frame_idx].matches)
+
+    def _accept_keyframe(self, candidate: int) -> Optional[int]:
+        elapsed_s = _elapsed_s(self._sm_result.frames[candidate].timestamp_ns,
+                               self._sm_result.frames[self.keyframes[-1]].timestamp_ns)
+        if self._stereo_count(candidate) < self.MIN_KF_MATCHES and elapsed_s <= self.DROP_MAX_GAP_S:
+            return None
+        self.keyframes.append(candidate)
+        return candidate
+
+    def add_frame(self, i: int) -> list[int]:
+        accepted: list[int] = []
+        while True:
+            ref_fd = self._fd_result.frames[self._ref_idx]
+            ref_sm = self._sm_result.frames[self._ref_idx]
+            cur_fd = self._fd_result.frames[i]
+            try:
+                rvec, tvec, num_matches, _ = _run_pnp_step(
+                    self._data, ref_sm.points_3d, ref_sm.matches,
+                    ref_fd.cam0_descriptors[:self.PROBE_N], cur_fd.cam0_keypoints,
+                    cur_fd.cam0_descriptors[:self.PROBE_N],
+                )
+            except Exception:
+                # Overlap with the reference is gone: anchor a keyframe at the last connected
+                # frame (or one past the reference if that is already frame i-1). kf is always
+                # exactly i-1 or i (never less -- see _scan_keyframes' identical branch), so
+                # either we still owe frame i its own resolution (kf == i-1: retry against the
+                # new reference) or frame i's fate was just decided as a side effect (kf == i:
+                # nothing more to do for this call).
+                kf = max(i - 1, self._ref_idx + 1)
+                got = self._accept_keyframe(kf)
+                if got is not None:
+                    accepted.append(got)
+                if self._poses[kf] is None:  # never got its own PnP; carry the reference pose
+                    self._poses[kf] = self._poses[self._ref_idx]
+                self._ref_idx, self._ref_covis = kf, None
+                if kf >= i:
+                    return accepted
+                continue
+
+            step = _rvec_tvec_to_transform(rvec, tvec)
+            # self._poses[self._ref_idx] is always populated by the time it's read here (index 0
+            # is seeded in __init__, and _ref_idx only ever points at an already-visited frame).
+            self._poses[i] = self._poses[self._ref_idx] @ step  # type: ignore[operator]
+
+            if self._ref_covis is None:  # first frame after a keyframe sets the covisibility baseline
+                self._ref_covis = num_matches
+
+            gap = i - self._ref_idx
+            translation = float(np.linalg.norm(tvec))
+            rotation = float(np.linalg.norm(rvec))
+            elapsed_s = _elapsed_s(self._sm_result.frames[i].timestamp_ns,
+                                   self._sm_result.frames[self._ref_idx].timestamp_ns)
+
+            force = elapsed_s >= self.MAX_GAP_S
+            allow = gap >= self.MIN_GAP
+            weak = num_matches < self.COVIS_RATIO * self._ref_covis
+            moved = translation > self.TRANS_THRESH or rotation > self.ROT_THRESH
+
+            if force or (allow and (weak or moved)):
+                got = self._accept_keyframe(i)
+                if got is not None:
+                    accepted.append(got)
+                self._ref_idx, self._ref_covis = i, None
+            return accepted
+
+    def finalize(self) -> list[np.ndarray]:
+        """Call once after every frame in the window has been fed via add_frame: forward-fills
+        any frame that never received its own pose (rare -- see add_frame's exception path)."""
+        last = np.eye(4)
+        filled = []
+        for p in self._poses:
+            last = p if p is not None else last
+            filled.append(last)
+        return filled
+
+
 def _run_gtsam(
     data: EuRoCMAVData,
     feature_detection_result: FeatureDetectionResult,
@@ -1465,30 +1587,324 @@ def _run_gtsam(
     return poses, velocities, biases, reprojection_rmse, n_lm, keyframe_indices
 
 
+class _GtsamBuilder:
+    """Incremental version of the ISAM2 graph construction in _run_gtsam above: the exact same
+    per-keyframe update (IMU factor, chained-PnP fallback, landmark reprojection factors,
+    loop-closure factors), restructured so a caller feeds it one *new* keyframe at a time
+    (add_keyframe) as soon as _KeyframeScanner confirms it, instead of handing it a complete
+    keyframe_indices list up front.
+
+    add_keyframe(frame_idx) requires every frame's fd/sm from the previous keyframe through
+    frame_idx to already be present in the feature_detection_result/stereo_matching_result passed
+    to __init__ (needed for the chained-PnP fallback, which steps through every intermediate
+    frame) -- a frame after frame_idx is never touched. optical_flow_result only needs frame_idx's
+    own entry (track_builder/loop_detector index by frame, not by interval).
+
+    Scope note: unlike _run_gtsam, this does not support the manual extra_loop_closures/debug_out
+    test hooks -- those are an inherently batch, fully-offline API (the caller already knows every
+    closure up front; see LoopClosureFactor's docstring) used only by tmp/investigate's phase2/
+    phase3 scripts, which call _run_gtsam directly and are unaffected by this class existing
+    alongside it.
+    """
+
+    def __init__(
+        self, data: EuRoCMAVData,
+        feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult,
+        optical_flow_result: OpticalFlowResult,
+        imu_samples: list[ImuSample],
+        gravity: np.ndarray,
+        first_keyframe_frame: int,
+        enable_loop_closure: bool = False,
+    ) -> None:
+        self._data = data
+        self._fd_result = feature_detection_result
+        self._sm_result = stereo_matching_result
+        self._of_result = optical_flow_result
+
+        imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
+        # See _run_gtsam's identical guard for why this must be read-only.
+        imu_timestamps_ns.flags.writeable = False
+        self._imu_timestamps_ns = imu_timestamps_ns
+        self._imu_lin_accs = np.array([s.linear_acceleration for s in imu_samples])
+        self._imu_ang_vels = np.array([s.angular_velocity for s in imu_samples])
+
+        self._body_T_cam0 = data.cam0_extrinsics
+        self._cam0_T_body = np.linalg.inv(self._body_T_cam0)
+
+        grav_win = max(1, int(data.imu0_rate_hz * 0.5))
+        first_cam_ts = stereo_matching_result.frames[first_keyframe_frame].timestamp_ns
+        i0 = int(np.argmin(np.abs(imu_timestamps_ns - first_cam_ts)))
+        gravity_in_body = self._imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
+
+        self._X = lambda i: gtsam.symbol('x', i)
+        self._V = lambda i: gtsam.symbol('v', i)
+        self._B = lambda i: gtsam.symbol('b', i)
+        self._L = lambda i: gtsam.symbol('l', i)
+
+        self._imu_params = gtsam.PreintegrationParams(gravity)
+        self._imu_params.setGyroscopeCovariance(np.eye(3) * 1e-4)
+        self._imu_params.setAccelerometerCovariance(np.eye(3) * 1e-3)
+        self._imu_params.setIntegrationCovariance(np.eye(3) * 1e-8)
+
+        self._PRIOR_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+        self._PRIOR_VEL_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
+        self._PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
+        self._PNP_STEP_SIGMAS = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
+        self._GYRO_BIAS_RW = 1.9393e-05
+        self._ACCEL_BIAS_RW = 3.0000e-03
+        self._FALLBACK_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1.0)
+
+        self._MIN_TRACK_LEN = 3
+        self._PNP_FALLBACK_COVIS = 15
+        PX_SIGMA = 1.5
+        DEPTH_MIN, DEPTH_MAX = 0.3, 40.0
+        self._cam0_K = gtsam.Cal3_S2(data.cam0_intrinsics.fx, data.cam0_intrinsics.fy, 0.0,
+                                     data.cam0_intrinsics.cx, data.cam0_intrinsics.cy)
+        self._cam1_K = gtsam.Cal3_S2(data.cam1_intrinsics.fx, data.cam1_intrinsics.fy, 0.0,
+                                     data.cam1_intrinsics.cx, data.cam1_intrinsics.cy)
+        self._cam0_pose = gtsam.Pose3(self._body_T_cam0)
+        self._cam1_pose = gtsam.Pose3(data.cam1_extrinsics)
+        self._PX_NOISE = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Huber.Create(1.345),
+            gtsam.noiseModel.Isotropic.Sigma(2, PX_SIGMA))
+        self._LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
+
+        self._track_builder = _LandmarkTrackBuilder(
+            data, feature_detection_result, stereo_matching_result, optical_flow_result,
+            DEPTH_MIN, DEPTH_MAX)
+        self._tracks = self._track_builder.tracks
+        self._loop_detector = (
+            _LoopClosureDetector(data, feature_detection_result, stereo_matching_result)
+            if enable_loop_closure else None)
+
+        # node -> track ids observed there; and per-interval covisibility for the PnP gate. Keyed
+        # by node index directly (not pre-sized by K, which isn't known until the run ends).
+        self._nodes_to_tracks: dict[int, list[int]] = defaultdict(list)
+        self._node_seen: dict[int, set[int]] = defaultdict(set)
+        self._inserted_landmarks: set[int] = set()
+        self._added_obs: set[tuple[int, int]] = set()
+        self._n_proj_factors = 0
+
+        self._isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
+
+        R_G_body0 = _align_vectors(gravity_in_body, -gravity)
+        pose0 = gtsam.Pose3(gtsam.Rot3(R_G_body0), gtsam.Point3(0.0, 0.0, 0.0))
+        f0, v0 = gtsam.NonlinearFactorGraph(), gtsam.Values()
+        f0.add(gtsam.PriorFactorPose3(self._X(0), pose0, self._PRIOR_POSE_NOISE))
+        f0.add(gtsam.PriorFactorVector(self._V(0), np.zeros(3), self._PRIOR_VEL_NOISE))
+        f0.add(gtsam.PriorFactorConstantBias(self._B(0), gtsam.imuBias.ConstantBias(), self._PRIOR_BIAS_NOISE))
+        v0.insert(self._X(0), pose0)
+        v0.insert(self._V(0), np.zeros(3))
+        v0.insert(self._B(0), gtsam.imuBias.ConstantBias())
+        self._isam2.update(f0, v0)
+
+        self._register_node_tracks(0, self._track_builder.add_keyframe(0, first_keyframe_frame))
+        if self._loop_detector is not None:
+            self._loop_detector.add_keyframe(0, first_keyframe_frame)  # never closes a cluster on its own
+
+        self._j = 0  # index of the most recently added node
+        self._prev_frame = first_keyframe_frame  # its original frame index
+
+    def _register_node_tracks(self, node: int, touched: list[int]) -> None:
+        self._nodes_to_tracks[node].extend(touched)
+        self._node_seen[node].update(touched)
+
+    def _add_obs_factors(self, factors: gtsam.NonlinearFactorGraph, tid: int, node: int,
+                         uv0: np.ndarray, uv1: np.ndarray) -> None:
+        factors.add(gtsam.GenericProjectionFactorCal3_S2(
+            uv0, self._PX_NOISE, self._X(node), self._L(tid), self._cam0_K, False, False, self._cam0_pose))
+        factors.add(gtsam.GenericProjectionFactorCal3_S2(
+            uv1, self._PX_NOISE, self._X(node), self._L(tid), self._cam1_K, False, False, self._cam1_pose))
+        self._added_obs.add((tid, node))
+        self._n_proj_factors += 2
+
+    def _process_node_landmarks(self, jj: int, est: gtsam.Values,
+                                factors: gtsam.NonlinearFactorGraph, values: gtsam.Values) -> int:
+        n_at_node = 0
+        for tid in self._nodes_to_tracks[jj]:
+            obs = self._tracks[tid]
+            if tid in self._inserted_landmarks:
+                if (tid, jj) not in self._added_obs:
+                    o = next(o for o in obs if o.node == jj)
+                    self._add_obs_factors(factors, tid, jj, o.uv0, o.uv1)
+                    n_at_node += 1
+                continue
+            avail = [o for o in obs if o.node <= jj]
+            if len(avail) < self._MIN_TRACK_LEN:
+                continue
+            first = obs[0]
+            T_G_cam0 = est.atPose3(self._X(first.node)).matrix() @ self._body_T_cam0
+            p_world = (T_G_cam0 @ np.append(first.point_cam0, 1.0))[:3]
+            values.insert(self._L(tid), gtsam.Point3(*p_world))
+            factors.add(gtsam.PriorFactorPoint3(self._L(tid), gtsam.Point3(*p_world), self._LM_PRIOR_NOISE))
+            self._inserted_landmarks.add(tid)
+            for o in avail:
+                self._add_obs_factors(factors, tid, o.node, o.uv0, o.uv1)
+                if o.node == jj:
+                    n_at_node += 1
+        return n_at_node
+
+    def _add_loop_closure_edges(self, factors: gtsam.NonlinearFactorGraph, edges: list[_LoopClosureEdge]) -> None:
+        for edge in edges:
+            delta = _to_gtsam_pose3(edge.body_relative_pose)
+            base_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([edge.rot_sigma] * 3 + [edge.trans_sigma] * 3))
+            if edge.noise_mode == "huber":
+                loop_noise = gtsam.noiseModel.Robust.Create(
+                    gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
+            elif edge.noise_mode == "dcs":
+                loop_noise = gtsam.noiseModel.Robust.Create(
+                    gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
+            else:
+                loop_noise = base_noise
+            factors.add(gtsam.BetweenFactorPose3(self._X(edge.from_node), self._X(edge.to_node), delta, loop_noise))
+
+    def add_keyframe(self, frame_idx: int) -> None:
+        """Add a new node for `frame_idx` to the graph, linked to the previously-added node by an
+        IMU factor (and a chained-PnP fallback when landmark covisibility isn't yet strong enough
+        on its own) -- see _run_gtsam's _add_keyframe_to_graph for the algorithm this mirrors.
+        """
+        j = self._j
+        est = self._isam2.calculateEstimate()
+        pose_i = est.atPose3(self._X(j))
+        vel_i = est.atVector(self._V(j))
+        bias_i = est.atConstantBias(self._B(j))
+
+        kf_i, kf_next = self._prev_frame, frame_idx
+        kf_i_ts = self._sm_result.frames[kf_i].timestamp_ns
+        kf_next_ts = self._sm_result.frames[kf_next].timestamp_ns
+
+        self._register_node_tracks(j + 1, self._track_builder.add_keyframe(j + 1, frame_idx))
+        new_loop_edges = (
+            self._loop_detector.add_keyframe(j + 1, frame_idx) if self._loop_detector is not None else [])
+
+        new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
+
+        pim = gtsam.PreintegratedImuMeasurements(self._imu_params, bias_i)
+        window = np.where(
+            (self._imu_timestamps_ns >= kf_i_ts) & (self._imu_timestamps_ns < kf_next_ts))[0]
+        for k in window:
+            dt = (float(self._imu_timestamps_ns[k + 1] - self._imu_timestamps_ns[k]) * 1e-9
+                  if k + 1 < len(self._imu_timestamps_ns) else 1.0 / self._data.imu0_rate_hz)
+            pim.integrateMeasurement(self._imu_lin_accs[k], self._imu_ang_vels[k], dt)
+
+        new_factors.add(gtsam.ImuFactor(self._X(j), self._V(j), self._X(j + 1), self._V(j + 1), self._B(j), pim))
+        dt_kf = float(kf_next_ts - kf_i_ts) * 1e-9
+        bias_between_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array(
+            [self._ACCEL_BIAS_RW * np.sqrt(dt_kf)] * 3 + [self._GYRO_BIAS_RW * np.sqrt(dt_kf)] * 3))
+        new_factors.add(gtsam.BetweenFactorConstantBias(
+            self._B(j), self._B(j + 1), gtsam.imuBias.ConstantBias(), bias_between_noise))
+
+        nav_j = pim.predict(gtsam.NavState(pose_i, vel_i), bias_i)
+        pose_init = nav_j.pose()
+        vel_init = nav_j.velocity()
+
+        strong_covis = sum(
+            1 for tid in (self._node_seen[j] & self._node_seen[j + 1]) if tid in self._inserted_landmarks)
+        pnp_added = False
+        if strong_covis < self._PNP_FALLBACK_COVIS:
+            pnp_cam0 = np.eye(4)
+            pnp_ok = True
+            for f in range(kf_i, kf_next):
+                sm_f = self._sm_result.frames[f]
+                fd_f, fd_f1 = self._fd_result.frames[f], self._fd_result.frames[f + 1]
+                try:
+                    rvec, tvec, _, _ = _run_pnp_step(
+                        self._data, sm_f.points_3d, sm_f.matches,
+                        fd_f.cam0_descriptors, fd_f1.cam0_keypoints, fd_f1.cam0_descriptors,
+                    )
+                except Exception:
+                    pnp_ok = False
+                    break
+                pnp_cam0 = pnp_cam0 @ _rvec_tvec_to_transform(rvec, tvec)
+
+            if pnp_ok:
+                pnp_body = self._body_T_cam0 @ pnp_cam0 @ self._cam0_T_body
+                pnp_delta = _to_gtsam_pose3(pnp_body)
+                pnp_noise = gtsam.noiseModel.Diagonal.Sigmas(self._PNP_STEP_SIGMAS * np.sqrt(kf_next - kf_i))
+                new_factors.add(gtsam.BetweenFactorPose3(self._X(j), self._X(j + 1), pnp_delta, pnp_noise))
+                pose_init = pose_i.compose(pnp_delta)
+                pnp_added = True
+
+        new_values.insert(self._X(j + 1), pose_init)
+        new_values.insert(self._V(j + 1), vel_init)
+        new_values.insert(self._B(j + 1), bias_i)
+        n_proj_at_next = self._process_node_landmarks(j + 1, est, new_factors, new_values)
+        if not pnp_added and n_proj_at_next == 0:
+            new_factors.add(gtsam.PriorFactorPose3(self._X(j + 1), pose_init, self._FALLBACK_POSE_NOISE))
+
+        self._add_loop_closure_edges(new_factors, new_loop_edges)
+
+        self._isam2.update(new_factors, new_values)
+        self._j += 1
+        self._prev_frame = frame_idx
+
+    def finalize(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
+        """Call once after every keyframe has been added: flushes any still-open loop-closure
+        cluster, then computes final poses/velocities/biases/reprojection metrics -- see
+        _run_gtsam's tail for the algorithm this mirrors.
+        """
+        if self._loop_detector is not None:
+            final_edges = self._loop_detector.flush()
+            if final_edges:
+                tail_factors = gtsam.NonlinearFactorGraph()
+                self._add_loop_closure_edges(tail_factors, final_edges)
+                self._isam2.update(tail_factors, gtsam.Values())
+
+        K = self._j + 1
+        print(f"landmarks: {len(self._inserted_landmarks)}/{len(self._tracks)} tracks used, "
+              f"{self._n_proj_factors} reprojection factors")
+        final = self._isam2.calculateEstimate()
+        poses = [final.atPose3(self._X(j)).matrix() for j in range(K)]
+        velocities = [final.atVector(self._V(j)) for j in range(K)]
+        biases = [final.atConstantBias(self._B(j)).vector() for j in range(K)]
+
+        inv_Twc0 = [np.linalg.inv(pm @ self._body_T_cam0) for pm in poses]
+        inv_Twc1 = [np.linalg.inv(pm @ self._data.cam1_extrinsics) for pm in poses]
+        sq_px = np.zeros(K)
+        n_px = np.zeros(K)
+        n_lm = np.zeros(K)
+        for tid in self._inserted_landmarks:
+            p = np.append(np.asarray(final.atPoint3(self._L(tid))), 1.0)
+            for o in self._tracks[tid]:
+                seen = False
+                for intrin, inv_Twc, uv in (
+                    (self._data.cam0_intrinsics, inv_Twc0, o.uv0),
+                    (self._data.cam1_intrinsics, inv_Twc1, o.uv1),
+                ):
+                    pc = inv_Twc[o.node] @ p
+                    if pc[2] <= 1e-6:
+                        continue
+                    u = intrin.fx * pc[0] / pc[2] + intrin.cx
+                    v = intrin.fy * pc[1] / pc[2] + intrin.cy
+                    sq_px[o.node] += (u - uv[0]) ** 2 + (v - uv[1]) ** 2
+                    n_px[o.node] += 1
+                    seen = True
+                if seen:
+                    n_lm[o.node] += 1
+        reprojection_rmse = np.where(n_px > 0, np.sqrt(sq_px / np.maximum(n_px, 1)), np.nan)
+
+        return poses, velocities, biases, reprojection_rmse, n_lm
+
+
 def _get_gtsam_result(
     data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
     stereo_matching_result: StereoMatchingResult,
-    optical_flow_result: OpticalFlowResult,
     first_timestamp_ns: int,
     min_timestamp_ns: int,
-    max_timestamp_ns: int,
-    gravity: np.ndarray,
     keyframe_indices: list[int],
-    on_progress: Callable[[float, str], None],
-    enable_loop_closure: bool = False,
+    poses: list[np.ndarray],
+    velocities: list[np.ndarray],
+    biases: list[np.ndarray],
+    reprojection_rmse: np.ndarray,
+    landmark_counts: np.ndarray,
 ) -> SlamGtsamResult:
-    # Window the IMU to [min, max]; only this range is ever integrated. Leaving the whole t=0
-    # prefix in (as `<= max` alone did) needlessly grows the array -- and, at larger start_s,
-    # pushes it past NumPy's temporary-elision size threshold (see the read-only guard in
-    # _run_gtsam), so keeping it windowed is both cheaper and safer.
-    imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
-    # _run_gtsam gets [0.00, 0.95] of this stage; the trajectory alignment below takes the rest.
-    poses, velocities, biases, reprojection_rmse, landmark_counts, keyframe_indices = _run_gtsam(
-        data, feature_detection_result, stereo_matching_result, optical_flow_result, imu_samples, gravity,
-        keyframe_indices, on_progress=lambda p, lbl: on_progress(p * 0.95, lbl),
-        enable_loop_closure=enable_loop_closure)
-    on_progress(0.96, "Aligning to ground truth...")
+    """Ground-truth alignment and ATE/RPE metrics for an already-computed GTSAM trajectory.
+    Doesn't run the graph itself -- see _compute, which drives _KeyframeScanner and
+    _GtsamBuilder together in one pass and passes the resulting tuple straight in here, the same
+    way _get_pnp_result already takes a pre-computed pnp_poses rather than deriving it itself.
+    """
     K = len(poses)
 
     kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
@@ -1624,28 +2040,42 @@ def _compute(
         gt_result.rotation_matrices, first_gt_timestamp_ns,
     )
 
-    # Single per-frame PnP scan shared by the PnP diagnostic and GTSAM node selection: it returns
-    # both the keyframe indices (GTSAM nodes) and the per-frame cam0 dead-reckoning trajectory,
-    # so the expensive ref->frame ORB matching happens once instead of twice.
+    # Keyframe selection and GTSAM graph construction as one pass, instead of a complete scan
+    # over every frame followed by a complete graph-build over every keyframe: _KeyframeScanner
+    # and _GtsamBuilder are each fed one frame/keyframe at a time, in the same loop, so a
+    # keyframe's factors get added the moment it's confirmed rather than only once the whole
+    # window has been scanned. See both classes' docstrings; this replaces _scan_keyframes'
+    # up-front full-window pass and _run_gtsam's separate up-front-keyframe-list pass with the
+    # incremental machinery those two already contained.
     set_progress(0.06, "Selecting keyframes...")
-    pnp_t0 = time.monotonic()
-    keyframe_indices, pnp_poses = _scan_keyframes(
-        data, feature_detection_result, stereo_matching_result, len(stereo_matching_result.frames),
-        on_progress=lambda p: set_progress(0.06 + p * (0.45 - 0.06), "Selecting keyframes..."),
-    )
+    scan_and_build_t0 = time.monotonic()
+    imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
+    N = len(stereo_matching_result.frames)
+    scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result, N)
+    builder = _GtsamBuilder(
+        data, feature_detection_result, stereo_matching_result, optical_flow_result,
+        imu_samples, gravity, first_keyframe_frame=0, enable_loop_closure=enable_loop_closure)
+    for i in range(1, N):
+        set_progress(0.06 + (i / N) * (0.95 - 0.06), "Selecting keyframes / optimizing (ISAM2)...")
+        for kf in scanner.add_frame(i):
+            builder.add_keyframe(kf)
+    keyframe_indices = scanner.keyframes
+    pnp_poses = scanner.finalize()
+    gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts = builder.finalize()
+    # Scanning and graph-building are now the same combined pass, so they no longer have
+    # separately measurable costs -- both diagnostics report the same total.
+    scan_and_build_elapsed = time.monotonic() - scan_and_build_t0
+
     pnp_result = _get_pnp_result(
         data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, pnp_poses)
-    pnp_result.elapsed_time = time.monotonic() - pnp_t0
+    pnp_result.elapsed_time = scan_and_build_elapsed
 
-    gtsam_t0 = time.monotonic()
+    set_progress(0.96, "Aligning to ground truth...")
     gtsam_result = _get_gtsam_result(
-        data, feature_detection_result, stereo_matching_result, optical_flow_result,
-        first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
-        gravity=gravity, keyframe_indices=keyframe_indices,
-        on_progress=lambda p, lbl: set_progress(0.45 + p * (0.97 - 0.45), lbl),
-        enable_loop_closure=enable_loop_closure,
+        data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
+        keyframe_indices, gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts,
     )
-    gtsam_result.elapsed_time = time.monotonic() - gtsam_t0
+    gtsam_result.elapsed_time = scan_and_build_elapsed
 
     set_progress(0.97, "Finishing...")
     extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
