@@ -841,13 +841,35 @@ def _scan_keyframes(
     # ISAM2 then reconciles their disagreement by spiking the gyro bias, corrupting the pose and
     # injecting a permanent trajectory offset (see the ~20 s failure on MH_02_easy). The floor is
     # ~1st percentile of per-frame stereo-match counts, so it only rejects the genuinely starved
-    # tail, not ordinary low-overlap keyframes. Dead nodes are dropped after selection (below).
+    # tail, not ordinary low-overlap keyframes. Decided the moment each candidate is proposed (see
+    # _accept_keyframe below), not in a later pass over the finalized list.
     MIN_KF_MATCHES = 80
+    # A dead-vision candidate is merged into the ongoing IMU-only gap rather than becoming its own
+    # node -- but only up to this bound, so a run of dead-vision candidates can't open an
+    # unbounded gap; past it, keep the candidate anyway as the least-bad option, to cap
+    # preintegration drift. Time-based (see MAX_GAP_S above) for the same reason.
+    DROP_MAX_GAP_S = 2 * MAX_GAP_S
 
     def _stereo_count(frame_idx: int) -> int:
         return len(stereo_matching_result.frames[frame_idx].matches)
 
     keyframes = [0]
+
+    def _accept_keyframe(candidate: int) -> None:
+        """Add `candidate` as a keyframe, unless it landed on dead vision *and* doing so wouldn't
+        open too wide an IMU-only gap -- in which case it's silently merged into the gap instead.
+        Uses only `candidate`'s own (already-available) stereo count and the last *kept*
+        keyframe's timestamp -- never anything about a candidate not yet proposed. No exemption
+        for whichever candidate turns out to be the last one: the same DROP_MAX_GAP_S bound
+        that already governs every interior merge governs the tail too (a real-time stream has
+        no "last frame" to special-case in the first place).
+        """
+        elapsed_s = _elapsed_s(stereo_matching_result.frames[candidate].timestamp_ns,
+                               stereo_matching_result.frames[keyframes[-1]].timestamp_ns)
+        if _stereo_count(candidate) < MIN_KF_MATCHES and elapsed_s <= DROP_MAX_GAP_S:
+            return
+        keyframes.append(candidate)
+
     poses: list[Optional[np.ndarray]] = [None] * N
     poses[0] = np.eye(4)
     ref_idx = 0
@@ -868,7 +890,7 @@ def _scan_keyframes(
             # Overlap with the reference is gone: anchor a keyframe at the last connected frame
             # (or one past the reference if that is already frame i-1), then re-evaluate i.
             kf = max(i - 1, ref_idx + 1)
-            keyframes.append(kf)
+            _accept_keyframe(kf)
             if poses[kf] is None:  # this frame never got its own PnP; carry the reference pose
                 poses[kf] = poses[ref_idx]
             ref_idx, ref_covis = kf, None
@@ -896,37 +918,26 @@ def _scan_keyframes(
         moved = translation > TRANS_THRESH or rotation > ROT_THRESH
 
         if force or (allow and (weak or moved)):
-            keyframes.append(i)
+            _accept_keyframe(i)
             ref_idx, ref_covis = i, None
         i += 1
 
-    # No forced keyframe at the last frame of the window. There used to be one
-    # (`if keyframes[-1] != N - 1: keyframes.append(N - 1)`), unconditionally anchoring a node at
-    # whatever frame the caller's [start_s, start_s + duration_s] window happened to end on. That
-    # requires knowing the data has ended -- true for this offline/windowed tool, never true for a
-    # live stream, which just keeps going. Not needed either way: MAX_GAP_S already guarantees a
-    # keyframe at least every 0.75s regardless of motion (`force = elapsed_s >= MAX_GAP_S` above),
-    # so the natural tail keyframe is never more than one MAX_GAP_S short of wherever the window
-    # actually ends -- a small, bounded difference, not an unrepresented trajectory segment. The
-    # per-frame dead-reckoning trajectory (`poses`, returned alongside keyframes) still covers
-    # every frame up to N-1 regardless; only the GTSAM graph's own last node can now land up to
-    # ~0.75s earlier than the requested window's end.
+    # No forced keyframe at the last frame of the window, and no exemption from the dead-vision
+    # merge either. There used to be both: an unconditional `keyframes.append(N - 1)` if the loop
+    # hadn't already placed one there, and a separate pass afterward that dropped dead-vision
+    # candidates from everywhere *except* whichever one turned out to be first or last. Both
+    # required knowing where the data ends -- true for this offline/windowed tool, never true for
+    # a live stream, which just keeps going. Neither is needed: MAX_GAP_S already guarantees a
+    # keyframe candidate at least every 0.75s regardless of motion, and DROP_MAX_GAP_S (in
+    # _accept_keyframe, applied uniformly now, including to whatever candidate turns out to be
+    # last) bounds how much further a dead-vision candidate can push that gap -- so the tail is
+    # never more than DROP_MAX_GAP_S short of wherever the window actually ends, a small bounded
+    # difference, not an unrepresented trajectory segment. The per-frame dead-reckoning trajectory
+    # (`poses`, returned alongside keyframes) still covers every frame up to N-1 regardless; only
+    # the GTSAM graph's own last node can land short of the requested window's end. (frame 0 stays
+    # unconditionally exempt from the dead-vision check -- not a lookahead issue, since it's
+    # simply wherever this scan starts, never a decision made using data from later frames.)
 
-    # Drop interior keyframes that landed on dead vision -- rather than pin a pose on a starved
-    # frame, merge its neighbours so the IMU factor carries the gap (extend the IMU-only interval).
-    # Keep the frame-0 anchor and the terminal node. Bound the merged gap so removing a run of dead
-    # frames can't open an unbounded IMU-only stretch; if it would, keep that node as the least-bad
-    # option to cap preintegration drift. Time-based (see MAX_GAP_S above) for the same reason.
-    DROP_MAX_GAP_S = 2 * MAX_GAP_S
-    kept = [keyframes[0]]
-    for k in keyframes[1:-1]:
-        elapsed_s = _elapsed_s(stereo_matching_result.frames[k].timestamp_ns,
-                               stereo_matching_result.frames[kept[-1]].timestamp_ns)
-        if _stereo_count(k) < MIN_KF_MATCHES and elapsed_s <= DROP_MAX_GAP_S:
-            continue
-        kept.append(k)
-    kept.append(keyframes[-1])
-    keyframes = kept
     # Forward-fill any frame that never received a pose (rare: skipped by an exception jump).
     last = np.eye(4)
     filled = []
