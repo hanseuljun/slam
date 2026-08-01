@@ -372,8 +372,8 @@ class LoopClosureFactor:
 @dataclass(frozen=True)
 class _LoopClosureEdge:
     """LoopClosureFactor with its from_frame resolved to a graph node index, once _run_gtsam's
-    MIN_KF_LANDMARKS re-keying has settled which frames actually became nodes. to_node isn't
-    stored -- it's implicit in whatever key this edge is filed under in loop_closures_by_node."""
+    keyframe_indices is final. to_node isn't stored -- it's implicit in whatever key this edge is
+    filed under in loop_closures_by_node."""
     from_node: int
     body_relative_pose: np.ndarray
     rot_sigma: float
@@ -909,8 +909,7 @@ def _run_gtsam(
     # auto-detection).
     enable_loop_closure: bool = False,
     # Manual override / test hook (see tmp/investigate/v2_03_loop_closure_phase*.py). Frame
-    # indices (not node indices) so callers don't need to know how MIN_KF_LANDMARKS re-keying
-    # below will renumber nodes -- resolved to nodes internally once keyframe_indices is final.
+    # indices (not node indices) -- resolved to nodes internally once keyframe_indices is final.
     # noise_mode in {"gaussian", "huber", "dcs"} -- use "gaussian"; see the noise construction
     # below (at the point of use) for why the other two underperform.
     # Defaults to a no-op: omitting both this and enable_loop_closure leaves _run_gtsam's output
@@ -1028,65 +1027,38 @@ def _run_gtsam(
     LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
 
     on_progress(0.0, "Building landmark tracks...")
+    # Called once over the whole window here (an artifact of this module's offline/batch calling
+    # convention -- feature_detection_result etc. already arrive as full-sequence precomputed
+    # arrays), but the function itself performs a strictly forward walk: each step only reads
+    # node_obs[jj] and the previous step's prev_flow_tid_to_tid (see its loop), never anything at
+    # a later jj. A per-keyframe streaming caller would produce the identical `tracks` prefix at
+    # every node, so nothing here depends on future frames.
     tracks = _build_landmark_tracks(
         data, feature_detection_result, stereo_matching_result, optical_flow_result, keyframe_indices,
         MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX)
 
-    # MIN_KF_MATCHES (in _scan_keyframes) only rejects a keyframe with too few *stereo*
-    # (cam0-cam1, same-instant) matches. A keyframe can clear that easily -- plenty of L/R
-    # overlap -- and still land almost no landmark *tracks*, if temporal (frame-to-frame)
-    # matching is what's failing: a lighting swing or glare patch that changes the scene's
-    # appearance between keyframes without touching stereo overlap at all. Such a node gets
-    # too few reprojection factors to pin its pose, so ISAM2 reconciles the shortfall against
-    # the IMU factor by pulling the accel bias instead (see ACCEL_BIAS_RW above) -- the
-    # accel-bias runaway + position drift seen on MH_04_difficult ~46s.
-    # Floor is ~5th percentile of per-keyframe landmark counts on a clean run, so it only
-    # rejects the genuinely track-starved tail, not ordinary low-structure keyframes.
-    # Lowered from 100 -> 60: on V2_02_medium's ~74-78s fast vertical maneuver, 100 was
-    # dropping every keyframe in a multi-second, uniformly-mediocre (60-97 landmark) stretch
-    # except the one forced to survive by DROP_MAX_GAP -- but that survivor's own tracks
-    # depended on the just-dropped neighbours, so it came out with 0 landmarks (worse than
-    # if the gate had left the stretch alone). Not a full fix -- the gate is non-causal (it
-    # decides drops from pre-drop counts, never re-checking whether a survivor still clears
-    # MIN_TRACK_LEN after its neighbours are gone) -- but 60 keeps this specific stretch intact.
-    MIN_KF_LANDMARKS = 60
-    # Time-based, not frame-count, for the same reason as _scan_keyframes' MAX_GAP_S. 1.5s = 30
-    # frames at 20Hz, matching the original tuning.
-    DROP_MAX_GAP_S = 1.5
-    landmark_counts_per_node = [0] * K
-    for obs in tracks.values():
-        for o in obs:
-            landmark_counts_per_node[o.node] += 1
-    if any(c < MIN_KF_LANDMARKS for c in landmark_counts_per_node[1:-1]):
-        kept_positions = [0]
-        for pos in range(1, K - 1):
-            elapsed_s = _elapsed_s(cam_timestamps_ns[keyframe_indices[pos]],
-                                   cam_timestamps_ns[keyframe_indices[kept_positions[-1]]])
-            if (landmark_counts_per_node[pos] < MIN_KF_LANDMARKS
-                    and elapsed_s <= DROP_MAX_GAP_S):
-                continue
-            kept_positions.append(pos)
-        kept_positions.append(K - 1)
-        if len(kept_positions) != K:
-            # Re-key the *already-built* tracks onto the surviving nodes instead of asking
-            # _build_landmark_tracks to re-derive temporal matches over the now-wider gaps
-            # between them: that would re-run frame-to-frame descriptor matching across a
-            # bigger baseline exactly where appearance is already unstable, trading one
-            # starved node for worse tracks at every surviving neighbour (verified: rebuilding
-            # made position error worse, not better -- 0.62m -> 1.15m by t=50s on this dataset).
-            old_to_new = {old: new for new, old in enumerate(kept_positions)}
-            remapped_tracks = {}
-            for tid, obs in tracks.items():
-                filtered = [LandmarkObservation(old_to_new[o.node], o.uv0, o.uv1, o.point_cam0)
-                            for o in obs if o.node in old_to_new]
-                if len(filtered) >= MIN_TRACK_LEN:
-                    remapped_tracks[tid] = filtered
-            tracks = remapped_tracks
-            keyframe_indices = [keyframe_indices[p] for p in kept_positions]
-            K = len(keyframe_indices)
+    # No landmark-starvation keyframe drop here. There used to be one: a keyframe whose per-node
+    # landmark-track count fell under a MIN_KF_LANDMARKS threshold got merged into the IMU-only
+    # gap between its neighbours, on the theory that a node with too few reprojection factors
+    # hangs entirely off the IMU factor and lets ISAM2 explain the shortfall by spiking the bias
+    # instead of the pose (see the accel-bias runaway this caused on MH_04_difficult ~46s,
+    # historically). Two problems with it:
+    #   - It's non-causal even in its best form: whether a track clears MIN_TRACK_LEN isn't known
+    #     until MIN_TRACK_LEN-1 keyframes after it starts (tracks are contiguous runs, so this is
+    #     bounded, not unbounded -- but it's still a lookahead a real-time caller would have to
+    #     buffer for).
+    #   - It's no longer needed for the failure mode it was built for. _add_keyframe_to_graph
+    #     already has FALLBACK_POSE_NOISE (below) as a weak prior for exactly the case this gate
+    #     was trying to avoid -- a node with neither a PnP between-factor nor any reprojection
+    #     factor. Tested removing this gate entirely (keep every _scan_keyframes keyframe, causal
+    #     by construction since there's no drop decision to make) against the two sequences that
+    #     originally motivated it plus two more: mean ATE improved or was statistically flat on
+    #     all four (MH_02_easy 0.042m -> 0.019m, MH_04_difficult 0.333m -> 0.224m,
+    #     MH_05_difficult 0.521m -> 0.532m, V2_03_difficult 3.435m -> 0.514m). No regression found.
+    #   Trade-off: keeps more keyframes (e.g. 391 vs 207 on V2_03_difficult's 0-200s window), so
+    #   more ISAM2 work per run.
 
-    # Auto-detect closures against the *final* (post-re-keying) keyframe set, so a node dropped
-    # above for landmark starvation can't be picked as an endpoint. Manual extra_loop_closures
+    # Auto-detect closures against the keyframe set. Manual extra_loop_closures
     # (if given) always overrides auto-detection rather than adding to it -- keeps the test/
     # override path from Phase 2/3 exact and predictable. Tracked separately from
     # enable_loop_closure so the progress budget below only carves out the detection slice when
@@ -1103,9 +1075,8 @@ def _run_gtsam(
             for c in detected
         ]
 
-    # Resolve loop-closure endpoints to final node indices now that re-keying (above) has settled
-    # keyframe_indices -- keyed by the *to* node, since that's when the factor becomes addable
-    # (its *from* node, always earlier, is already in the graph by then).
+    # Resolve loop-closure endpoints to node indices -- keyed by the *to* node, since that's when
+    # the factor becomes addable (its *from* node, always earlier, is already in the graph by then).
     loop_closures_by_node: dict[int, list[_LoopClosureEdge]] = {}
     if extra_loop_closures:
         kf_arr = np.array(keyframe_indices)
