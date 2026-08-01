@@ -26,15 +26,21 @@ class FeatureDetectionResult:
     elapsed_s: float
 
 
-def detect_features_for_frame(data: EuRoCMAVData, ts: int) -> FeatureDetectionFrame:
+def detect_features_for_frame(
+    data: EuRoCMAVData, ts: int,
+    cam0_img: Optional[np.ndarray] = None, cam1_img: Optional[np.ndarray] = None,
+) -> FeatureDetectionFrame:
     """ORB detect+compute on both cameras for a single frame -- a pure function of that frame's
     own images, no cross-frame state. Shared by FeatureDetectionSolver (batch, thread-pooled
-    across every frame in a window) and slam.py's own incremental per-frame loop (called on
-    demand, one frame at a time) so both stay byte-identical by construction, not by convention.
+    across every frame in a window, always loads its own images) and slam.py's own incremental
+    per-frame loop (which loads cam0 once and passes it in here, since it also needs the same
+    image for optical flow -- passing cam0_img/cam1_img in avoids loading either a second time).
     """
     orb = cv2.ORB.create(nfeatures=2000)
-    cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-    cam1_img = cv2.imread(str(data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+    if cam0_img is None:
+        cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+    if cam1_img is None:
+        cam1_img = cv2.imread(str(data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
     # cv2's stub types `mask` as non-Optional MatLike, but passing None (no mask) is the
     # standard, correct OpenCV idiom -- the stub is just missing the `| None`.
     cam0_keypoints, cam0_descriptors = orb.detectAndCompute(cam0_img, None)  # type: ignore[call-overload]

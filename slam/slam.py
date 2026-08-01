@@ -9,14 +9,78 @@ import gtsam
 import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
-from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
+from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult, detect_features_for_frame
 from slam.imu_initialization import ImuInitializationResult
-from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
+from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult, OpticalFlowTracker
 from slam.orb_vocabulary import ORBVocabulary
-from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
+from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult, match_and_triangulate_stereo
 from slam.util import quaternion_to_rotation_matrix
 
 RPE_DELTA_S = 1.0  # RPE window: how far apart (in time) the two poses being compared are [s]
+
+
+def _compute_frontend_incrementally(
+    data: EuRoCMAVData,
+    start_s: float,
+    duration_s: float,
+    cancel_event: threading.Event,
+    on_progress: Optional[Callable[[float], None]] = None,
+) -> tuple[FeatureDetectionResult, StereoMatchingResult, OpticalFlowResult]:
+    """Feature detection + stereo matching + optical flow for every frame in
+    [start_s, start_s + duration_s], computed one frame at a time in strictly increasing order --
+    no ThreadPoolExecutor precomputation across the window (that's what
+    FeatureDetectionSolver/StereoMatchingSolver do; both are safe to call one frame at a time
+    since neither carries state across frames), and no frame ever read before its own turn.
+
+    Produces the exact same FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult shape
+    the batch solvers return, so _scan_keyframes/_run_gtsam are unaffected -- this only changes
+    *how* that data gets computed (incrementally, inside this module, from raw images) rather than
+    *what* it contains. Each camera image is loaded once and reused for both feature detection and
+    optical flow (detect_features_for_frame accepts pre-loaded images for exactly this reason) --
+    today's separate FeatureDetectionSolver/OpticalFlowSolver each load cam0 independently.
+
+    A single OpticalFlowTracker is threaded through the whole loop, since track identity has to
+    stay continuous across frames the same way it does inside OpticalFlowSolver.run() -- see
+    OpticalFlowTracker's docstring.
+    """
+    first_ts = data.cam_timestamps_ns[0]
+    min_ts = first_ts + int(start_s * 1e9)
+    max_ts = min_ts + int(duration_s * 1e9)
+    timestamps = [t for t in data.cam_timestamps_ns if min_ts <= t <= max_ts]
+    n = len(timestamps)
+
+    fd_frames: list[FeatureDetectionFrame] = []
+    sm_frames: list[StereoMatchingFrame] = []
+    of_frames: list[OpticalFlowFrame] = []
+    tracker = OpticalFlowTracker()
+
+    t0 = time.monotonic()
+    for i, ts in enumerate(timestamps):
+        if cancel_event.is_set():
+            break
+
+        cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        cam1_img = cv2.imread(str(data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        fd_frame = detect_features_for_frame(data, ts, cam0_img, cam1_img)
+        fd_frames.append(fd_frame)
+
+        matches, points_3d = match_and_triangulate_stereo(
+            data, fd_frame.cam0_keypoints, fd_frame.cam0_descriptors,
+            fd_frame.cam1_keypoints, fd_frame.cam1_descriptors)
+        sm_frame = StereoMatchingFrame(timestamp_ns=ts, matches=matches, points_3d=points_3d)
+        sm_frames.append(sm_frame)
+
+        of_frames.append(tracker.add_frame(fd_frame, sm_frame, cam0_img))
+
+        if on_progress is not None:
+            on_progress((i + 1) / n)
+
+    elapsed_s = time.monotonic() - t0
+    return (
+        FeatureDetectionResult(frames=fd_frames, elapsed_s=elapsed_s),
+        StereoMatchingResult(frames=sm_frames, elapsed_s=elapsed_s),
+        OpticalFlowResult(frames=of_frames, elapsed_s=elapsed_s),
+    )
 
 
 @dataclass
