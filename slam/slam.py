@@ -12,6 +12,7 @@ from slam.data import EuRoCMAVData, ImuSample
 from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
 from slam.imu_initialization import ImuInitializationResult
 from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
+from slam.orb_vocabulary import ORBVocabulary
 from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
@@ -408,11 +409,16 @@ LOOP_CLOSURE_CLUSTER_GAP_S = 2.0
 class _LoopClosureDetector:
     """Detects loop closures one keyframe at a time, instead of scanning the whole finalized
     keyframe set in a single batch pass. For every keyframe, checks whether it revisits an
-    earlier one: plain ORB descriptor match count as the place-recognition signal (no
-    bag-of-words dependency needed at this scale -- validated on ~320 keyframes in seconds), then
-    PnP/RANSAC geometric verification via the same _run_pnp_step already used for temporal
-    matching elsewhere in this module. add_keyframe(node, frame) only ever searches against nodes
-    0..node-1, already added -- never one added later.
+    earlier one: a bag-of-words shortlist (ORBVocabulary; see orb_vocabulary.py) as the cheap
+    place-recognition signal, then PnP/RANSAC geometric verification via the same _run_pnp_step
+    already used for temporal matching elsewhere in this module. add_keyframe(node, frame) only
+    ever searches against nodes 0..node-1, already added -- never one added later.
+
+    The vocabulary itself is a fixed asset trained offline, once, on a *different* sequence than
+    whatever this detector runs on (see tmp/investigate/train_orb_vocab.py) -- not something
+    derived from this run's own frames, so using it doesn't reintroduce the kind of lookahead the
+    rest of this module avoids. What varies per query is only which of the *already-added*
+    keyframes' bag-of-words vectors it's compared against.
 
     Only the single best-scoring earlier candidate is kept per query, and same-event clusters are
     then consolidated into one representative each -- a stay-put stretch has every one of its
@@ -445,25 +451,27 @@ class _LoopClosureDetector:
     cluster" are both first guesses, not tuned values; likely next step is keeping a small spread
     of representatives per cluster instead of one.
 
-    Trade-off vs the batch version this replaced: that version ran all K queries' searches on a
-    thread pool, since they're independent of each other. Here a query only exists once its own
-    keyframe is reached, so there's nothing left to parallelize across -- more sequential
-    wall-clock work for an equivalent offline run, in exchange for never touching a keyframe that
-    hasn't happened yet.
+    The original batch version (see git history) got its speed from a thread pool across all K
+    queries at once, which stopped being available once a query only exists after its own keyframe
+    arrives -- see zero_lookahead reports in tmp/ for that finding. Bag-of-words replaced that lost
+    parallelism with less total work instead: profiled on V2_03_difficult 0-90s, the brute-force
+    truncated-descriptor probe this replaced spent 22.6s of 30.6s in knnMatch (44,074 calls, one
+    per earlier candidate per query); the inverted-index shortlist here cuts that to ~5 knnMatch
+    calls per query (SHORTLIST_N, on the BoW-selected shortlist only), for a ~40% faster
+    end-to-end run with equivalent or better accuracy on every regression-check sequence tested
+    (MH_02_easy, MH_04_difficult, V2_03_difficult).
     """
 
-    # The O(K^2) coarse scoring pass only needs a similarity *count*, not a precise match -- same
-    # rationale as _scan_keyframes' own PROBE_N=500 probe. ORB returns keypoints response-ordered,
-    # so the strongest ~PROBE_N carry most of the discriminative signal; brute-force Hamming cost
-    # scales with descriptor-count^2 per pair, so this alone cuts that dominant cost by roughly
-    # (2000/PROBE_N)^2 ~= 16x. Truncated scoring alone changes which candidate "wins" per query
-    # often enough to measurably weaken results (verified: mean ATE after a real closure went
-    # from 0.16m to 0.67m on V2_03_difficult, using truncated-only scoring) -- so it's used only
-    # to build a cheap shortlist here; SHORTLIST_N candidates are then re-scored with full
-    # descriptors (O(SHORTLIST_N) extra full comparisons per query, not O(earlier) of them) before
-    # picking the actual winner, recovering full-descriptor-quality selection at a small fraction
-    # of the original O(K^2) full-descriptor cost. Final PnP verification (once per query on that
-    # winner -- O(K) total, not O(K^2)) was always full-descriptor and is unaffected either way.
+    # BoW gives a cheap similarity *ranking*, not a precise match -- same role the old truncated
+    # brute-force probe used to play. ORB returns keypoints response-ordered, so the strongest
+    # ~PROBE_N carry most of the discriminative signal, same rationale as _scan_keyframes' own
+    # PROBE_N=500 probe; truncating here bounds the cost of assigning a keyframe's descriptors to
+    # vocabulary words. The BoW ranking alone isn't trusted to pick the actual winner (a coarse
+    # signal can rank the truly-best candidate a few slots off) -- so it only builds a shortlist
+    # here; SHORTLIST_N candidates are then re-scored with full descriptors (O(SHORTLIST_N) exact
+    # comparisons per query, not O(earlier) of them) before picking the winner. Final PnP
+    # verification (once per query on that winner) is always full-descriptor and unaffected either
+    # way.
     PROBE_N = 500
     SHORTLIST_N = 5
 
@@ -473,17 +481,21 @@ class _LoopClosureDetector:
         stereo_matching_result: StereoMatchingResult,
         min_temporal_gap_s: float = 10.0,
         min_matches: int = 200,
+        vocab: Optional[ORBVocabulary] = None,
     ) -> None:
         self._data = data
         self._fd_result = feature_detection_result
         self._sm_result = stereo_matching_result
         self._min_temporal_gap_s = min_temporal_gap_s
         self._min_matches = min_matches
+        self._vocab = vocab if vocab is not None else ORBVocabulary.load()
         self._body_T_cam0 = data.cam0_extrinsics
         self._cam0_T_body = np.linalg.inv(self._body_T_cam0)
         self._first_ts = data.cam_timestamps_ns[0]
         self._kf_times: list[float] = []   # elapsed_s per node added so far
         self._kf_frames: list[int] = []    # original frame index per node added so far
+        self._bow_vectors: list[dict[int, float]] = []      # this detector's own BoW vector, per node
+        self._inverted_index: dict[int, list[int]] = {}     # vocabulary word id -> nodes containing it
         # (from_node, to_node, candidate) triples of the currently-open, not-yet-closed cluster.
         self._open_cluster: list[tuple[int, int, LoopClosureCandidate]] = []
 
@@ -494,9 +506,16 @@ class _LoopClosureDetector:
         never one not yet added.
         """
         q_time = _elapsed_s(self._sm_result.frames[frame].timestamp_ns, self._first_ts)
-        result = self._search(node, frame, q_time)
+        q_desc_full = self._fd_result.frames[frame].cam0_descriptors
+        query_vec = self._vocab.transform(q_desc_full[:self.PROBE_N]) if q_desc_full is not None else {}
+        result = self._search(frame, q_time, query_vec)
+        # Index this node's own BoW vector *after* searching -- it must never match itself, and
+        # only needs to be visible to later queries, never this one.
         self._kf_times.append(q_time)
         self._kf_frames.append(frame)
+        self._bow_vectors.append(query_vec)
+        for word in query_vec:
+            self._inverted_index.setdefault(word, []).append(node)
         if result is None:
             return []
         from_node, candidate = result
@@ -506,31 +525,33 @@ class _LoopClosureDetector:
         """Call once after the last add_keyframe: closes whatever cluster is still open."""
         return self._close_cluster()
 
-    def _search(self, node: int, frame: int, q_time: float) -> Optional[tuple[int, LoopClosureCandidate]]:
-        earlier = [c for c in range(node) if q_time - self._kf_times[c] >= self._min_temporal_gap_s]
-        if not earlier:
+    def _bow_shortlist(self, q_time: float, query_vec: dict[int, float]) -> list[int]:
+        """Nodes sharing at least one vocabulary word with the query, ranked by BoW similarity
+        (dot product of L2-normalized TF-IDF vectors), via the inverted index -- a candidate with
+        zero shared words is never even touched, unlike a brute-force scan of every earlier node.
+        """
+        scores: dict[int, float] = {}
+        for word, qw in query_vec.items():
+            for c in self._inverted_index.get(word, ()):
+                scores[c] = scores.get(c, 0.0) + qw * self._bow_vectors[c][word]
+        eligible = [(s, c) for c, s in scores.items() if q_time - self._kf_times[c] >= self._min_temporal_gap_s]
+        eligible.sort(key=lambda x: -x[0])
+        return [c for _, c in eligible[:self.SHORTLIST_N]]
+
+    def _search(
+        self, frame: int, q_time: float, query_vec: dict[int, float],
+    ) -> Optional[tuple[int, LoopClosureCandidate]]:
+        if not query_vec:
+            return None
+        shortlist = self._bow_shortlist(q_time, query_vec)
+        if not shortlist:
             return None
         q_desc_full = self._fd_result.frames[frame].cam0_descriptors
-        if q_desc_full is None or len(q_desc_full) == 0:
-            return None
-        q_desc_probe = q_desc_full[:self.PROBE_N]
 
+        # Re-score the BoW shortlist with full descriptors and pick the true best among them.
         bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-        probe_scores: list[tuple[int, int]] = []  # (score, c), truncated descriptors
-        for c in earlier:
-            c_desc_full = self._fd_result.frames[self._kf_frames[c]].cam0_descriptors
-            if c_desc_full is None or len(c_desc_full) == 0:
-                continue
-            raw = bf.knnMatch(c_desc_full[:self.PROBE_N], q_desc_probe, k=2)
-            score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
-            probe_scores.append((score, c))
-        if not probe_scores:
-            return None
-
-        # Re-score the shortlist with full descriptors and pick the true best among them.
-        probe_scores.sort(key=lambda x: -x[0])
         best_score, best_c = -1, -1
-        for _, c in probe_scores[:self.SHORTLIST_N]:
+        for c in shortlist:
             c_desc_full = self._fd_result.frames[self._kf_frames[c]].cam0_descriptors
             raw = bf.knnMatch(c_desc_full, q_desc_full, k=2)
             score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
