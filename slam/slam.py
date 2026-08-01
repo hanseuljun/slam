@@ -664,7 +664,7 @@ def _snap_obs_to_tracks(
     LANDMARK_SNAP_PX, if any. Each track claims at most one obs (its closest) -- ORB keypoints can
     cluster tightly enough that two of them both land within the snap radius of the same track;
     without this a track could pick up two observations at the same keyframe, which breaks the
-    one-observation-per-node assumption the rest of _build_landmark_tracks and _run_gtsam rely on.
+    one-observation-per-node assumption _LandmarkTrackBuilder and _run_gtsam rely on.
     """
     if not sm.matches or not optical_flow_frame.track_uv:
         return {}
@@ -687,17 +687,8 @@ def _snap_obs_to_tracks(
     return obs_to_flow_tid
 
 
-def _build_landmark_tracks(
-    data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
-    stereo_matching_result: StereoMatchingResult,
-    optical_flow_result: OpticalFlowResult,
-    keyframe_indices: list[int],
-    min_track_len: int,
-    depth_min: float,
-    depth_max: float,
-) -> dict[int, list[LandmarkObservation]]:
-    """Chain stereo-matched features across keyframes into persistent landmark tracks.
+class _LandmarkTrackBuilder:
+    """Chains stereo-matched features into persistent landmark tracks, one keyframe at a time.
 
     Only cam0-cam1 stereo inliers are tracked, so every observation carries a metric depth for
     initialization; observations are pre-undistorted so they match a Cal3_S2 pinhole model.
@@ -705,63 +696,83 @@ def _build_landmark_tracks(
     valid correspondence through every intermediate frame, not just the two keyframes being
     linked) instead of re-matching ORB descriptors keyframe-to-keyframe -- the same fast-rotation
     failure mode OpticalFlowSolver's docstring documents for that approach.
-    """
-    K0 = data.cam0_intrinsics.to_matrix()
-    K1 = data.cam1_intrinsics.to_matrix()
-    dist0 = np.array([data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
-                      data.cam0_intrinsics.p1, data.cam0_intrinsics.p2])
-    dist1 = np.array([data.cam1_intrinsics.k1, data.cam1_intrinsics.k2,
-                      data.cam1_intrinsics.p1, data.cam1_intrinsics.p2])
 
-    # Per node: this keyframe's stereo-inlier observations, and which live optical-flow track (if
-    # any) each one corresponds to.
-    node_obs: list[list[LandmarkObservation]] = []
-    node_obs_flow_tid: list[list[Optional[int]]] = []
-    for jj, frame in enumerate(keyframe_indices):
-        sm = stereo_matching_result.frames[frame]
-        fd = feature_detection_result.frames[frame]
+    Stateful, fed one keyframe at a time via add_keyframe, rather than taking the whole
+    keyframe_indices array at once: each call reads only that keyframe's own stereo/feature/
+    optical-flow data plus this object's own running state (self.tracks, and which optical-flow
+    track id was alive at the *previous* add_keyframe call) -- nothing from a keyframe not yet
+    added. There is deliberately no minimum-track-length filtering here: a track's eventual length
+    isn't knowable at the node where it starts, so gating on it would reintroduce a lookahead.
+    self.tracks holds every chained observation, mature or not; _process_node_landmarks (in
+    _run_gtsam) is what decides -- per node, using only that node and earlier -- whether a track is
+    mature enough to insert into the graph.
+    """
+
+    def __init__(
+        self, data: EuRoCMAVData,
+        feature_detection_result: FeatureDetectionResult,
+        stereo_matching_result: StereoMatchingResult,
+        optical_flow_result: OpticalFlowResult,
+        depth_min: float, depth_max: float,
+    ) -> None:
+        self._fd_result = feature_detection_result
+        self._sm_result = stereo_matching_result
+        self._of_result = optical_flow_result
+        self._depth_min = depth_min
+        self._depth_max = depth_max
+        self._K0 = data.cam0_intrinsics.to_matrix()
+        self._K1 = data.cam1_intrinsics.to_matrix()
+        self._dist0 = np.array([data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
+                                data.cam0_intrinsics.p1, data.cam0_intrinsics.p2])
+        self._dist1 = np.array([data.cam1_intrinsics.k1, data.cam1_intrinsics.k2,
+                                data.cam1_intrinsics.p1, data.cam1_intrinsics.p2])
+        self.tracks: dict[int, list[LandmarkObservation]] = {}
+        self._next_tid = 0
+        # optical-flow track id (as of the *last* add_keyframe call) -> our track id.
+        self._prev_flow_tid_to_tid: dict[int, int] = {}
+
+    def add_keyframe(self, node: int, frame: int) -> list[int]:
+        """Process the keyframe at graph-node index `node` (original frame index `frame`),
+        extending self.tracks in place. Returns the track ids that received a new observation at
+        this node -- both continuations and freshly started tracks -- so the caller can update its
+        own node -> track-id bookkeeping for `node` alone.
+        """
+        sm = self._sm_result.frames[frame]
+        touched: list[int] = []
         if not sm.matches:
-            node_obs.append([])
-            node_obs_flow_tid.append([])
-            continue
+            self._prev_flow_tid_to_tid = {}
+            return touched
+        fd = self._fd_result.frames[frame]
         q_idx = [m.queryIdx for m in sm.matches]
         t_idx = [m.trainIdx for m in sm.matches]
         uv0 = np.array([fd.cam0_keypoints[i].pt for i in q_idx], dtype=np.float64)
         uv1 = np.array([fd.cam1_keypoints[i].pt for i in t_idx], dtype=np.float64)
-        uv0u = cv2.undistortPoints(uv0.reshape(-1, 1, 2), K0, dist0, P=K0).reshape(-1, 2)
-        uv1u = cv2.undistortPoints(uv1.reshape(-1, 1, 2), K1, dist1, P=K1).reshape(-1, 2)
-        pts = sm.points_3d.T  # (M, 3), column i <-> sm.matches[i]
-        node_obs.append([LandmarkObservation(jj, uv0u[i], uv1u[i], pts[i]) for i in range(len(sm.matches))])
+        uv0u = cv2.undistortPoints(uv0.reshape(-1, 1, 2), self._K0, self._dist0, P=self._K0).reshape(-1, 2)
+        uv1u = cv2.undistortPoints(uv1.reshape(-1, 1, 2), self._K1, self._dist1, P=self._K1).reshape(-1, 2)
+        pts = sm.points_3d.T  # (M, 3), row i <-> sm.matches[i]
 
-        obs_to_flow_tid = _snap_obs_to_tracks(fd, sm, optical_flow_result.frames[frame])
-        node_obs_flow_tid.append([obs_to_flow_tid.get(i) for i in range(len(sm.matches))])
-
-    tracks: dict[int, list[LandmarkObservation]] = {}
-    next_tid = 0
-    prev_flow_tid_to_tid: dict[int, int] = {}  # optical-flow track id (at node jj-1) -> our track id
-    for jj in range(len(keyframe_indices)):
+        obs_to_flow_tid = _snap_obs_to_tracks(fd, sm, self._of_result.frames[frame])
         cur_flow_tid_to_tid: dict[int, int] = {}
-        for landmark_obs, flow_tid in zip(node_obs[jj], node_obs_flow_tid[jj]):
+        for i in range(len(sm.matches)):
+            flow_tid = obs_to_flow_tid.get(i)
             if flow_tid is None:
                 continue
-            tid = prev_flow_tid_to_tid.get(flow_tid)
+            landmark_obs = LandmarkObservation(node, uv0u[i], uv1u[i], pts[i])
+            tid = self._prev_flow_tid_to_tid.get(flow_tid)
             if tid is None:
-                tid = next_tid
-                next_tid += 1
-                tracks[tid] = []
-            tracks[tid].append(landmark_obs)
+                # A brand-new track: gate its depth now, using only this (its first) observation
+                # -- the same check the old batch version made from obs[0] once a track's full
+                # extent was known, just made at obs[0]'s own time instead of at the end.
+                if not (self._depth_min < landmark_obs.point_cam0[2] < self._depth_max):
+                    continue
+                tid = self._next_tid
+                self._next_tid += 1
+                self.tracks[tid] = []
+            self.tracks[tid].append(landmark_obs)
             cur_flow_tid_to_tid[flow_tid] = tid
-        prev_flow_tid_to_tid = cur_flow_tid_to_tid
-
-    kept: dict[int, list[LandmarkObservation]] = {}
-    for tid, obs in tracks.items():
-        if len(obs) < min_track_len:
-            continue
-        z0 = float(obs[0].point_cam0[2])
-        if not (depth_min < z0 < depth_max):
-            continue
-        kept[tid] = obs
-    return kept
+            touched.append(tid)
+        self._prev_flow_tid_to_tid = cur_flow_tid_to_tid
+        return touched
 
 
 def _scan_keyframes(
@@ -1027,15 +1038,14 @@ def _run_gtsam(
     LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
 
     on_progress(0.0, "Building landmark tracks...")
-    # Called once over the whole window here (an artifact of this module's offline/batch calling
-    # convention -- feature_detection_result etc. already arrive as full-sequence precomputed
-    # arrays), but the function itself performs a strictly forward walk: each step only reads
-    # node_obs[jj] and the previous step's prev_flow_tid_to_tid (see its loop), never anything at
-    # a later jj. A per-keyframe streaming caller would produce the identical `tracks` prefix at
-    # every node, so nothing here depends on future frames.
-    tracks = _build_landmark_tracks(
-        data, feature_detection_result, stereo_matching_result, optical_flow_result, keyframe_indices,
-        MIN_TRACK_LEN, DEPTH_MIN, DEPTH_MAX)
+    # Fed one keyframe at a time below (node 0 here, node j+1 inside _add_keyframe_to_graph, right
+    # before that node's factors are built) instead of handed the whole keyframe_indices array up
+    # front -- see _LandmarkTrackBuilder's docstring. `tracks` aliases the builder's own dict, so
+    # later add_keyframe calls are visible through it without any extra bookkeeping.
+    track_builder = _LandmarkTrackBuilder(
+        data, feature_detection_result, stereo_matching_result, optical_flow_result,
+        DEPTH_MIN, DEPTH_MAX)
+    tracks = track_builder.tracks
 
     # No landmark-starvation keyframe drop here. There used to be one: a keyframe whose per-node
     # landmark-track count fell under a MIN_KF_LANDMARKS threshold got merged into the IMU-only
@@ -1087,13 +1097,18 @@ def _run_gtsam(
                 from_node, factor.body_relative_pose, factor.rot_sigma, factor.trans_sigma,
                 factor.noise_mode))
 
-    # node -> track ids observed there; and per-interval covisibility for the PnP gate.
+    # node -> track ids observed there; and per-interval covisibility for the PnP gate. Filled
+    # incrementally as each node is added below (node 0 here, node j+1 inside
+    # _add_keyframe_to_graph) rather than derived from the full `tracks` dict up front.
     nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
     node_seen: list[set[int]] = [set() for _ in range(K)]
-    for tid, obs in tracks.items():
-        for o in obs:
-            nodes_to_tracks[o.node].append(tid)
-            node_seen[o.node].add(tid)
+
+    def _register_node_tracks(node: int, touched: list[int]) -> None:
+        nodes_to_tracks[node].extend(touched)
+        node_seen[node].update(touched)
+
+    _register_node_tracks(0, track_builder.add_keyframe(0, keyframe_indices[0]))
+
     inserted_landmarks: set[int] = set()
     added_obs: set[tuple[int, int]] = set()
     n_proj_factors = 0
@@ -1171,6 +1186,10 @@ def _run_gtsam(
         bias_i = est.atConstantBias(B(j))
 
         kf_i, kf_next = keyframe_indices[j], keyframe_indices[j + 1]
+
+        # Extend landmark tracks to this node before anything below reads node_seen[j+1] or
+        # tracks[tid] for it (strong_covis just below, then _process_node_landmarks).
+        _register_node_tracks(j + 1, track_builder.add_keyframe(j + 1, keyframe_indices[j + 1]))
 
         new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
 
