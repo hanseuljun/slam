@@ -26,6 +26,28 @@ class FeatureDetectionResult:
     elapsed_s: float
 
 
+def detect_features_for_frame(data: EuRoCMAVData, ts: int) -> FeatureDetectionFrame:
+    """ORB detect+compute on both cameras for a single frame -- a pure function of that frame's
+    own images, no cross-frame state. Shared by FeatureDetectionSolver (batch, thread-pooled
+    across every frame in a window) and slam.py's own incremental per-frame loop (called on
+    demand, one frame at a time) so both stay byte-identical by construction, not by convention.
+    """
+    orb = cv2.ORB.create(nfeatures=2000)
+    cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+    cam1_img = cv2.imread(str(data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+    # cv2's stub types `mask` as non-Optional MatLike, but passing None (no mask) is the
+    # standard, correct OpenCV idiom -- the stub is just missing the `| None`.
+    cam0_keypoints, cam0_descriptors = orb.detectAndCompute(cam0_img, None)  # type: ignore[call-overload]
+    cam1_keypoints, cam1_descriptors = orb.detectAndCompute(cam1_img, None)  # type: ignore[call-overload]
+    return FeatureDetectionFrame(
+        timestamp_ns=ts,
+        cam0_keypoints=list(cam0_keypoints),
+        cam0_descriptors=cam0_descriptors,
+        cam1_keypoints=list(cam1_keypoints),
+        cam1_descriptors=cam1_descriptors,
+    )
+
+
 class FeatureDetectionSolver:
     def __init__(
         self, data: EuRoCMAVData, start_s: float = 0.0, duration_s: float = 5.0,
@@ -38,20 +60,7 @@ class FeatureDetectionSolver:
         self.progress: float = 0.0
 
     def _process_frame(self, ts: int) -> FeatureDetectionFrame:
-        orb = cv2.ORB.create(nfeatures=2000)
-        cam0_img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        cam1_img = cv2.imread(str(self._data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        # cv2's stub types `mask` as non-Optional MatLike, but passing None (no mask) is the
-        # standard, correct OpenCV idiom -- the stub is just missing the `| None`.
-        cam0_keypoints, cam0_descriptors = orb.detectAndCompute(cam0_img, None)  # type: ignore[call-overload]
-        cam1_keypoints, cam1_descriptors = orb.detectAndCompute(cam1_img, None)  # type: ignore[call-overload]
-        return FeatureDetectionFrame(
-            timestamp_ns=ts,
-            cam0_keypoints=list(cam0_keypoints),
-            cam0_descriptors=cam0_descriptors,
-            cam1_keypoints=list(cam1_keypoints),
-            cam1_descriptors=cam1_descriptors,
-        )
+        return detect_features_for_frame(self._data, ts)
 
     def run(self) -> FeatureDetectionResult:
         first_ts = self._data.cam_timestamps_ns[0]
