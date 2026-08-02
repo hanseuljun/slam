@@ -421,18 +421,21 @@ class SlamViewModel:
             ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
             value_fn=lambda row, col, data: data[:, row])
         # The result currently on screen (all 13 _tex_* textures reflect exactly this snapshot),
-        # vs. the next one being assembled in the background -- see _advance_pending_batch in
+        # vs. the next one being assembled on a background thread -- see _render_pending_batch and
         # slam_view for why these two are kept apart instead of invalidating _tex_* the moment a
-        # new keyframe result arrives: rendering the 13 figures takes several frames at the
-        # existing 1-figure/frame budget, and a new SlamResult can arrive every keyframe, faster
-        # than that -- clearing _tex_* immediately made most plots flicker to "Rendering plot..."
-        # and back on every keyframe. Building the new set into _pending_images (plain arrays, no
-        # GPU texture yet) while _tex_* keeps showing the old-but-complete batch, then swapping
-        # all 13 textures in at once, means the display only ever shows a fully-rendered batch.
+        # new keyframe result arrives. _pending_images is None while no batch is in flight, and
+        # only ever assigned once, as a single already-complete dict, by the background thread's
+        # last line -- so the main thread never has to worry about observing a partially-filled
+        # batch (see _render_pending_batch's docstring).
         self._displayed_result: Optional[SlamResult] = None
         self._pending_result: Optional[SlamResult] = None
-        self._pending_images: dict[str, np.ndarray] = {}
+        self._pending_images: Optional[dict[str, np.ndarray]] = None
         self._building: bool = False
+        # Set by a checkbox toggle (a series enabled/disabled) to request a redraw of the
+        # currently displayed data with the new checkbox state -- see slam_view's scheduling logic
+        # for why this feeds into the same background-batch mechanism as a new keyframe result,
+        # rather than triggering its own separate rebuild.
+        self._checkbox_dirty: bool = False
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
@@ -467,8 +470,9 @@ class SlamViewModel:
         self._tex_imu_linear_accelerations = None
         self._displayed_result = None
         self._pending_result = None
-        self._pending_images = {}
+        self._pending_images = None
         self._building = False
+        self._checkbox_dirty = False
         threading.Thread(target=self._solver.run, daemon=True).start()
 
     def stop(self) -> None:
@@ -518,30 +522,25 @@ _FIGURE_SPECS: list[tuple[str, Callable[[SlamResult, "SlamViewModel"], np.ndarra
 _FIGURE_TEX_ATTRS = [attr for attr, _ in _FIGURE_SPECS]
 
 
-def _advance_pending_batch(model: "SlamViewModel", render_budget: list[int]) -> None:
-    """Renders up to render_budget[0] not-yet-built figures of the pending batch (plain arrays,
-    no GPU texture yet -- model._tex_* is untouched so the old batch keeps displaying). Once
-    every figure in the batch is done, swaps all 13 textures in at once and makes this the new
-    displayed result -- see _pending_images's docstring on SlamViewModel for why this needs to be
-    all-or-nothing rather than swapping each texture in as it finishes.
-    """
-    for attr, render_fn in _FIGURE_SPECS:
-        if render_budget[0] <= 0:
-            return
-        if attr in model._pending_images:
-            continue
-        render_budget[0] -= 1
-        assert model._pending_result is not None
-        model._pending_images[attr] = render_fn(model._pending_result, model)
+def _render_pending_batch(model: "SlamViewModel", pending_result: SlamResult) -> None:
+    """The target of a dedicated background thread (see slam_view) -- renders every figure in
+    _FIGURE_SPECS from pending_result into a local dict, entirely off the main/UI thread, so a
+    batch's ~500ms of matplotlib work (even with _ReusableSeriesPlot's reuse) never stalls a UI
+    frame. Only touches model._pending_images once, as its very last action, assigning the whole
+    already-finished dict in one attribute write -- so the main thread polling model._pending_images
+    can never observe a partially-built batch (no lock needed: CPython's GIL makes that single
+    attribute write atomic with respect to another thread's read).
 
-    if len(model._pending_images) < len(_FIGURE_SPECS):
-        return
-    for attr, _ in _FIGURE_SPECS:
-        setattr(model, attr, image_to_texture(model._pending_images[attr]))
-    model._displayed_result = model._pending_result
-    model._pending_result = None
-    model._pending_images = {}
-    model._building = False
+    Safe to run concurrently with the main thread's own imgui/GPU work because it never touches
+    GPU state (figure_to_image's GPU texture upload happens back on the main thread once this
+    finishes) -- but it does mutate the model's 13 persistent plot objects (Line2D data, axes
+    limits), so slam_view must never let two of these run at once, or run one of these alongside a
+    direct call into the same persistent plot objects. model._building enforces the former; there
+    is no other code path left that calls into them (see slam_view's checkbox handling, which now
+    only sets model._checkbox_dirty instead of rendering directly).
+    """
+    images = {attr: render_fn(pending_result, model) for attr, render_fn in _FIGURE_SPECS}
+    model._pending_images = images
 
 
 def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
@@ -569,23 +568,35 @@ def slam_view(model: SlamViewModel) -> None:
         imgui.progress_bar(solver.progress, (-1, 0))
     elif solver.error:
         imgui.text(f"Error: {solver.error}")
-    # Start assembling the next batch once the previous one is fully swapped in -- see
-    # _advance_pending_batch and _pending_images's docstring on SlamViewModel. While
-    # model._building is True, newer solver results are simply skipped (not queued) -- once the
-    # in-flight batch lands, the very next check here picks up whatever's newest by then, so a
-    # burst of keyframes just coalesces into one batch instead of piling up a backlog.
-    if (not model._building and solver.result is not None
-            and solver.result is not model._displayed_result):
-        model._pending_result = solver.result
-        model._pending_images = {}
+    # Start assembling the next batch, on a background thread, once the previous one is fully
+    # swapped in -- see _render_pending_batch's docstring. Triggered by either a new keyframe
+    # result or a checkbox toggle (model._checkbox_dirty); either way it renders from whatever's
+    # freshest right now (solver.result if a run is in progress, else the already-displayed
+    # result, e.g. a checkbox toggled after the run finished). While model._building is True,
+    # further triggers are simply left pending (not queued) -- once the in-flight batch lands, the
+    # very next check here starts a new one from whatever's newest/dirty by then, so a burst of
+    # keyframes coalesces into one batch instead of piling up a backlog of stale ones.
+    if not model._building and (
+            (solver.result is not None and solver.result is not model._displayed_result)
+            or model._checkbox_dirty):
+        pending_result = solver.result if solver.result is not None else model._displayed_result
+        assert pending_result is not None  # checkboxes only render once model._displayed_result exists
+        model._pending_result = pending_result
+        model._pending_images = None
+        model._checkbox_dirty = False
         model._building = True
+        threading.Thread(target=_render_pending_batch, args=(model, pending_result), daemon=True).start()
 
-    # Building all ~12 matplotlib figures takes ~3s total; doing it in one frame would freeze the
-    # window. Render at most one new figure per frame -- shared between advancing the pending
-    # batch below and any single-figure rebuild a checkbox toggle triggers further down.
-    render_budget = [1]
-    if model._building:
-        _advance_pending_batch(model, render_budget)
+    # The background thread's batch landed: swap all 13 textures in at once (cheap GPU uploads,
+    # a few ms total -- the expensive matplotlib work already happened off-thread) and make it the
+    # new displayed result.
+    if model._building and model._pending_images is not None:
+        for attr, _ in _FIGURE_SPECS:
+            setattr(model, attr, image_to_texture(model._pending_images[attr]))
+        model._displayed_result = model._pending_result
+        model._pending_result = None
+        model._pending_images = None
+        model._building = False
 
     result = model._displayed_result
     if result is None:
@@ -595,61 +606,59 @@ def slam_view(model: SlamViewModel) -> None:
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
-    def show(tex_attr: str, render_fn: Callable[[], np.ndarray]) -> None:
+    def show(tex_attr: str) -> None:
+        # No on-demand rendering here anymore -- every texture is produced exclusively by the
+        # background batch thread above (see _render_pending_batch and model._checkbox_dirty).
+        # Only reachable as None before the very first batch for this model has ever landed.
         tex = getattr(model, tex_attr)
         if tex is None:
-            if render_budget[0] <= 0:
-                imgui.text("Rendering plot...")
-                return
-            render_budget[0] -= 1
-            tex = image_to_texture(render_fn())
-            setattr(model, tex_attr, tex)
+            imgui.text("Rendering plot...")
+            return
         imgui.image(imgui.ImTextureRef(tex.texture_id()), (tex.width, tex.height))
 
     if _checkboxes(model.pos_enabled, "pos"):
-        model._tex_positions = None
-    show("_tex_positions", lambda: _render_positions(result, model))
+        model._checkbox_dirty = True
+    show("_tex_positions")
 
     if _checkboxes(model.att_enabled, "att"):
-        model._tex_attitudes = None
-        model._tex_rotation_matrices = None
-    show("_tex_attitudes", lambda: _render_attitudes(result, model))
-    show("_tex_rotation_matrices", lambda: _render_rotation_matrices(result, model))
+        model._checkbox_dirty = True
+    show("_tex_attitudes")
+    show("_tex_rotation_matrices")
 
     if _checkboxes(model.vel_enabled, "vel"):
-        model._tex_velocities = None
-    show("_tex_velocities", lambda: _render_velocities(result, model))
+        model._checkbox_dirty = True
+    show("_tex_velocities")
 
     if _checkboxes(model.bias_enabled, "bias"):
-        model._tex_biases = None
-    show("_tex_biases", lambda: _render_biases(result, model))
+        model._checkbox_dirty = True
+    show("_tex_biases")
 
-    show("_tex_diagnostics", lambda: _render_gtsam_diagnostics(result, model))
-    show("_tex_ate_rpe", lambda: _render_ate_rpe(result, model))
+    show("_tex_diagnostics")
+    show("_tex_ate_rpe")
 
     if _checkboxes(model.omega_enabled, "omega"):
-        model._tex_angular_velocities = None
-    show("_tex_angular_velocities", lambda: _render_angular_velocities(result, model))
+        model._checkbox_dirty = True
+    show("_tex_angular_velocities")
 
     if _checkboxes(model.lin_acc_enabled, "lin_acc"):
-        model._tex_linear_accelerations = None
-    show("_tex_linear_accelerations", lambda: _render_linear_accelerations(result, model))
+        model._checkbox_dirty = True
+    show("_tex_linear_accelerations")
     g = result.extra.gravity
     imgui.text(f"Gravity: [{g[0]:.4f}, {g[1]:.4f}, {g[2]:.4f}]")
 
     imgui.separator()
     imgui.text("IMU (Body Frame)")
 
-    show("_tex_imu_attitudes", lambda: _render_imu_attitudes(result, model))
-    show("_tex_imu_rotation_matrices", lambda: _render_imu_rotation_matrices(result, model))
-    show("_tex_imu_angular_velocities", lambda: _render_imu_angular_velocities(result, model))
-    show("_tex_imu_linear_accelerations", lambda: _render_imu_linear_accelerations(result, model))
+    show("_tex_imu_attitudes")
+    show("_tex_imu_rotation_matrices")
+    show("_tex_imu_angular_velocities")
+    show("_tex_imu_linear_accelerations")
 
     imgui.end_child()
 
-    # Idling (the default) throttles redraws when there's no input, which would stall the
-    # per-frame figure rendering above. Keep frames flowing while a pending batch is still being
-    # assembled (model._building) or any displayed figure is mid-rebuild from a checkbox toggle,
-    # then restore idling once everything is settled.
+    # Idling (the default) throttles redraws when there's no input, which would stop this
+    # function from ever being called to notice the background batch thread has finished. Keep
+    # frames flowing while a batch is in flight (model._building) or the very first one hasn't
+    # landed yet, then restore idling once everything is settled.
     pending = model._building or any(getattr(model, attr) is None for attr in _FIGURE_TEX_ATTRS)
     hello_imgui.get_runner_params().fps_idling.enable_idling = not pending
