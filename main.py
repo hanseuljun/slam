@@ -100,11 +100,6 @@ class Pipeline:
         self.coordinate_mapping_view_model.stop()
         self.imu_initialization_view_model.stop()
         self.slam_view_model.stop()
-        # SlamViewModel keeps its 13 plot Figures alive across renders now (see
-        # SlamViewModel.close_plots's docstring) instead of closing one after every render like
-        # every other stage's plots -- so unlike those, it needs an explicit teardown here or
-        # they'd leak on every restart.
-        self.slam_view_model.close_plots()
 
     def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
         self.feature_detection_result = result
@@ -256,7 +251,9 @@ def main():
     runner_params.ini_filename = "slam.ini"
     runner_params.callbacks.show_gui = lambda: root_view(model)
 
-    immapp.run(runner_params)
+    # with_implot: the SLAM view's plots are ImPlot-based (see ui/slam_view.py) -- ImPlot needs
+    # its own context created before any begin_plot/begin_subplots call, which this handles.
+    immapp.run(runner_params, add_ons_params=immapp.AddOnsParams(with_implot=True))
 
 
 if __name__ == "__main__":
