@@ -1613,6 +1613,12 @@ def _run_gtsam(
     return poses, velocities, biases, reprojection_rmse, n_lm, keyframe_indices
 
 
+# How many trailing nodes _GtsamBuilder.current_estimate(recompute_window=...) refreshes on each
+# live-preview call (see that method's docstring). ~2x the ~15-20 keyframes empirically observed
+# for a settled node's ISAM2-revised pose/reprojection error to converge, as safety margin.
+_LIVE_PREVIEW_REPROJECTION_WINDOW = 40
+
+
 class _GtsamBuilder:
     """Incremental version of the ISAM2 graph construction in _run_gtsam above: the exact same
     per-keyframe update (IMU factor, chained-PnP fallback, landmark reprojection factors,
@@ -1711,6 +1717,11 @@ class _GtsamBuilder:
         self._inserted_landmarks: set[int] = set()
         self._added_obs: set[tuple[int, int]] = set()
         self._n_proj_factors = 0
+        # Cached per-node reprojection contributions -- see current_estimate's docstring for why
+        # these are cached (and selectively refreshed) rather than rederived in full every call.
+        self._sq_px = np.zeros(0)
+        self._n_px = np.zeros(0)
+        self._n_lm = np.zeros(0)
 
         self._isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
@@ -1866,12 +1877,65 @@ class _GtsamBuilder:
         self._j += 1
         self._prev_frame = frame_idx
 
-    def current_estimate(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
+    def _reprojection_for_node(
+        self, node: int, final: gtsam.Values, inv_Twc0: list[np.ndarray], inv_Twc1: list[np.ndarray],
+    ) -> tuple[float, float, float]:
+        """sq_px/n_px/n_lm contributed by every inserted landmark observed at exactly this node,
+        using the given (already current) camera-from-world transforms and landmark estimate --
+        the per-node unit of work current_estimate's caching selectively redoes. Visits the same
+        (landmark, observation) pairs the single pass over self._inserted_landmarks used to,
+        just grouped by node instead of by landmark, via self._nodes_to_tracks (already maintained
+        for the PnP covisibility gate) instead of re-scanning every landmark's whole history.
+        """
+        sq_px = 0.0
+        n_px = 0.0
+        n_lm = 0.0
+        for tid in self._nodes_to_tracks[node]:
+            if tid not in self._inserted_landmarks:
+                continue
+            obs = next((o for o in self._tracks[tid] if o.node == node), None)
+            if obs is None:
+                continue
+            p = np.append(np.asarray(final.atPoint3(self._L(tid))), 1.0)
+            seen = False
+            for intrin, inv_Twc, uv in (
+                (self._data.cam0_intrinsics, inv_Twc0, obs.uv0),
+                (self._data.cam1_intrinsics, inv_Twc1, obs.uv1),
+            ):
+                pc = inv_Twc[node] @ p
+                if pc[2] <= 1e-6:
+                    continue
+                u = intrin.fx * pc[0] / pc[2] + intrin.cx
+                v = intrin.fy * pc[1] / pc[2] + intrin.cy
+                sq_px += (u - uv[0]) ** 2 + (v - uv[1]) ** 2
+                n_px += 1
+                seen = True
+            if seen:
+                n_lm += 1.0
+        return sq_px, n_px, n_lm
+
+    def current_estimate(
+        self, recompute_window: Optional[int] = None,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
         """Poses/velocities/biases/reprojection metrics for every node added so far. Unlike
         finalize(), doesn't flush any still-open loop-closure cluster (flushing early would
         prematurely close a cluster that a later keyframe might still have joined) -- safe to call
         after any keyframe, not just the last one, for a caller that wants to render a
         live-updating partial trajectory.
+
+        recompute_window: if given, only the last `recompute_window` nodes' reprojection metrics
+        are freshly recomputed from the current estimate on this call; every earlier node reuses
+        whichever value was last computed for it (cached on self._sq_px/_n_px/_n_lm, grown as new
+        nodes are added). This matters because ISAM2 keeps revising *past* poses/landmarks as new
+        keyframes arrive, not just the newest ones -- measured drift of several centimeters on a
+        settled node, converging within roughly 15-20 keyframes -- so a window trades a bounded
+        amount of staleness in *old* keyframes' displayed reprojection RMSE during a live-updating
+        run for turning this call from O(K) into O(recompute_window) (O(K) total across a run
+        instead of O(K^2) -- this loop was 13.5% of one profiled run's total time, all of it spent
+        re-deriving reprojection error for landmarks whose contribution had already converged; see
+        tmp/slam_run_profile.html). None (the default) recomputes every node exactly, matching the
+        original behavior bit-for-bit -- finalize() always uses this, so the *final* result is
+        never affected, only intermediate live-preview snapshots (see _build_partial_result).
         """
         K = self._j + 1
         final = self._isam2.calculateEstimate()
@@ -1881,30 +1945,24 @@ class _GtsamBuilder:
 
         inv_Twc0 = [np.linalg.inv(pm @ self._body_T_cam0) for pm in poses]
         inv_Twc1 = [np.linalg.inv(pm @ self._data.cam1_extrinsics) for pm in poses]
-        sq_px = np.zeros(K)
-        n_px = np.zeros(K)
-        n_lm = np.zeros(K)
-        for tid in self._inserted_landmarks:
-            p = np.append(np.asarray(final.atPoint3(self._L(tid))), 1.0)
-            for o in self._tracks[tid]:
-                seen = False
-                for intrin, inv_Twc, uv in (
-                    (self._data.cam0_intrinsics, inv_Twc0, o.uv0),
-                    (self._data.cam1_intrinsics, inv_Twc1, o.uv1),
-                ):
-                    pc = inv_Twc[o.node] @ p
-                    if pc[2] <= 1e-6:
-                        continue
-                    u = intrin.fx * pc[0] / pc[2] + intrin.cx
-                    v = intrin.fy * pc[1] / pc[2] + intrin.cy
-                    sq_px[o.node] += (u - uv[0]) ** 2 + (v - uv[1]) ** 2
-                    n_px[o.node] += 1
-                    seen = True
-                if seen:
-                    n_lm[o.node] += 1
-        reprojection_rmse = np.where(n_px > 0, np.sqrt(sq_px / np.maximum(n_px, 1)), np.nan)
 
-        return poses, velocities, biases, reprojection_rmse, n_lm
+        if len(self._sq_px) < K:
+            pad = K - len(self._sq_px)
+            self._sq_px = np.concatenate([self._sq_px, np.zeros(pad)])
+            self._n_px = np.concatenate([self._n_px, np.zeros(pad)])
+            self._n_lm = np.concatenate([self._n_lm, np.zeros(pad)])
+
+        recompute_from = 0 if recompute_window is None else max(0, K - recompute_window)
+        for node in range(recompute_from, K):
+            sq, n, lm = self._reprojection_for_node(node, final, inv_Twc0, inv_Twc1)
+            self._sq_px[node] = sq
+            self._n_px[node] = n
+            self._n_lm[node] = lm
+
+        n_px_K = self._n_px[:K]
+        reprojection_rmse = np.where(n_px_K > 0, np.sqrt(self._sq_px[:K] / np.maximum(n_px_K, 1)), np.nan)
+
+        return poses, velocities, biases, reprojection_rmse, self._n_lm[:K].copy()
 
     def finalize(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
         """Call once after every keyframe has been added: flushes any still-open loop-closure
@@ -1920,7 +1978,27 @@ class _GtsamBuilder:
 
         print(f"landmarks: {len(self._inserted_landmarks)}/{len(self._tracks)} tracks used, "
               f"{self._n_proj_factors} reprojection factors")
-        return self.current_estimate()
+        # Every node, exactly -- see current_estimate's docstring on recompute_window=None.
+        return self.current_estimate(recompute_window=None)
+
+
+def _get_full_gt_arrays(data: EuRoCMAVData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Ground-truth timestamps/positions/rotation-matrices for the *entire* dataset (every sample
+    in data.ground_truth_samples, not just the run's window) -- meant to be computed once in
+    _compute and passed into every _get_gtsam_result call, rather than each call rebuilding it
+    from scratch (215x redundant reconstruction of a 29,993-sample array on one 60s/keyframe-215
+    profiled run -- 14.9% of total run time; see tmp/slam_run_profile.html).
+
+    Deliberately left unwindowed rather than narrowed to [min_timestamp_ns, max_timestamp_ns]:
+    _get_gtsam_result searches this for the nearest ground-truth sample to each keyframe, and the
+    true nearest sample to a keyframe right at the run's start/end boundary can legitimately fall
+    just outside that window -- narrowing the search space would silently change which sample
+    "nearest" finds there.
+    """
+    gt_timestamps_ns = np.array([s.timestamp_ns for s in data.ground_truth_samples])
+    gt_positions = np.array([s.position for s in data.ground_truth_samples])
+    gt_rotation_matrices = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in data.ground_truth_samples])
+    return gt_timestamps_ns, gt_positions, gt_rotation_matrices
 
 
 def _get_gtsam_result(
@@ -1928,6 +2006,9 @@ def _get_gtsam_result(
     stereo_matching_result: StereoMatchingResult,
     first_timestamp_ns: int,
     min_timestamp_ns: int,
+    gt_timestamps_ns: np.ndarray,
+    gt_positions: np.ndarray,
+    gt_rotation_matrices_all: np.ndarray,
     keyframe_indices: list[int],
     poses: list[np.ndarray],
     velocities: list[np.ndarray],
@@ -1939,6 +2020,10 @@ def _get_gtsam_result(
     Doesn't run the graph itself -- see _compute, which drives _KeyframeScanner and
     _GtsamBuilder together in one pass and passes the resulting tuple straight in here, the same
     way _get_pnp_result already takes a pre-computed pnp_poses rather than deriving it itself.
+
+    gt_timestamps_ns/gt_positions/gt_rotation_matrices_all come from _get_full_gt_arrays, computed
+    once per run and shared across every call -- see that function's docstring for why they cover
+    the whole dataset rather than just this run's window.
     """
     K = len(poses)
 
@@ -1961,9 +2046,6 @@ def _get_gtsam_result(
     # Per-keyframe position error vs the nearest ground-truth sample [m]. Poses are already
     # anchored to GT at closest_cam_index (T_comp), so this is a single-point-aligned error,
     # consistent with how positions are overlaid against GT in the view.
-    gt_timestamps_ns = np.array([s.timestamp_ns for s in data.ground_truth_samples])
-    gt_positions = np.array([s.position for s in data.ground_truth_samples])
-    gt_rotation_matrices_all = np.array([quaternion_to_rotation_matrix(s.quaternion) for s in data.ground_truth_samples])
     nearest_gt = _nearest_sorted_indices(gt_timestamps_ns, cam_timestamps_ns)
     position_errors = np.linalg.norm(world_T_body_poses[:, :3, 3] - gt_positions[nearest_gt], axis=1)
 
@@ -2085,6 +2167,7 @@ def _compute(
     #   extra/finishing [0.97, 1.00]
     set_progress(0.0, "Loading ground truth...")
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns)
+    gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all = _get_full_gt_arrays(data)
 
     # Anchor the IMU-integrated orientation to GT at the first GT sample inside the window
     # (i.e. gt_result's first sample, which is gt_rotation_matrices[0]).
@@ -2130,9 +2213,11 @@ def _compute(
         partial_pnp_poses = scanner.current_poses(up_to_frame)
         partial_pnp_result = _get_pnp_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, partial_pnp_poses)
-        p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate()
+        p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(
+            recompute_window=_LIVE_PREVIEW_REPROJECTION_WINDOW)
         partial_gtsam_result = _get_gtsam_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
+            gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
             scanner.keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm,
         )
         return SlamResult(
@@ -2166,6 +2251,7 @@ def _compute(
     set_progress(0.96, "Aligning to ground truth...")
     gtsam_result = _get_gtsam_result(
         data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
+        gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
         keyframe_indices, gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts,
     )
     gtsam_result.elapsed_time = compute_elapsed
