@@ -397,6 +397,16 @@ class SlamViewModel:
         # for why this feeds into the same background-batch mechanism as a new keyframe result,
         # rather than triggering its own separate rebuild.
         self._checkbox_dirty: bool = False
+        # The in-flight background batch thread, if any -- see slam_view's scheduling logic,
+        # which spawns and assigns this. stop() joins it before returning, so a caller (see
+        # Pipeline.stop in main.py) can safely call close_plots() or drop this model right after:
+        # without that join, plt.close()-ing a persistent plot's Figure while this thread is still
+        # mid-render() on that same Figure is a data race, and dropping this model while the
+        # thread still holds a reference to it can let cyclic GC free its 9 GPU textures on this
+        # thread instead of the main one -- both were observed to crash with SIGSEGV inside
+        # TextureGpuOpenGl's destructor when restarting on a new dataset while a batch was still
+        # rendering.
+        self._render_thread: Optional[threading.Thread] = None
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
@@ -434,13 +444,23 @@ class SlamViewModel:
         if self._solver is not None:
             self._solver.cancel()
         self._solver = None
+        # Block until any in-flight batch render finishes -- see _render_thread's docstring for
+        # why this has to happen before a caller can safely close_plots() or drop this model.
+        # Bounded to one batch's render time (well under a second), so this is a brief, acceptable
+        # stall on the explicit, infrequent "stop this run" action (dataset switch, app close),
+        # not something that runs on every frame.
+        if self._render_thread is not None and self._render_thread.is_alive():
+            self._render_thread.join()
+        self._render_thread = None
 
     def close_plots(self) -> None:
-        """Closes all 13 persistent Figures -- without this, restarting on a new dataset (see
+        """Closes all persistent Figures -- without this, restarting on a new dataset (see
         RootViewModel.restart in main.py, which calls Pipeline.stop -> this) would leak the old
         model's Figures forever: pyplot keeps every open Figure registered globally until
-        plt.close() is called on it, and a fresh SlamViewModel with its own 13 Figures gets built
-        right after this one is torn down.
+        plt.close() is called on it, and a fresh SlamViewModel with its own set of Figures gets
+        built right after this one is torn down. Must only be called after stop() has joined any
+        in-flight render thread (see _render_thread's docstring) -- closing a Figure while that
+        thread is still mid-render() on it is a data race.
         """
         for attr in _PLOT_ATTRS:
             getattr(self, attr).close()
@@ -535,7 +555,9 @@ def slam_view(model: SlamViewModel) -> None:
         model._pending_images = None
         model._checkbox_dirty = False
         model._building = True
-        threading.Thread(target=_render_pending_batch, args=(model, pending_result), daemon=True).start()
+        model._render_thread = threading.Thread(
+            target=_render_pending_batch, args=(model, pending_result), daemon=True)
+        model._render_thread.start()
 
     # The background thread's batch landed: swap all 13 textures in at once (cheap GPU uploads,
     # a few ms total -- the expensive matplotlib work already happened off-thread) and make it the
