@@ -324,26 +324,6 @@ def _render_angular_velocities(results: SlamResult, model: "SlamViewModel") -> n
     return model._plot_angular_velocities.render([s for s in all_series if model.omega_enabled[s[2]]])
 
 
-def _render_imu_attitudes(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
-    series = [(results.imu.times, results.imu.attitudes, 'imu')]
-    return model._plot_imu_attitudes.render(series)
-
-
-def _render_imu_rotation_matrices(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
-    series = [(results.imu.times, results.imu.rotation_matrices, 'imu')]
-    return model._plot_imu_rotation_matrices.render(series)
-
-
-def _render_imu_angular_velocities(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
-    series = [(results.imu.times, results.imu.angular_velocities, 'imu')]
-    return model._plot_imu_angular_velocities.render(series)
-
-
-def _render_imu_linear_accelerations(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
-    series = [(results.imu.times, results.imu.linear_accelerations, 'imu')]
-    return model._plot_imu_linear_accelerations.render(series)
-
-
 class SlamViewModel:
     def __init__(
         self, data: EuRoCMAVData, start_s: float, duration_s: float, run_loop_closure: bool = False,
@@ -362,10 +342,6 @@ class SlamViewModel:
         self._tex_biases: Optional[hello_imgui.TextureGpu] = None
         self._tex_diagnostics: Optional[hello_imgui.TextureGpu] = None
         self._tex_ate_rpe: Optional[hello_imgui.TextureGpu] = None
-        self._tex_imu_attitudes: Optional[hello_imgui.TextureGpu] = None
-        self._tex_imu_rotation_matrices: Optional[hello_imgui.TextureGpu] = None
-        self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
-        self._tex_imu_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._stale_textures: list[hello_imgui.TextureGpu] = []
 
         # One persistent Figure/Axes per plot (13, matching the _tex_* attrs above), built once
@@ -405,21 +381,6 @@ class SlamViewModel:
             ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
             value_fn=lambda row, col, data: data[:, row],
             axhline_fn=lambda row, col, gravity: (-gravity[row], '-gravity') if gravity is not None else None)
-        self._plot_imu_attitudes = _ReusableSeriesPlot(
-            1, 3, (12, 4), 'Attitude (Rotation Vector) in Body Frame', ['imu'],
-            ylabel_fn=lambda row, col: f'{_xyz[col]} [rad]', value_fn=lambda row, col, data: data[:, col])
-        self._plot_imu_rotation_matrices = _ReusableSeriesPlot(
-            3, 3, (12, 9), 'Rotation Axes in Body Frame', ['imu'],
-            ylabel_fn=lambda row, col: f'{_axis_names[row]} {_xyz[col]}',
-            value_fn=lambda row, col, data: data[:, col, row])
-        self._plot_imu_angular_velocities = _ReusableSeriesPlot(
-            3, 1, (12, 9), 'Angular Velocity in Body Frame', ['imu'],
-            ylabel_fn=lambda row, col: f'{["wx", "wy", "wz"][row]} [rad/s]',
-            value_fn=lambda row, col, data: data[:, row])
-        self._plot_imu_linear_accelerations = _ReusableSeriesPlot(
-            3, 1, (12, 9), 'Linear Acceleration in Body Frame', ['imu'],
-            ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
-            value_fn=lambda row, col, data: data[:, row])
         # The result currently on screen (all 13 _tex_* textures reflect exactly this snapshot),
         # vs. the next one being assembled on a background thread -- see _render_pending_batch and
         # slam_view for why these two are kept apart instead of invalidating _tex_* the moment a
@@ -450,9 +411,7 @@ class SlamViewModel:
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,
                     self._tex_linear_accelerations, self._tex_angular_velocities, self._tex_velocities,
-                    self._tex_biases, self._tex_diagnostics, self._tex_ate_rpe,
-                    self._tex_imu_attitudes, self._tex_imu_rotation_matrices,
-                    self._tex_imu_angular_velocities, self._tex_imu_linear_accelerations]:
+                    self._tex_biases, self._tex_diagnostics, self._tex_ate_rpe]:
             if tex is not None:
                 self._stale_textures.append(tex)
         self._tex_positions = None
@@ -464,10 +423,6 @@ class SlamViewModel:
         self._tex_biases = None
         self._tex_diagnostics = None
         self._tex_ate_rpe = None
-        self._tex_imu_attitudes = None
-        self._tex_imu_rotation_matrices = None
-        self._tex_imu_angular_velocities = None
-        self._tex_imu_linear_accelerations = None
         self._displayed_result = None
         self._pending_result = None
         self._pending_images = None
@@ -496,14 +451,13 @@ class SlamViewModel:
 _PLOT_ATTRS = [
     "_plot_positions", "_plot_attitudes", "_plot_rotation_matrices", "_plot_velocities",
     "_plot_biases", "_plot_diagnostics", "_plot_ate_rpe", "_plot_angular_velocities",
-    "_plot_linear_accelerations", "_plot_imu_attitudes", "_plot_imu_rotation_matrices",
-    "_plot_imu_angular_velocities", "_plot_imu_linear_accelerations",
+    "_plot_linear_accelerations",
 ]
 
 # Every figure texture on the model, paired with how to render it from a (result, model)
-# snapshot -- one place so slam_view's background batch-builder (_advance_pending_batch) can
-# render all 13 the same way it draws them, and so it can tell when the whole batch is done (see
-# the idling toggle at the end of slam_view).
+# snapshot -- one place so slam_view's background batch-builder (_render_pending_batch) can
+# render all of them the same way it draws them, and so it can tell when the whole batch is done
+# (see the idling toggle at the end of slam_view).
 _FIGURE_SPECS: list[tuple[str, Callable[[SlamResult, "SlamViewModel"], np.ndarray]]] = [
     ("_tex_positions", _render_positions),
     ("_tex_attitudes", _render_attitudes),
@@ -514,10 +468,6 @@ _FIGURE_SPECS: list[tuple[str, Callable[[SlamResult, "SlamViewModel"], np.ndarra
     ("_tex_ate_rpe", _render_ate_rpe),
     ("_tex_angular_velocities", _render_angular_velocities),
     ("_tex_linear_accelerations", _render_linear_accelerations),
-    ("_tex_imu_attitudes", _render_imu_attitudes),
-    ("_tex_imu_rotation_matrices", _render_imu_rotation_matrices),
-    ("_tex_imu_angular_velocities", _render_imu_angular_velocities),
-    ("_tex_imu_linear_accelerations", _render_imu_linear_accelerations),
 ]
 _FIGURE_TEX_ATTRS = [attr for attr, _ in _FIGURE_SPECS]
 
@@ -645,14 +595,6 @@ def slam_view(model: SlamViewModel) -> None:
     show("_tex_linear_accelerations")
     g = result.extra.gravity
     imgui.text(f"Gravity: [{g[0]:.4f}, {g[1]:.4f}, {g[2]:.4f}]")
-
-    imgui.separator()
-    imgui.text("IMU (Body Frame)")
-
-    show("_tex_imu_attitudes")
-    show("_tex_imu_rotation_matrices")
-    show("_tex_imu_angular_velocities")
-    show("_tex_imu_linear_accelerations")
 
     imgui.end_child()
 
