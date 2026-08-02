@@ -11,6 +11,15 @@ class ConfigViewModel:
     selected_index: int = 0
     start_s: float = 0.0
     duration_s: float = 200.0
+    # On by default (unlike the diagnostics below): these three used to always run
+    # unconditionally, so defaulting to True keeps existing behavior unchanged for anyone who
+    # doesn't touch these checkboxes. SLAM itself doesn't need any of the three anymore --
+    # SlamSolver computes its own feature detection/stereo matching/optical flow internally (see
+    # _compute in slam.py) -- so turning these off only affects their own diagnostic tabs and
+    # skips their (now redundant, from SLAM's point of view) compute.
+    run_feature_detection: bool = True
+    run_stereo_matching: bool = True
+    run_optical_flow: bool = True
     run_coordinate_mapping_check: bool = False
     run_imu_initialization: bool = False
     run_loop_closure: bool = False
@@ -19,8 +28,36 @@ class ConfigViewModel:
     def data_path_str(self) -> str:
         return self.data_paths[self.selected_index]
 
+    def sanitize(self) -> None:
+        """Enforce the pipeline's real dependency chain (feature detection -> stereo matching ->
+        optical flow / coordinate mapping check) regardless of how these flags got set -- so a
+        stage's checkbox can never end up True while something it needs is False.
+        """
+        if not self.run_feature_detection:
+            self.run_stereo_matching = False
+        if not self.run_stereo_matching:
+            self.run_optical_flow = False
+            self.run_coordinate_mapping_check = False
+
+
+def _dependent_checkbox(label: str, value: bool, enabled: bool, requires: str) -> bool:
+    """A checkbox that's forced off and greyed out whenever its prerequisite stage is disabled,
+    with a tooltip explaining why -- rather than letting the user check a box that would silently
+    do nothing.
+    """
+    if not enabled:
+        value = False
+    imgui.begin_disabled(not enabled)
+    _, value = imgui.checkbox(label, value)
+    imgui.end_disabled()
+    if not enabled and imgui.is_item_hovered():
+        imgui.set_tooltip(f"Requires {requires}")
+    return value
+
 
 def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
+    model.sanitize()
+
     # Stacked vertically (rather than same_line()-chained) since this now renders in the
     # collapsible left sidebar (see root_view in main.py) instead of a full-width top bar.
     labels = [Path(p).parent.name for p in model.data_paths]
@@ -40,9 +77,21 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     imgui.separator()
     imgui.spacing()
 
-    _, model.run_coordinate_mapping_check = imgui.checkbox(
-        "Coordinate Mapping Check", model.run_coordinate_mapping_check
-    )
+    # Each stage's checkbox is only interactive while the stage(s) it depends on are enabled --
+    # see ConfigViewModel.sanitize for the dependency chain this mirrors.
+    _, model.run_feature_detection = imgui.checkbox("Feature Detection", model.run_feature_detection)
+    model.run_stereo_matching = _dependent_checkbox(
+        "Stereo Matching", model.run_stereo_matching, model.run_feature_detection, "Feature Detection")
+    model.run_optical_flow = _dependent_checkbox(
+        "Optical Flow", model.run_optical_flow, model.run_stereo_matching, "Stereo Matching")
+
+    imgui.spacing()
+    imgui.separator()
+    imgui.spacing()
+
+    model.run_coordinate_mapping_check = _dependent_checkbox(
+        "Coordinate Mapping Check", model.run_coordinate_mapping_check, model.run_stereo_matching,
+        "Stereo Matching")
     _, model.run_imu_initialization = imgui.checkbox(
         "IMU Initialization", model.run_imu_initialization
     )
