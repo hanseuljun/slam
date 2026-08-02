@@ -291,6 +291,10 @@ class SlamViewModel:
         self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._stale_textures: list[hello_imgui.TextureGpu] = []
+        # Identity (not equality) check: _compute pushes a brand-new SlamResult object for every
+        # keyframe (see _build_partial_result in slam.py), so "is this a different object than
+        # last frame" is exactly "is there new data to show" -- see slam_view's cache-invalidation.
+        self._last_rendered_result: Optional[SlamResult] = None
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
@@ -323,6 +327,7 @@ class SlamViewModel:
         self._tex_imu_rotation_matrices = None
         self._tex_imu_angular_velocities = None
         self._tex_imu_linear_accelerations = None
+        self._last_rendered_result = None
         threading.Thread(target=self._solver.run, daemon=True).start()
 
     def stop(self) -> None:
@@ -358,17 +363,24 @@ def slam_view(model: SlamViewModel) -> None:
     if solver is None:
         imgui.text("Waiting for stereo matching...")
         return
+    # A result can arrive (and keep changing) while still loading -- see on_partial_result in
+    # SlamSolver.run -- so loading/error are shown as a status line above whatever's already
+    # there, not as an early return that hides it.
     if solver.loading:
         imgui.text(solver.progress_label)
         imgui.progress_bar(solver.progress, (-1, 0))
-        return
-    if solver.error:
+    elif solver.error:
         imgui.text(f"Error: {solver.error}")
-        return
     if solver.result is None:
         return
 
     result = solver.result
+    if result is not model._last_rendered_result:
+        # New keyframe's worth of data: every cached plot below was rendered from the previous
+        # result object, so it must be rebuilt -- see _last_rendered_result's docstring.
+        for attr in _FIGURE_TEX_ATTRS:
+            setattr(model, attr, None)
+        model._last_rendered_result = result
 
     imgui.text(f"PnP: {result.pnp.elapsed_time:.1f}s   GTSAM: {result.gtsam.elapsed_time:.1f}s")
 

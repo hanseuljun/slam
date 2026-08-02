@@ -1137,15 +1137,26 @@ class _KeyframeScanner:
                 self._ref_idx, self._ref_covis = i, None
             return accepted
 
-    def finalize(self) -> list[np.ndarray]:
-        """Call once after every frame in the window has been fed via add_frame: forward-fills
-        any frame that never received its own pose (rare -- see add_frame's exception path)."""
+    @staticmethod
+    def _forward_fill(poses: list[Optional[np.ndarray]]) -> list[np.ndarray]:
         last = np.eye(4)
         filled = []
-        for p in self._poses:
+        for p in poses:
             last = p if p is not None else last
             filled.append(last)
         return filled
+
+    def current_poses(self, up_to_frame: int) -> list[np.ndarray]:
+        """Forward-filled poses for frames [0, up_to_frame] -- unlike finalize(), safe to call
+        mid-scan (before every frame in the window has been fed via add_frame), for a caller that
+        wants to render the dead-reckoning trajectory as it grows.
+        """
+        return self._forward_fill(self._poses[:up_to_frame + 1])
+
+    def finalize(self) -> list[np.ndarray]:
+        """Call once after every frame in the window has been fed via add_frame: forward-fills
+        any frame that never received its own pose (rare -- see add_frame's exception path)."""
+        return self._forward_fill(self._poses)
 
 
 def _run_gtsam(
@@ -1855,21 +1866,14 @@ class _GtsamBuilder:
         self._j += 1
         self._prev_frame = frame_idx
 
-    def finalize(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
-        """Call once after every keyframe has been added: flushes any still-open loop-closure
-        cluster, then computes final poses/velocities/biases/reprojection metrics -- see
-        _run_gtsam's tail for the algorithm this mirrors.
+    def current_estimate(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
+        """Poses/velocities/biases/reprojection metrics for every node added so far. Unlike
+        finalize(), doesn't flush any still-open loop-closure cluster (flushing early would
+        prematurely close a cluster that a later keyframe might still have joined) -- safe to call
+        after any keyframe, not just the last one, for a caller that wants to render a
+        live-updating partial trajectory.
         """
-        if self._loop_detector is not None:
-            final_edges = self._loop_detector.flush()
-            if final_edges:
-                tail_factors = gtsam.NonlinearFactorGraph()
-                self._add_loop_closure_edges(tail_factors, final_edges)
-                self._isam2.update(tail_factors, gtsam.Values())
-
         K = self._j + 1
-        print(f"landmarks: {len(self._inserted_landmarks)}/{len(self._tracks)} tracks used, "
-              f"{self._n_proj_factors} reprojection factors")
         final = self._isam2.calculateEstimate()
         poses = [final.atPose3(self._X(j)).matrix() for j in range(K)]
         velocities = [final.atVector(self._V(j)) for j in range(K)]
@@ -1901,6 +1905,22 @@ class _GtsamBuilder:
         reprojection_rmse = np.where(n_px > 0, np.sqrt(sq_px / np.maximum(n_px, 1)), np.nan)
 
         return poses, velocities, biases, reprojection_rmse, n_lm
+
+    def finalize(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
+        """Call once after every keyframe has been added: flushes any still-open loop-closure
+        cluster, then returns current_estimate() -- see _run_gtsam's tail for the algorithm this
+        mirrors.
+        """
+        if self._loop_detector is not None:
+            final_edges = self._loop_detector.flush()
+            if final_edges:
+                tail_factors = gtsam.NonlinearFactorGraph()
+                self._add_loop_closure_edges(tail_factors, final_edges)
+                self._isam2.update(tail_factors, gtsam.Values())
+
+        print(f"landmarks: {len(self._inserted_landmarks)}/{len(self._tracks)} tracks used, "
+              f"{self._n_proj_factors} reprojection factors")
+        return self.current_estimate()
 
 
 def _get_gtsam_result(
@@ -2026,6 +2046,7 @@ def _compute(
     duration_s: float,
     set_progress: Callable[[float, str], None],
     enable_loop_closure: bool = False,
+    on_partial_result: Optional[Callable[[SlamResult], None]] = None,
 ) -> SlamResult:
     """Runs the whole SLAM stage -- feature detection, stereo matching, optical flow, keyframe
     selection, and GTSAM graph construction -- as one incremental pass over
@@ -2036,6 +2057,13 @@ def _compute(
     frame i+1 is ever touched. FeatureDetectionSolver/StereoMatchingSolver/OpticalFlowSolver still
     exist unchanged for their own diagnostic views (see tmp/fold_pipeline_into_slam_plan.html);
     this recomputes the same data independently rather than depending on their output.
+
+    If on_partial_result is given, it's called with a full SlamResult (ground truth/IMU/extra
+    unchanged from the final one -- none of those depend on the growing SLAM estimate -- but pnp
+    and gtsam reflecting only what's been processed so far, via _KeyframeScanner.current_poses
+    and _GtsamBuilder.current_estimate) after every keyframe, not just once at the end -- for a
+    caller that wants to render the trajectory as it grows instead of only once the whole window
+    has been processed.
     """
     first_timestamp_ns = data.cam_timestamps_ns[0]
     min_ts = first_timestamp_ns + int(start_s * 1e9)
@@ -2068,6 +2096,10 @@ def _compute(
         data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
         gt_result.rotation_matrices, first_gt_timestamp_ns,
     )
+    # Depends only on gt_result/imu_result/gravity, all already available -- never on the growing
+    # SLAM estimate -- so it's computed once here rather than after the loop below, to be ready
+    # for on_partial_result's snapshots too (see _build_partial_result).
+    extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
 
     # Frame computation, keyframe selection, and GTSAM graph construction as one pass: each
     # frame's fd/sm/of is computed (_FrontendFrameComputer) and appended to these growing result
@@ -2090,6 +2122,24 @@ def _compute(
         stereo_matching_result.frames.append(sm_frame)
         optical_flow_result.frames.append(of_frame)
 
+    def _build_partial_result(up_to_frame: int) -> SlamResult:
+        """A full SlamResult reflecting only what's been processed through `up_to_frame` so far
+        -- gt/imu/extra are the same final values computed above (none of them depend on the
+        growing estimate); pnp and gtsam come from the scanner/builder's own live accessors.
+        """
+        partial_pnp_poses = scanner.current_poses(up_to_frame)
+        partial_pnp_result = _get_pnp_result(
+            data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, partial_pnp_poses)
+        p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate()
+        partial_gtsam_result = _get_gtsam_result(
+            data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
+            scanner.keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm,
+        )
+        return SlamResult(
+            gt=gt_result, imu=imu_result, pnp=partial_pnp_result, gtsam=partial_gtsam_result,
+            extra=extra_result,
+        )
+
     _process_frame(timestamps[0])
     scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result, N)
     builder = _GtsamBuilder(
@@ -2100,6 +2150,8 @@ def _compute(
         _process_frame(timestamps[i])
         for kf in scanner.add_frame(i):
             builder.add_keyframe(kf)
+            if on_partial_result is not None:
+                on_partial_result(_build_partial_result(i))
     keyframe_indices = scanner.keyframes
     pnp_poses = scanner.finalize()
     gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts = builder.finalize()
@@ -2119,7 +2171,6 @@ def _compute(
     gtsam_result.elapsed_time = compute_elapsed
 
     set_progress(0.97, "Finishing...")
-    extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
     set_progress(1.0, "Done")
     return SlamResult(
         gt=gt_result,
@@ -2174,12 +2225,20 @@ class SlamSolver:
             self.progress = value
             self.progress_label = label
 
+        def set_partial_result(result: SlamResult) -> None:
+            if self._cancel_event.is_set():
+                raise _SolveCancelled()
+            # Same single-attribute-assignment pattern as set_progress above: safe to read from
+            # the render thread without a lock (see SlamViewModel.start) since a reader either
+            # sees the old SlamResult object or the new one, never a half-built one.
+            self.result = result
+
         # Runs on the caller's background thread (see SlamViewModel.start), sharing this
         # process's memory: no spawn, no reimport, no pickling data across a process boundary.
         try:
             self.result = _compute(
                 self._data, self._start_s, self._duration_s, set_progress,
-                enable_loop_closure=self._enable_loop_closure)
+                enable_loop_closure=self._enable_loop_closure, on_partial_result=set_partial_result)
         except _SolveCancelled:
             pass
         except Exception:
