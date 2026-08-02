@@ -6,266 +6,342 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from imgui_bundle import imgui, hello_imgui
+from matplotlib.lines import Line2D
 
 from slam.data import EuRoCMAVData
 from slam.imu_initialization import ImuInitializationResult
 from slam.slam import RPE_DELTA_S, SlamResult, SlamSolver
-from ui.utils import figure_to_image, image_to_texture
+from ui.utils import image_to_texture, rasterize_figure
 
 
-def _plot_positions(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
-    fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
-    fig.suptitle('Position in World Frame')
-    for ax, i, label in zip([ax_x, ax_y, ax_z], range(3), ['X', 'Y', 'Z']):
-        for times, positions, name in series:
-            ax.plot(times, positions[:, i], label=name)
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel(f'{label} [m]')
-        ax.legend()
-    plt.tight_layout()
-    return fig
+class _ReusableSeriesPlot:
+    """A grid of subplots, each overlaying up to len(series_names) named line series -- built
+    once, then updated via set_data()/relim()/autoscale_view() on every render() call instead of
+    torn down and rebuilt from scratch every time. Rebuilding from scratch (the old behavior) is
+    ~2x more expensive than this even after rasterize_figure's PNG-round-trip skip -- the extra
+    cost is subplots()/tight_layout()/legend() construction, not the line drawing itself. A series
+    absent from a given render() call (its checkbox disabled) gets its line hidden rather than
+    removed, so a fixed line per (row, col, name) can be kept and just updated in place.
+    """
+
+    def __init__(
+        self,
+        nrows: int,
+        ncols: int,
+        figsize: tuple[float, float],
+        suptitle: str,
+        series_names: list[str],
+        ylabel_fn: Callable[[int, int], str],
+        value_fn: Callable[[int, int, np.ndarray], np.ndarray],
+        axhline_fn: Optional[Callable[[int, int, object], Optional[tuple[float, str]]]] = None,
+        xlabel: str = 'Time [s]',
+    ) -> None:
+        self._series_names = series_names
+        self._value_fn = value_fn
+        self._axhline_fn = axhline_fn
+        self._fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+        self._fig.suptitle(suptitle)
+        self._axes = axes
+        self._lines: dict[tuple[int, int, str], Line2D] = {}
+        self._axhlines: dict[tuple[int, int], Optional[Line2D]] = {}
+        for row in range(nrows):
+            for col in range(ncols):
+                ax = axes[row][col]
+                ax.set_xlabel(xlabel)
+                ax.set_ylabel(ylabel_fn(row, col))
+                for name in series_names:
+                    (line,) = ax.plot([], [], label=name)
+                    self._lines[(row, col, name)] = line
+                self._axhlines[(row, col)] = None
+        # Deferred, not called here: tight_layout()'s margins depend on tick-label extents (digit
+        # count, minus signs, decimals), which only reflect reality once real data has been set --
+        # computed now, against empty axes' default 0-1 ticks, it'd bake in margins that don't
+        # match the real plot, producing a persistent few-pixel misalignment. Still only paid
+        # once, on the first render() call, not on every one -- that's the actual expensive part
+        # this class exists to avoid paying repeatedly.
+        self._laid_out = False
+
+    def render(
+        self, series: list[tuple[np.ndarray, np.ndarray, str]], axhline_context: object = None,
+    ) -> np.ndarray:
+        present = {name: (times, data) for times, data, name in series}
+        nrows, ncols = self._axes.shape
+        for row in range(nrows):
+            for col in range(ncols):
+                ax = self._axes[row][col]
+                handles = []
+                for name in self._series_names:
+                    line = self._lines[(row, col, name)]
+                    if name in present:
+                        times, data = present[name]
+                        line.set_data(times, self._value_fn(row, col, data))
+                        line.set_visible(True)
+                        handles.append(line)
+                    else:
+                        line.set_data([], [])
+                        line.set_visible(False)
+                old_axhline = self._axhlines[(row, col)]
+                if old_axhline is not None:
+                    old_axhline.remove()
+                    self._axhlines[(row, col)] = None
+                if self._axhline_fn is not None:
+                    spec = self._axhline_fn(row, col, axhline_context)
+                    if spec is not None:
+                        value, label = spec
+                        axhline = ax.axhline(value, color='gray', linestyle='--', linewidth=1, label=label)
+                        self._axhlines[(row, col)] = axhline
+                        handles.append(axhline)
+                ax.relim()
+                ax.autoscale_view()
+                ax.legend(handles=handles)
+        if not self._laid_out:
+            self._fig.tight_layout()
+            self._laid_out = True
+        return rasterize_figure(self._fig)
+
+    def close(self) -> None:
+        plt.close(self._fig)
 
 
-def _plot_attitudes(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Attitude (Rotation Vector) in World Frame') -> plt.Figure:
-    fig, (ax_x, ax_y, ax_z) = plt.subplots(1, 3, figsize=(12, 4))
-    fig.suptitle(title)
-    for ax, i, label in zip([ax_x, ax_y, ax_z], range(3), ['X', 'Y', 'Z']):
-        for times, attitudes, name in series:
-            ax.plot(times, attitudes[:, i], label=name)
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel(f'{label} [rad]')
-        ax.legend()
-    plt.tight_layout()
-    return fig
+class _ReusableGtsamDiagnosticsPlot:
+    """Persistent version of the GTSAM diagnostics figure. Each subplot here has exactly one line
+    pulling from a different array (not an overlay of named series), so it doesn't fit
+    _ReusableSeriesPlot's shape -- see that class's docstring for why reuse matters at all.
+    """
+
+    def __init__(self) -> None:
+        self._fig, (self._ax_err, self._ax_rmse, self._ax_cnt) = plt.subplots(
+            3, 1, figsize=(12, 9), sharex=True)
+        self._fig.suptitle('GTSAM Diagnostics')
+
+        (self._line_err,) = self._ax_err.plot([], [], color='tab:red', marker='.', label='position error')
+        self._axhline_err: Optional[Line2D] = None
+        self._ax_err.set_ylabel('pos error vs GT [m]')
+
+        (self._line_rmse,) = self._ax_rmse.plot([], [], color='tab:blue', marker='.', label='reprojection RMSE')
+        self._axhline_rmse: Optional[Line2D] = None
+        self._ax_rmse.set_ylabel('reprojection RMSE [px]')
+
+        (self._line_cnt,) = self._ax_cnt.plot([], [], color='tab:green', marker='.', label='landmarks / keyframe')
+        self._ax_cnt.set_ylabel('# landmarks')
+        self._ax_cnt.set_xlabel('Time [s]')
+
+        # Deferred to first render() -- see _ReusableSeriesPlot's matching comment.
+        self._laid_out = False
+
+    def render(
+        self, times: np.ndarray, position_errors: np.ndarray,
+        reprojection_rmse: np.ndarray, landmark_counts: np.ndarray,
+    ) -> np.ndarray:
+        rmse = float(np.sqrt(np.mean(position_errors ** 2))) if len(position_errors) else float('nan')
+        self._line_err.set_data(times, position_errors)
+        if self._axhline_err is not None:
+            self._axhline_err.remove()
+        self._axhline_err = self._ax_err.axhline(
+            rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rmse:.3f} m')
+        self._ax_err.relim()
+        self._ax_err.autoscale_view()
+        self._ax_err.legend()
+
+        valid = ~np.isnan(reprojection_rmse)
+        mean_reproj = float(np.mean(reprojection_rmse[valid])) if np.any(valid) else float('nan')
+        self._line_rmse.set_data(times, reprojection_rmse)
+        if self._axhline_rmse is not None:
+            self._axhline_rmse.remove()
+        self._axhline_rmse = self._ax_rmse.axhline(
+            mean_reproj, color='gray', linestyle='--', linewidth=1, label=f'mean = {mean_reproj:.2f} px')
+        self._ax_rmse.relim()
+        self._ax_rmse.autoscale_view()
+        self._ax_rmse.legend()
+
+        self._line_cnt.set_data(times, landmark_counts)
+        self._ax_cnt.relim()
+        self._ax_cnt.autoscale_view()
+        self._ax_cnt.legend()
+
+        if not self._laid_out:
+            self._fig.tight_layout()
+            self._laid_out = True
+        return rasterize_figure(self._fig)
+
+    def close(self) -> None:
+        plt.close(self._fig)
 
 
-def _plot_rotation_matrices(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Rotation Axes in World Frame') -> plt.Figure:
-    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
-    fig.suptitle(title)
-    axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
-    component_names = ['X', 'Y', 'Z']
-    for row in range(3):
-        for col in range(3):
-            ax = axes[row, col]
-            for times, rotation_matrices, name in series:
-                ax.plot(times, rotation_matrices[:, col, row], label=name)
-            ax.set_xlabel('Time [s]')
-            ax.set_ylabel(f'{axis_names[row]} {component_names[col]}')
-            ax.legend()
-    plt.tight_layout()
-    return fig
+class _ReusableAteRpePlot:
+    """Persistent version of the ATE/RPE figure -- same one-line-per-subplot shape as
+    _ReusableGtsamDiagnosticsPlot, not an overlay of named series."""
+
+    def __init__(self) -> None:
+        self._fig, (self._ax_ate_pos, self._ax_ate_rot, self._ax_rpe_trans, self._ax_rpe_rot) = \
+            plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+        self._fig.suptitle('ATE / RPE (batch-aligned, yaw + translation)')
+
+        (self._line_ate_pos,) = self._ax_ate_pos.plot([], [], color='tab:red', marker='.', label='ATE position error')
+        self._axhline_ate_pos: Optional[Line2D] = None
+        self._ax_ate_pos.set_ylabel('ATE pos [m]')
+
+        (self._line_ate_rot,) = self._ax_ate_rot.plot([], [], color='tab:orange', marker='.', label='ATE rotation error')
+        self._axhline_ate_rot: Optional[Line2D] = None
+        self._ax_ate_rot.set_ylabel('ATE rot [deg]')
+
+        (self._line_rpe_trans,) = self._ax_rpe_trans.plot([], [], color='tab:blue', marker='.')
+        self._axhline_rpe_trans: Optional[Line2D] = None
+        self._ax_rpe_trans.set_ylabel('RPE trans [m]')
+
+        (self._line_rpe_rot,) = self._ax_rpe_rot.plot([], [], color='tab:green', marker='.')
+        self._axhline_rpe_rot: Optional[Line2D] = None
+        self._ax_rpe_rot.set_ylabel('RPE rot [deg]')
+        self._ax_rpe_rot.set_xlabel('Time [s]')
+
+        # Deferred to first render() -- see _ReusableSeriesPlot's matching comment.
+        self._laid_out = False
+
+    def render(
+        self, times: np.ndarray, ate_position_errors: np.ndarray, ate_rotation_errors: np.ndarray,
+        rpe_translation_errors: np.ndarray, rpe_rotation_errors: np.ndarray, rpe_delta_s: float,
+    ) -> np.ndarray:
+        ate_rmse = float(np.sqrt(np.mean(ate_position_errors ** 2))) if len(ate_position_errors) else float('nan')
+        self._line_ate_pos.set_data(times, ate_position_errors)
+        if self._axhline_ate_pos is not None:
+            self._axhline_ate_pos.remove()
+        self._axhline_ate_pos = self._ax_ate_pos.axhline(
+            ate_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {ate_rmse:.3f} m')
+        self._ax_ate_pos.relim()
+        self._ax_ate_pos.autoscale_view()
+        self._ax_ate_pos.legend()
+
+        ate_rot_rmse = float(np.sqrt(np.mean(ate_rotation_errors ** 2))) if len(ate_rotation_errors) else float('nan')
+        self._line_ate_rot.set_data(times, ate_rotation_errors)
+        if self._axhline_ate_rot is not None:
+            self._axhline_ate_rot.remove()
+        self._axhline_ate_rot = self._ax_ate_rot.axhline(
+            ate_rot_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {ate_rot_rmse:.3f} deg')
+        self._ax_ate_rot.relim()
+        self._ax_ate_rot.autoscale_view()
+        self._ax_ate_rot.legend()
+
+        valid = ~np.isnan(rpe_translation_errors)
+        rpe_trans_rmse = float(np.sqrt(np.mean(rpe_translation_errors[valid] ** 2))) if np.any(valid) else float('nan')
+        self._line_rpe_trans.set_data(times, rpe_translation_errors)
+        self._line_rpe_trans.set_label(f'RPE translation ({rpe_delta_s:g}s window)')
+        if self._axhline_rpe_trans is not None:
+            self._axhline_rpe_trans.remove()
+        self._axhline_rpe_trans = self._ax_rpe_trans.axhline(
+            rpe_trans_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rpe_trans_rmse:.3f} m')
+        self._ax_rpe_trans.relim()
+        self._ax_rpe_trans.autoscale_view()
+        self._ax_rpe_trans.legend()
+
+        rpe_rot_rmse = float(np.sqrt(np.mean(rpe_rotation_errors[valid] ** 2))) if np.any(valid) else float('nan')
+        self._line_rpe_rot.set_data(times, rpe_rotation_errors)
+        self._line_rpe_rot.set_label(f'RPE rotation ({rpe_delta_s:g}s window)')
+        if self._axhline_rpe_rot is not None:
+            self._axhline_rpe_rot.remove()
+        self._axhline_rpe_rot = self._ax_rpe_rot.axhline(
+            rpe_rot_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rpe_rot_rmse:.3f} deg')
+        self._ax_rpe_rot.relim()
+        self._ax_rpe_rot.autoscale_view()
+        self._ax_rpe_rot.legend()
+
+        if not self._laid_out:
+            self._fig.tight_layout()
+            self._laid_out = True
+        return rasterize_figure(self._fig)
+
+    def close(self) -> None:
+        plt.close(self._fig)
 
 
-def _plot_linear_accelerations(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Linear Acceleration in World Frame', gravity: np.ndarray | None = None) -> plt.Figure:
-    fig, (ax_ax, ax_ay, ax_az) = plt.subplots(3, 1, figsize=(12, 9))
-    fig.suptitle(title)
-    for ax, i, label in zip([ax_ax, ax_ay, ax_az], range(3), ['ax', 'ay', 'az']):
-        for times, linear_accelerations, name in series:
-            ax.plot(times, linear_accelerations[:, i], label=name)
-        if gravity is not None:
-            ax.axhline(-gravity[i], color='gray', linestyle='--', linewidth=1, label='-gravity')
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel(f'{label} [m/s²]')
-        ax.legend()
-    plt.tight_layout()
-    return fig
-
-
-def _plot_velocities(series: list[tuple[np.ndarray, np.ndarray, str]]) -> plt.Figure:
-    fig, (ax_vx, ax_vy, ax_vz) = plt.subplots(3, 1, figsize=(12, 9))
-    fig.suptitle('Velocity in World Frame')
-    for ax, i, label in zip([ax_vx, ax_vy, ax_vz], range(3), ['vx', 'vy', 'vz']):
-        for times, velocities, name in series:
-            ax.plot(times, velocities[:, i], label=name)
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel(f'{label} [m/s]')
-        ax.legend()
-    plt.tight_layout()
-    return fig
-
-
-def _plot_biases(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'IMU Bias (Body Frame)') -> plt.Figure:
-    fig, axes = plt.subplots(2, 3, figsize=(12, 6))
-    fig.suptitle(title)
-    row_labels = ['accel bias', 'gyro bias']
-    row_units = ['m/s²', 'rad/s']
-    component_names = ['x', 'y', 'z']
-    for row in range(2):
-        for col in range(3):
-            ax = axes[row, col]
-            for times, biases, name in series:
-                ax.plot(times, biases[:, row * 3 + col], label=name)
-            ax.set_xlabel('Time [s]')
-            ax.set_ylabel(f'{row_labels[row]} {component_names[col]} [{row_units[row]}]')
-            ax.legend()
-    plt.tight_layout()
-    return fig
-
-
-def _plot_gtsam_diagnostics(times: np.ndarray, position_errors: np.ndarray,
-                            reprojection_rmse: np.ndarray, landmark_counts: np.ndarray) -> plt.Figure:
-    fig, (ax_err, ax_rmse, ax_cnt) = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-    fig.suptitle('GTSAM Diagnostics')
-
-    rmse = float(np.sqrt(np.mean(position_errors ** 2))) if len(position_errors) else float('nan')
-    ax_err.plot(times, position_errors, color='tab:red', marker='.', label='position error')
-    ax_err.axhline(rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rmse:.3f} m')
-    ax_err.set_ylabel('pos error vs GT [m]')
-    ax_err.legend()
-
-    valid = ~np.isnan(reprojection_rmse)
-    mean_reproj = float(np.mean(reprojection_rmse[valid])) if np.any(valid) else float('nan')
-    ax_rmse.plot(times, reprojection_rmse, color='tab:blue', marker='.', label='reprojection RMSE')
-    ax_rmse.axhline(mean_reproj, color='gray', linestyle='--', linewidth=1, label=f'mean = {mean_reproj:.2f} px')
-    ax_rmse.set_ylabel('reprojection RMSE [px]')
-    ax_rmse.legend()
-
-    ax_cnt.plot(times, landmark_counts, color='tab:green', marker='.', label='landmarks / keyframe')
-    ax_cnt.set_ylabel('# landmarks')
-    ax_cnt.set_xlabel('Time [s]')
-    ax_cnt.legend()
-
-    plt.tight_layout()
-    return fig
-
-
-def _plot_ate_rpe(times: np.ndarray, ate_position_errors: np.ndarray, ate_rotation_errors: np.ndarray,
-                   rpe_translation_errors: np.ndarray, rpe_rotation_errors: np.ndarray, rpe_delta_s: float) -> plt.Figure:
-    fig, (ax_ate_pos, ax_ate_rot, ax_rpe_trans, ax_rpe_rot) = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
-    fig.suptitle('ATE / RPE (batch-aligned, yaw + translation)')
-
-    ate_rmse = float(np.sqrt(np.mean(ate_position_errors ** 2))) if len(ate_position_errors) else float('nan')
-    ax_ate_pos.plot(times, ate_position_errors, color='tab:red', marker='.', label='ATE position error')
-    ax_ate_pos.axhline(ate_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {ate_rmse:.3f} m')
-    ax_ate_pos.set_ylabel('ATE pos [m]')
-    ax_ate_pos.legend()
-
-    ate_rot_rmse = float(np.sqrt(np.mean(ate_rotation_errors ** 2))) if len(ate_rotation_errors) else float('nan')
-    ax_ate_rot.plot(times, ate_rotation_errors, color='tab:orange', marker='.', label='ATE rotation error')
-    ax_ate_rot.axhline(ate_rot_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {ate_rot_rmse:.3f} deg')
-    ax_ate_rot.set_ylabel('ATE rot [deg]')
-    ax_ate_rot.legend()
-
-    valid = ~np.isnan(rpe_translation_errors)
-    rpe_trans_rmse = float(np.sqrt(np.mean(rpe_translation_errors[valid] ** 2))) if np.any(valid) else float('nan')
-    ax_rpe_trans.plot(times, rpe_translation_errors, color='tab:blue', marker='.', label=f'RPE translation ({rpe_delta_s:g}s window)')
-    ax_rpe_trans.axhline(rpe_trans_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rpe_trans_rmse:.3f} m')
-    ax_rpe_trans.set_ylabel('RPE trans [m]')
-    ax_rpe_trans.legend()
-
-    rpe_rot_rmse = float(np.sqrt(np.mean(rpe_rotation_errors[valid] ** 2))) if np.any(valid) else float('nan')
-    ax_rpe_rot.plot(times, rpe_rotation_errors, color='tab:green', marker='.', label=f'RPE rotation ({rpe_delta_s:g}s window)')
-    ax_rpe_rot.axhline(rpe_rot_rmse, color='gray', linestyle='--', linewidth=1, label=f'RMSE = {rpe_rot_rmse:.3f} deg')
-    ax_rpe_rot.set_ylabel('RPE rot [deg]')
-    ax_rpe_rot.set_xlabel('Time [s]')
-    ax_rpe_rot.legend()
-
-    plt.tight_layout()
-    return fig
-
-
-def _plot_angular_velocities(series: list[tuple[np.ndarray, np.ndarray, str]], title: str = 'Angular Velocity in World Frame') -> plt.Figure:
-    fig, (ax_wx, ax_wy, ax_wz) = plt.subplots(3, 1, figsize=(12, 9))
-    fig.suptitle(title)
-    for ax, i, label in zip([ax_wx, ax_wy, ax_wz], range(3), ['wx', 'wy', 'wz']):
-        for times, angular_velocities, name in series:
-            ax.plot(times, angular_velocities[:, i], label=name)
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel(f'{label} [rad/s]')
-        ax.legend()
-    plt.tight_layout()
-    return fig
-
-
-def _render_positions(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_positions(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.gt.times, results.gt.positions, 'gt'),
         (results.pnp.times, results.pnp.positions, 'pnp'),
         (results.gtsam.times, results.gtsam.positions, 'gtsam'),
     ]
-    return figure_to_image(_plot_positions([s for s in all_series if enabled[s[2]]]))
+    return model._plot_positions.render([s for s in all_series if model.pos_enabled[s[2]]])
 
 
-def _render_attitudes(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_attitudes(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.gt.times, results.gt.attitudes, 'gt'),
         (results.pnp.times, results.pnp.attitudes, 'pnp'),
         (results.gtsam.times, results.gtsam.attitudes, 'gtsam'),
     ]
-    return figure_to_image(_plot_attitudes([s for s in all_series if enabled[s[2]]]))
+    return model._plot_attitudes.render([s for s in all_series if model.att_enabled[s[2]]])
 
 
-def _render_rotation_matrices(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_rotation_matrices(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.gt.times, results.gt.rotation_matrices, 'gt'),
         (results.pnp.times, results.pnp.rotation_matrices, 'pnp'),
         (results.gtsam.times, results.gtsam.rotation_matrices, 'gtsam'),
     ]
-    return figure_to_image(_plot_rotation_matrices([s for s in all_series if enabled[s[2]]]))
+    return model._plot_rotation_matrices.render([s for s in all_series if model.att_enabled[s[2]]])
 
 
-def _render_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_velocities(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.gtsam.times, results.gtsam.velocities, 'gtsam'),
     ]
-    return figure_to_image(_plot_velocities([s for s in all_series if enabled[s[2]]]))
+    return model._plot_velocities.render([s for s in all_series if model.vel_enabled[s[2]]])
 
 
-def _render_biases(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_biases(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.gtsam.times, results.gtsam.biases, 'gtsam'),
     ]
-    return figure_to_image(_plot_biases([s for s in all_series if enabled[s[2]]]))
+    return model._plot_biases.render([s for s in all_series if model.bias_enabled[s[2]]])
 
 
-def _render_gtsam_diagnostics(results: SlamResult) -> np.ndarray:
+def _render_gtsam_diagnostics(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     g = results.gtsam
-    return figure_to_image(_plot_gtsam_diagnostics(
-        g.times, g.position_errors, g.reprojection_rmse, g.landmark_counts))
+    return model._plot_diagnostics.render(g.times, g.position_errors, g.reprojection_rmse, g.landmark_counts)
 
 
-def _render_ate_rpe(results: SlamResult) -> np.ndarray:
+def _render_ate_rpe(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     g = results.gtsam
-    return figure_to_image(_plot_ate_rpe(
+    return model._plot_ate_rpe.render(
         g.times, g.ate_position_errors, g.ate_rotation_errors,
-        g.rpe_translation_errors, g.rpe_rotation_errors, RPE_DELTA_S))
+        g.rpe_translation_errors, g.rpe_rotation_errors, RPE_DELTA_S)
 
 
-def _render_linear_accelerations(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_linear_accelerations(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.imu.times, results.extra.linear_accelerations_in_world, 'imu'),
         (results.gtsam.angular_velocity_times, results.gtsam.linear_accelerations, 'gtsam'),
     ]
-    return figure_to_image(_plot_linear_accelerations([s for s in all_series if enabled[s[2]]], gravity=results.extra.gravity))
+    return model._plot_linear_accelerations.render(
+        [s for s in all_series if model.lin_acc_enabled[s[2]]], axhline_context=results.extra.gravity)
 
 
-def _render_angular_velocities(results: SlamResult, enabled: dict[str, bool]) -> np.ndarray:
+def _render_angular_velocities(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     all_series = [
         (results.gt.angular_velocity_times, results.gt.angular_velocities, 'gt'),
         (results.pnp.angular_velocity_times, results.pnp.angular_velocities, 'pnp'),
         (results.gtsam.angular_velocity_times, results.gtsam.angular_velocities, 'gtsam'),
     ]
-    return figure_to_image(_plot_angular_velocities([s for s in all_series if enabled[s[2]]]))
+    return model._plot_angular_velocities.render([s for s in all_series if model.omega_enabled[s[2]]])
 
 
-def _render_imu_attitudes(results: SlamResult) -> np.ndarray:
+def _render_imu_attitudes(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     series = [(results.imu.times, results.imu.attitudes, 'imu')]
-    return figure_to_image(_plot_attitudes(series, 'Attitude (Rotation Vector) in Body Frame'))
+    return model._plot_imu_attitudes.render(series)
 
 
-def _render_imu_rotation_matrices(results: SlamResult) -> np.ndarray:
+def _render_imu_rotation_matrices(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     series = [(results.imu.times, results.imu.rotation_matrices, 'imu')]
-    return figure_to_image(_plot_rotation_matrices(series, 'Rotation Axes in Body Frame'))
+    return model._plot_imu_rotation_matrices.render(series)
 
 
-def _render_imu_angular_velocities(results: SlamResult) -> np.ndarray:
+def _render_imu_angular_velocities(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     series = [(results.imu.times, results.imu.angular_velocities, 'imu')]
-    return figure_to_image(_plot_angular_velocities(series, 'Angular Velocity in Body Frame'))
+    return model._plot_imu_angular_velocities.render(series)
 
 
-def _render_imu_linear_accelerations(results: SlamResult) -> np.ndarray:
+def _render_imu_linear_accelerations(results: SlamResult, model: "SlamViewModel") -> np.ndarray:
     series = [(results.imu.times, results.imu.linear_accelerations, 'imu')]
-    return figure_to_image(_plot_linear_accelerations(series, 'Linear Acceleration in Body Frame'))
+    return model._plot_imu_linear_accelerations.render(series)
 
 
 class SlamViewModel:
@@ -291,6 +367,59 @@ class SlamViewModel:
         self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._stale_textures: list[hello_imgui.TextureGpu] = []
+
+        # One persistent Figure/Axes per plot (13, matching the _tex_* attrs above), built once
+        # here and updated in place by _render_* on every call -- see _ReusableSeriesPlot's
+        # docstring. Never rebuilt for the lifetime of this model; closed in stop().
+        _xyz = ['X', 'Y', 'Z']
+        _axis_names = ['Right (x-axis)', 'Up (y-axis)', 'Forward (z-axis)']
+        _bias_row_labels = ['accel bias', 'gyro bias']
+        _bias_row_units = ['m/s²', 'rad/s']
+        _bias_component_names = ['x', 'y', 'z']
+        self._plot_positions = _ReusableSeriesPlot(
+            1, 3, (12, 4), 'Position in World Frame', ['gt', 'pnp', 'gtsam'],
+            ylabel_fn=lambda row, col: f'{_xyz[col]} [m]', value_fn=lambda row, col, data: data[:, col])
+        self._plot_attitudes = _ReusableSeriesPlot(
+            1, 3, (12, 4), 'Attitude (Rotation Vector) in World Frame', ['gt', 'pnp', 'gtsam'],
+            ylabel_fn=lambda row, col: f'{_xyz[col]} [rad]', value_fn=lambda row, col, data: data[:, col])
+        self._plot_rotation_matrices = _ReusableSeriesPlot(
+            3, 3, (12, 9), 'Rotation Axes in World Frame', ['gt', 'pnp', 'gtsam'],
+            ylabel_fn=lambda row, col: f'{_axis_names[row]} {_xyz[col]}',
+            value_fn=lambda row, col, data: data[:, col, row])
+        self._plot_velocities = _ReusableSeriesPlot(
+            3, 1, (12, 9), 'Velocity in World Frame', ['gtsam'],
+            ylabel_fn=lambda row, col: f'{["vx", "vy", "vz"][row]} [m/s]',
+            value_fn=lambda row, col, data: data[:, row])
+        self._plot_biases = _ReusableSeriesPlot(
+            2, 3, (12, 6), 'IMU Bias (Body Frame)', ['gtsam'],
+            ylabel_fn=lambda row, col: f'{_bias_row_labels[row]} {_bias_component_names[col]} [{_bias_row_units[row]}]',
+            value_fn=lambda row, col, data: data[:, row * 3 + col])
+        self._plot_diagnostics = _ReusableGtsamDiagnosticsPlot()
+        self._plot_ate_rpe = _ReusableAteRpePlot()
+        self._plot_angular_velocities = _ReusableSeriesPlot(
+            3, 1, (12, 9), 'Angular Velocity in World Frame', ['gt', 'pnp', 'gtsam'],
+            ylabel_fn=lambda row, col: f'{["wx", "wy", "wz"][row]} [rad/s]',
+            value_fn=lambda row, col, data: data[:, row])
+        self._plot_linear_accelerations = _ReusableSeriesPlot(
+            3, 1, (12, 9), 'Linear Acceleration in World Frame', ['imu', 'gtsam'],
+            ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
+            value_fn=lambda row, col, data: data[:, row],
+            axhline_fn=lambda row, col, gravity: (-gravity[row], '-gravity') if gravity is not None else None)
+        self._plot_imu_attitudes = _ReusableSeriesPlot(
+            1, 3, (12, 4), 'Attitude (Rotation Vector) in Body Frame', ['imu'],
+            ylabel_fn=lambda row, col: f'{_xyz[col]} [rad]', value_fn=lambda row, col, data: data[:, col])
+        self._plot_imu_rotation_matrices = _ReusableSeriesPlot(
+            3, 3, (12, 9), 'Rotation Axes in Body Frame', ['imu'],
+            ylabel_fn=lambda row, col: f'{_axis_names[row]} {_xyz[col]}',
+            value_fn=lambda row, col, data: data[:, col, row])
+        self._plot_imu_angular_velocities = _ReusableSeriesPlot(
+            3, 1, (12, 9), 'Angular Velocity in Body Frame', ['imu'],
+            ylabel_fn=lambda row, col: f'{["wx", "wy", "wz"][row]} [rad/s]',
+            value_fn=lambda row, col, data: data[:, row])
+        self._plot_imu_linear_accelerations = _ReusableSeriesPlot(
+            3, 1, (12, 9), 'Linear Acceleration in Body Frame', ['imu'],
+            ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
+            value_fn=lambda row, col, data: data[:, row])
         # The result currently on screen (all 13 _tex_* textures reflect exactly this snapshot),
         # vs. the next one being assembled in the background -- see _advance_pending_batch in
         # slam_view for why these two are kept apart instead of invalidating _tex_* the moment a
@@ -347,25 +476,44 @@ class SlamViewModel:
             self._solver.cancel()
         self._solver = None
 
+    def close_plots(self) -> None:
+        """Closes all 13 persistent Figures -- without this, restarting on a new dataset (see
+        RootViewModel.restart in main.py, which calls Pipeline.stop -> this) would leak the old
+        model's Figures forever: pyplot keeps every open Figure registered globally until
+        plt.close() is called on it, and a fresh SlamViewModel with its own 13 Figures gets built
+        right after this one is torn down.
+        """
+        for attr in _PLOT_ATTRS:
+            getattr(self, attr).close()
+
+
+# Every persistent plot object on the model, in one place so close_plots (above) can tear them
+# all down without listing each by name.
+_PLOT_ATTRS = [
+    "_plot_positions", "_plot_attitudes", "_plot_rotation_matrices", "_plot_velocities",
+    "_plot_biases", "_plot_diagnostics", "_plot_ate_rpe", "_plot_angular_velocities",
+    "_plot_linear_accelerations", "_plot_imu_attitudes", "_plot_imu_rotation_matrices",
+    "_plot_imu_angular_velocities", "_plot_imu_linear_accelerations",
+]
 
 # Every figure texture on the model, paired with how to render it from a (result, model)
 # snapshot -- one place so slam_view's background batch-builder (_advance_pending_batch) can
 # render all 13 the same way it draws them, and so it can tell when the whole batch is done (see
 # the idling toggle at the end of slam_view).
 _FIGURE_SPECS: list[tuple[str, Callable[[SlamResult, "SlamViewModel"], np.ndarray]]] = [
-    ("_tex_positions", lambda r, m: _render_positions(r, m.pos_enabled)),
-    ("_tex_attitudes", lambda r, m: _render_attitudes(r, m.att_enabled)),
-    ("_tex_rotation_matrices", lambda r, m: _render_rotation_matrices(r, m.att_enabled)),
-    ("_tex_velocities", lambda r, m: _render_velocities(r, m.vel_enabled)),
-    ("_tex_biases", lambda r, m: _render_biases(r, m.bias_enabled)),
-    ("_tex_diagnostics", lambda r, m: _render_gtsam_diagnostics(r)),
-    ("_tex_ate_rpe", lambda r, m: _render_ate_rpe(r)),
-    ("_tex_angular_velocities", lambda r, m: _render_angular_velocities(r, m.omega_enabled)),
-    ("_tex_linear_accelerations", lambda r, m: _render_linear_accelerations(r, m.lin_acc_enabled)),
-    ("_tex_imu_attitudes", lambda r, m: _render_imu_attitudes(r)),
-    ("_tex_imu_rotation_matrices", lambda r, m: _render_imu_rotation_matrices(r)),
-    ("_tex_imu_angular_velocities", lambda r, m: _render_imu_angular_velocities(r)),
-    ("_tex_imu_linear_accelerations", lambda r, m: _render_imu_linear_accelerations(r)),
+    ("_tex_positions", _render_positions),
+    ("_tex_attitudes", _render_attitudes),
+    ("_tex_rotation_matrices", _render_rotation_matrices),
+    ("_tex_velocities", _render_velocities),
+    ("_tex_biases", _render_biases),
+    ("_tex_diagnostics", _render_gtsam_diagnostics),
+    ("_tex_ate_rpe", _render_ate_rpe),
+    ("_tex_angular_velocities", _render_angular_velocities),
+    ("_tex_linear_accelerations", _render_linear_accelerations),
+    ("_tex_imu_attitudes", _render_imu_attitudes),
+    ("_tex_imu_rotation_matrices", _render_imu_rotation_matrices),
+    ("_tex_imu_angular_velocities", _render_imu_angular_velocities),
+    ("_tex_imu_linear_accelerations", _render_imu_linear_accelerations),
 ]
 _FIGURE_TEX_ATTRS = [attr for attr, _ in _FIGURE_SPECS]
 
@@ -460,42 +608,42 @@ def slam_view(model: SlamViewModel) -> None:
 
     if _checkboxes(model.pos_enabled, "pos"):
         model._tex_positions = None
-    show("_tex_positions", lambda: _render_positions(result, model.pos_enabled))
+    show("_tex_positions", lambda: _render_positions(result, model))
 
     if _checkboxes(model.att_enabled, "att"):
         model._tex_attitudes = None
         model._tex_rotation_matrices = None
-    show("_tex_attitudes", lambda: _render_attitudes(result, model.att_enabled))
-    show("_tex_rotation_matrices", lambda: _render_rotation_matrices(result, model.att_enabled))
+    show("_tex_attitudes", lambda: _render_attitudes(result, model))
+    show("_tex_rotation_matrices", lambda: _render_rotation_matrices(result, model))
 
     if _checkboxes(model.vel_enabled, "vel"):
         model._tex_velocities = None
-    show("_tex_velocities", lambda: _render_velocities(result, model.vel_enabled))
+    show("_tex_velocities", lambda: _render_velocities(result, model))
 
     if _checkboxes(model.bias_enabled, "bias"):
         model._tex_biases = None
-    show("_tex_biases", lambda: _render_biases(result, model.bias_enabled))
+    show("_tex_biases", lambda: _render_biases(result, model))
 
-    show("_tex_diagnostics", lambda: _render_gtsam_diagnostics(result))
-    show("_tex_ate_rpe", lambda: _render_ate_rpe(result))
+    show("_tex_diagnostics", lambda: _render_gtsam_diagnostics(result, model))
+    show("_tex_ate_rpe", lambda: _render_ate_rpe(result, model))
 
     if _checkboxes(model.omega_enabled, "omega"):
         model._tex_angular_velocities = None
-    show("_tex_angular_velocities", lambda: _render_angular_velocities(result, model.omega_enabled))
+    show("_tex_angular_velocities", lambda: _render_angular_velocities(result, model))
 
     if _checkboxes(model.lin_acc_enabled, "lin_acc"):
         model._tex_linear_accelerations = None
-    show("_tex_linear_accelerations", lambda: _render_linear_accelerations(result, model.lin_acc_enabled))
+    show("_tex_linear_accelerations", lambda: _render_linear_accelerations(result, model))
     g = result.extra.gravity
     imgui.text(f"Gravity: [{g[0]:.4f}, {g[1]:.4f}, {g[2]:.4f}]")
 
     imgui.separator()
     imgui.text("IMU (Body Frame)")
 
-    show("_tex_imu_attitudes", lambda: _render_imu_attitudes(result))
-    show("_tex_imu_rotation_matrices", lambda: _render_imu_rotation_matrices(result))
-    show("_tex_imu_angular_velocities", lambda: _render_imu_angular_velocities(result))
-    show("_tex_imu_linear_accelerations", lambda: _render_imu_linear_accelerations(result))
+    show("_tex_imu_attitudes", lambda: _render_imu_attitudes(result, model))
+    show("_tex_imu_rotation_matrices", lambda: _render_imu_rotation_matrices(result, model))
+    show("_tex_imu_angular_velocities", lambda: _render_imu_angular_velocities(result, model))
+    show("_tex_imu_linear_accelerations", lambda: _render_imu_linear_accelerations(result, model))
 
     imgui.end_child()
 
