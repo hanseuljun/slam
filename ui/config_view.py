@@ -11,15 +11,13 @@ class ConfigViewModel:
     selected_index: int = 0
     start_s: float = 0.0
     duration_s: float = 200.0
-    # On by default (unlike the diagnostics below): these three used to always run
-    # unconditionally, so defaulting to True keeps existing behavior unchanged for anyone who
-    # doesn't touch these checkboxes. SLAM itself doesn't need any of the three anymore --
-    # SlamSolver computes its own feature detection/stereo matching/optical flow internally (see
-    # _compute in slam.py) -- so turning these off only affects their own diagnostic tabs and
-    # skips their (now redundant, from SLAM's point of view) compute.
-    run_feature_detection: bool = True
-    run_stereo_matching: bool = True
-    run_optical_flow: bool = True
+    # Off by default: SLAM doesn't need any of these three anymore -- SlamSolver computes its own
+    # feature detection/stereo matching/optical flow internally (see _compute in slam.py) -- so
+    # they exist purely for their own diagnostic tabs, at the cost of redundant compute duplicating
+    # what SLAM already does itself. Opt in explicitly, same as the other diagnostics below.
+    run_feature_detection: bool = False
+    run_stereo_matching: bool = False
+    run_optical_flow: bool = False
     run_coordinate_mapping_check: bool = False
     run_imu_initialization: bool = False
     run_loop_closure: bool = False
