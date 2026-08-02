@@ -291,10 +291,19 @@ class SlamViewModel:
         self._tex_imu_angular_velocities: Optional[hello_imgui.TextureGpu] = None
         self._tex_imu_linear_accelerations: Optional[hello_imgui.TextureGpu] = None
         self._stale_textures: list[hello_imgui.TextureGpu] = []
-        # Identity (not equality) check: _compute pushes a brand-new SlamResult object for every
-        # keyframe (see _build_partial_result in slam.py), so "is this a different object than
-        # last frame" is exactly "is there new data to show" -- see slam_view's cache-invalidation.
-        self._last_rendered_result: Optional[SlamResult] = None
+        # The result currently on screen (all 13 _tex_* textures reflect exactly this snapshot),
+        # vs. the next one being assembled in the background -- see _advance_pending_batch in
+        # slam_view for why these two are kept apart instead of invalidating _tex_* the moment a
+        # new keyframe result arrives: rendering the 13 figures takes several frames at the
+        # existing 1-figure/frame budget, and a new SlamResult can arrive every keyframe, faster
+        # than that -- clearing _tex_* immediately made most plots flicker to "Rendering plot..."
+        # and back on every keyframe. Building the new set into _pending_images (plain arrays, no
+        # GPU texture yet) while _tex_* keeps showing the old-but-complete batch, then swapping
+        # all 13 textures in at once, means the display only ever shows a fully-rendered batch.
+        self._displayed_result: Optional[SlamResult] = None
+        self._pending_result: Optional[SlamResult] = None
+        self._pending_images: dict[str, np.ndarray] = {}
+        self._building: bool = False
         self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
         self.vel_enabled: dict[str, bool] = {'gtsam': True}
@@ -327,7 +336,10 @@ class SlamViewModel:
         self._tex_imu_rotation_matrices = None
         self._tex_imu_angular_velocities = None
         self._tex_imu_linear_accelerations = None
-        self._last_rendered_result = None
+        self._displayed_result = None
+        self._pending_result = None
+        self._pending_images = {}
+        self._building = False
         threading.Thread(target=self._solver.run, daemon=True).start()
 
     def stop(self) -> None:
@@ -336,14 +348,52 @@ class SlamViewModel:
         self._solver = None
 
 
-# Every figure texture on the model, in one place so slam_view can tell when the whole batch
-# has finished rendering (see the idling toggle at the end of slam_view).
-_FIGURE_TEX_ATTRS = [
-    "_tex_positions", "_tex_attitudes", "_tex_rotation_matrices", "_tex_velocities",
-    "_tex_biases", "_tex_diagnostics", "_tex_ate_rpe", "_tex_angular_velocities", "_tex_linear_accelerations",
-    "_tex_imu_attitudes", "_tex_imu_rotation_matrices", "_tex_imu_angular_velocities",
-    "_tex_imu_linear_accelerations",
+# Every figure texture on the model, paired with how to render it from a (result, model)
+# snapshot -- one place so slam_view's background batch-builder (_advance_pending_batch) can
+# render all 13 the same way it draws them, and so it can tell when the whole batch is done (see
+# the idling toggle at the end of slam_view).
+_FIGURE_SPECS: list[tuple[str, Callable[[SlamResult, "SlamViewModel"], np.ndarray]]] = [
+    ("_tex_positions", lambda r, m: _render_positions(r, m.pos_enabled)),
+    ("_tex_attitudes", lambda r, m: _render_attitudes(r, m.att_enabled)),
+    ("_tex_rotation_matrices", lambda r, m: _render_rotation_matrices(r, m.att_enabled)),
+    ("_tex_velocities", lambda r, m: _render_velocities(r, m.vel_enabled)),
+    ("_tex_biases", lambda r, m: _render_biases(r, m.bias_enabled)),
+    ("_tex_diagnostics", lambda r, m: _render_gtsam_diagnostics(r)),
+    ("_tex_ate_rpe", lambda r, m: _render_ate_rpe(r)),
+    ("_tex_angular_velocities", lambda r, m: _render_angular_velocities(r, m.omega_enabled)),
+    ("_tex_linear_accelerations", lambda r, m: _render_linear_accelerations(r, m.lin_acc_enabled)),
+    ("_tex_imu_attitudes", lambda r, m: _render_imu_attitudes(r)),
+    ("_tex_imu_rotation_matrices", lambda r, m: _render_imu_rotation_matrices(r)),
+    ("_tex_imu_angular_velocities", lambda r, m: _render_imu_angular_velocities(r)),
+    ("_tex_imu_linear_accelerations", lambda r, m: _render_imu_linear_accelerations(r)),
 ]
+_FIGURE_TEX_ATTRS = [attr for attr, _ in _FIGURE_SPECS]
+
+
+def _advance_pending_batch(model: "SlamViewModel", render_budget: list[int]) -> None:
+    """Renders up to render_budget[0] not-yet-built figures of the pending batch (plain arrays,
+    no GPU texture yet -- model._tex_* is untouched so the old batch keeps displaying). Once
+    every figure in the batch is done, swaps all 13 textures in at once and makes this the new
+    displayed result -- see _pending_images's docstring on SlamViewModel for why this needs to be
+    all-or-nothing rather than swapping each texture in as it finishes.
+    """
+    for attr, render_fn in _FIGURE_SPECS:
+        if render_budget[0] <= 0:
+            return
+        if attr in model._pending_images:
+            continue
+        render_budget[0] -= 1
+        assert model._pending_result is not None
+        model._pending_images[attr] = render_fn(model._pending_result, model)
+
+    if len(model._pending_images) < len(_FIGURE_SPECS):
+        return
+    for attr, _ in _FIGURE_SPECS:
+        setattr(model, attr, image_to_texture(model._pending_images[attr]))
+    model._displayed_result = model._pending_result
+    model._pending_result = None
+    model._pending_images = {}
+    model._building = False
 
 
 def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
@@ -371,25 +421,31 @@ def slam_view(model: SlamViewModel) -> None:
         imgui.progress_bar(solver.progress, (-1, 0))
     elif solver.error:
         imgui.text(f"Error: {solver.error}")
-    if solver.result is None:
-        return
+    # Start assembling the next batch once the previous one is fully swapped in -- see
+    # _advance_pending_batch and _pending_images's docstring on SlamViewModel. While
+    # model._building is True, newer solver results are simply skipped (not queued) -- once the
+    # in-flight batch lands, the very next check here picks up whatever's newest by then, so a
+    # burst of keyframes just coalesces into one batch instead of piling up a backlog.
+    if (not model._building and solver.result is not None
+            and solver.result is not model._displayed_result):
+        model._pending_result = solver.result
+        model._pending_images = {}
+        model._building = True
 
-    result = solver.result
-    if result is not model._last_rendered_result:
-        # New keyframe's worth of data: every cached plot below was rendered from the previous
-        # result object, so it must be rebuilt -- see _last_rendered_result's docstring.
-        for attr in _FIGURE_TEX_ATTRS:
-            setattr(model, attr, None)
-        model._last_rendered_result = result
+    # Building all ~12 matplotlib figures takes ~3s total; doing it in one frame would freeze the
+    # window. Render at most one new figure per frame -- shared between advancing the pending
+    # batch below and any single-figure rebuild a checkbox toggle triggers further down.
+    render_budget = [1]
+    if model._building:
+        _advance_pending_batch(model, render_budget)
+
+    result = model._displayed_result
+    if result is None:
+        return
 
     imgui.text(f"PnP: {result.pnp.elapsed_time:.1f}s   GTSAM: {result.gtsam.elapsed_time:.1f}s")
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
-
-    # Building all ~12 matplotlib figures takes ~3s; doing it in one frame freezes the window
-    # right after the solver finishes. Materialize at most one new figure per frame so the view
-    # appears immediately and plots pop in one by one while the UI stays responsive.
-    render_budget = [1]
 
     def show(tex_attr: str, render_fn: Callable[[], np.ndarray]) -> None:
         tex = getattr(model, tex_attr)
@@ -444,7 +500,8 @@ def slam_view(model: SlamViewModel) -> None:
     imgui.end_child()
 
     # Idling (the default) throttles redraws when there's no input, which would stall the
-    # per-frame figure rendering above. Keep frames flowing while any figure is still pending,
-    # then restore idling once everything is built.
-    pending = any(getattr(model, attr) is None for attr in _FIGURE_TEX_ATTRS)
+    # per-frame figure rendering above. Keep frames flowing while a pending batch is still being
+    # assembled (model._building) or any displayed figure is mid-rebuild from a checkbox toggle,
+    # then restore idling once everything is settled.
+    pending = model._building or any(getattr(model, attr) is None for attr in _FIGURE_TEX_ATTRS)
     hello_imgui.get_runner_params().fps_idling.enable_idling = not pending
