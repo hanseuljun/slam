@@ -20,6 +20,38 @@ from slam.util import quaternion_to_rotation_matrix
 RPE_DELTA_S = 1.0  # RPE window: how far apart (in time) the two poses being compared are [s]
 
 
+class _FrontendFrameComputer:
+    """Feature detection + stereo matching + optical flow for one frame at a time -- the per-frame
+    body _compute_frontend_incrementally (below) loops over, pulled out so _compute's own
+    per-frame loop (which also drives _KeyframeScanner/_GtsamBuilder) can call it directly instead
+    of needing a separate complete pass before keyframe selection can even start.
+
+    Each camera image is loaded once and reused for both feature detection and optical flow
+    (detect_features_for_frame accepts pre-loaded images for exactly this reason) -- today's
+    separate FeatureDetectionSolver/OpticalFlowSolver each load cam0 independently. A single
+    OpticalFlowTracker is owned across the whole lifetime of this object, since track identity has
+    to stay continuous frame to frame the same way it does inside OpticalFlowSolver.run() -- see
+    OpticalFlowTracker's docstring.
+    """
+
+    def __init__(self, data: EuRoCMAVData) -> None:
+        self._data = data
+        self._tracker = OpticalFlowTracker()
+
+    def add_frame(self, ts: int) -> tuple[FeatureDetectionFrame, StereoMatchingFrame, OpticalFlowFrame]:
+        cam0_img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        cam1_img = cv2.imread(str(self._data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
+        fd_frame = detect_features_for_frame(self._data, ts, cam0_img, cam1_img)
+
+        matches, points_3d = match_and_triangulate_stereo(
+            self._data, fd_frame.cam0_keypoints, fd_frame.cam0_descriptors,
+            fd_frame.cam1_keypoints, fd_frame.cam1_descriptors)
+        sm_frame = StereoMatchingFrame(timestamp_ns=ts, matches=matches, points_3d=points_3d)
+
+        of_frame = self._tracker.add_frame(fd_frame, sm_frame, cam0_img)
+        return fd_frame, sm_frame, of_frame
+
+
 def _compute_frontend_incrementally(
     data: EuRoCMAVData,
     start_s: float,
@@ -28,21 +60,14 @@ def _compute_frontend_incrementally(
     on_progress: Optional[Callable[[float], None]] = None,
 ) -> tuple[FeatureDetectionResult, StereoMatchingResult, OpticalFlowResult]:
     """Feature detection + stereo matching + optical flow for every frame in
-    [start_s, start_s + duration_s], computed one frame at a time in strictly increasing order --
-    no ThreadPoolExecutor precomputation across the window (that's what
+    [start_s, start_s + duration_s], computed one frame at a time in strictly increasing order via
+    _FrontendFrameComputer -- no ThreadPoolExecutor precomputation across the window (that's what
     FeatureDetectionSolver/StereoMatchingSolver do; both are safe to call one frame at a time
     since neither carries state across frames), and no frame ever read before its own turn.
 
     Produces the exact same FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult shape
-    the batch solvers return, so _scan_keyframes/_run_gtsam are unaffected -- this only changes
-    *how* that data gets computed (incrementally, inside this module, from raw images) rather than
-    *what* it contains. Each camera image is loaded once and reused for both feature detection and
-    optical flow (detect_features_for_frame accepts pre-loaded images for exactly this reason) --
-    today's separate FeatureDetectionSolver/OpticalFlowSolver each load cam0 independently.
-
-    A single OpticalFlowTracker is threaded through the whole loop, since track identity has to
-    stay continuous across frames the same way it does inside OpticalFlowSolver.run() -- see
-    OpticalFlowTracker's docstring.
+    the batch solvers return -- this only changes *how* that data gets computed (incrementally,
+    inside this module, from raw images) rather than *what* it contains.
     """
     first_ts = data.cam_timestamps_ns[0]
     min_ts = first_ts + int(start_s * 1e9)
@@ -50,29 +75,19 @@ def _compute_frontend_incrementally(
     timestamps = [t for t in data.cam_timestamps_ns if min_ts <= t <= max_ts]
     n = len(timestamps)
 
+    computer = _FrontendFrameComputer(data)
     fd_frames: list[FeatureDetectionFrame] = []
     sm_frames: list[StereoMatchingFrame] = []
     of_frames: list[OpticalFlowFrame] = []
-    tracker = OpticalFlowTracker()
 
     t0 = time.monotonic()
     for i, ts in enumerate(timestamps):
         if cancel_event.is_set():
             break
-
-        cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        cam1_img = cv2.imread(str(data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        fd_frame = detect_features_for_frame(data, ts, cam0_img, cam1_img)
+        fd_frame, sm_frame, of_frame = computer.add_frame(ts)
         fd_frames.append(fd_frame)
-
-        matches, points_3d = match_and_triangulate_stereo(
-            data, fd_frame.cam0_keypoints, fd_frame.cam0_descriptors,
-            fd_frame.cam1_keypoints, fd_frame.cam1_descriptors)
-        sm_frame = StereoMatchingFrame(timestamp_ns=ts, matches=matches, points_3d=points_3d)
         sm_frames.append(sm_frame)
-
-        of_frames.append(tracker.add_frame(fd_frame, sm_frame, cam0_img))
-
+        of_frames.append(of_frame)
         if on_progress is not None:
             on_progress((i + 1) / n)
 
@@ -2007,25 +2022,39 @@ def _get_extra_result(
 
 def _compute(
     data: EuRoCMAVData,
-    feature_detection_result: FeatureDetectionResult,
-    stereo_matching_result: StereoMatchingResult,
-    optical_flow_result: OpticalFlowResult,
+    start_s: float,
+    duration_s: float,
     set_progress: Callable[[float, str], None],
     enable_loop_closure: bool = False,
 ) -> SlamResult:
+    """Runs the whole SLAM stage -- feature detection, stereo matching, optical flow, keyframe
+    selection, and GTSAM graph construction -- as one incremental pass over
+    [start_s, start_s + duration_s], instead of requiring three fully-precomputed
+    FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in from outside. Frame i
+    is computed (_FrontendFrameComputer), then immediately offered to keyframe selection
+    (_KeyframeScanner) and, for any keyframe it produces, the pose graph (_GtsamBuilder) -- before
+    frame i+1 is ever touched. FeatureDetectionSolver/StereoMatchingSolver/OpticalFlowSolver still
+    exist unchanged for their own diagnostic views (see tmp/fold_pipeline_into_slam_plan.html);
+    this recomputes the same data independently rather than depending on their output.
+    """
     first_timestamp_ns = data.cam_timestamps_ns[0]
-    # SLAM runs on the frames sliced to the config's [start_s, start_s + duration_s] window,
-    # so the first stereo frame marks the window start. Trimming GT/IMU/extra to the same
-    # lower bound makes every series' time axis begin at start_s (times stay relative to the
+    min_ts = first_timestamp_ns + int(start_s * 1e9)
+    max_ts = min_ts + int(duration_s * 1e9)
+    timestamps = [t for t in data.cam_timestamps_ns if min_ts <= t <= max_ts]
+    N = len(timestamps)
+    # SLAM runs on the frames sliced to the config's [start_s, start_s + duration_s] window, so
+    # the first/last frame that actually exists in that range mark the window start/end -- not
+    # min_ts/max_ts themselves, which may fall between two real frames. Trimming GT/IMU/extra to
+    # the same bounds makes every series' time axis begin at start_s (times stay relative to the
     # dataset start), matching the PnP/GTSAM series that are already windowed.
-    min_timestamp_ns = stereo_matching_result.frames[0].timestamp_ns
-    max_timestamp_ns = stereo_matching_result.frames[-1].timestamp_ns
+    min_timestamp_ns = timestamps[0]
+    max_timestamp_ns = timestamps[-1]
 
     gravity = np.array([0.0, 0.0, -9.81])
 
     # Progress budget across the whole solver so every step advances the bar:
-    #   ground truth [0.00, 0.03]  IMU [0.03, 0.06]  PnP [0.06, 0.40]
-    #   GTSAM [0.40, 0.97]  extra/finishing [0.97, 1.00]
+    #   ground truth [0.00, 0.03]  IMU [0.03, 0.06]  frontend + keyframes + GTSAM [0.06, 0.96]
+    #   extra/finishing [0.97, 1.00]
     set_progress(0.0, "Loading ground truth...")
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns)
 
@@ -2040,42 +2069,54 @@ def _compute(
         gt_result.rotation_matrices, first_gt_timestamp_ns,
     )
 
-    # Keyframe selection and GTSAM graph construction as one pass, instead of a complete scan
-    # over every frame followed by a complete graph-build over every keyframe: _KeyframeScanner
-    # and _GtsamBuilder are each fed one frame/keyframe at a time, in the same loop, so a
-    # keyframe's factors get added the moment it's confirmed rather than only once the whole
-    # window has been scanned. See both classes' docstrings; this replaces _scan_keyframes'
-    # up-front full-window pass and _run_gtsam's separate up-front-keyframe-list pass with the
-    # incremental machinery those two already contained.
-    set_progress(0.06, "Selecting keyframes...")
-    scan_and_build_t0 = time.monotonic()
+    # Frame computation, keyframe selection, and GTSAM graph construction as one pass: each
+    # frame's fd/sm/of is computed (_FrontendFrameComputer) and appended to these growing result
+    # containers, then immediately offered to _KeyframeScanner and, for any keyframe it returns,
+    # _GtsamBuilder -- before the next frame is ever touched. Both scanner/builder read from these
+    # same containers (that's how they see earlier frames' data), so the containers are shared,
+    # mutable state across the loop below, not a return value handed off afterward.
+    set_progress(0.06, "Processing frames...")
+    compute_t0 = time.monotonic()
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
-    N = len(stereo_matching_result.frames)
+
+    frontend = _FrontendFrameComputer(data)
+    feature_detection_result = FeatureDetectionResult(frames=[], elapsed_s=0.0)
+    stereo_matching_result = StereoMatchingResult(frames=[], elapsed_s=0.0)
+    optical_flow_result = OpticalFlowResult(frames=[], elapsed_s=0.0)
+
+    def _process_frame(ts: int) -> None:
+        fd_frame, sm_frame, of_frame = frontend.add_frame(ts)
+        feature_detection_result.frames.append(fd_frame)
+        stereo_matching_result.frames.append(sm_frame)
+        optical_flow_result.frames.append(of_frame)
+
+    _process_frame(timestamps[0])
     scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result, N)
     builder = _GtsamBuilder(
         data, feature_detection_result, stereo_matching_result, optical_flow_result,
         imu_samples, gravity, first_keyframe_frame=0, enable_loop_closure=enable_loop_closure)
     for i in range(1, N):
-        set_progress(0.06 + (i / N) * (0.95 - 0.06), "Selecting keyframes / optimizing (ISAM2)...")
+        set_progress(0.06 + (i / N) * (0.95 - 0.06), "Processing frames...")
+        _process_frame(timestamps[i])
         for kf in scanner.add_frame(i):
             builder.add_keyframe(kf)
     keyframe_indices = scanner.keyframes
     pnp_poses = scanner.finalize()
     gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts = builder.finalize()
-    # Scanning and graph-building are now the same combined pass, so they no longer have
-    # separately measurable costs -- both diagnostics report the same total.
-    scan_and_build_elapsed = time.monotonic() - scan_and_build_t0
+    # Frontend computation, scanning, and graph-building are now the same combined pass, so they
+    # no longer have separately measurable costs -- both diagnostics report the same total.
+    compute_elapsed = time.monotonic() - compute_t0
 
     pnp_result = _get_pnp_result(
         data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, pnp_poses)
-    pnp_result.elapsed_time = scan_and_build_elapsed
+    pnp_result.elapsed_time = compute_elapsed
 
     set_progress(0.96, "Aligning to ground truth...")
     gtsam_result = _get_gtsam_result(
         data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
         keyframe_indices, gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts,
     )
-    gtsam_result.elapsed_time = scan_and_build_elapsed
+    gtsam_result.elapsed_time = compute_elapsed
 
     set_progress(0.97, "Finishing...")
     extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
@@ -2094,9 +2135,16 @@ class _SolveCancelled(Exception):
 
 
 class SlamSolver:
+    """Runs the whole SLAM stage over [start_s, start_s + duration_s] -- feature detection,
+    stereo matching, optical flow, keyframe selection, and GTSAM graph construction -- from raw
+    EuRoCMAVData alone, the same (data, start_s, duration_s) shape FeatureDetectionSolver takes.
+    Doesn't need a FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in: it
+    recomputes that data itself, incrementally (see _compute), rather than depending on those
+    solvers having already run. They still exist unchanged for their own diagnostic views.
+    """
+
     def __init__(
-        self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult, optical_flow_result: OpticalFlowResult,
+        self, data: EuRoCMAVData, start_s: float, duration_s: float,
         cancel_event: Optional[threading.Event] = None,
         # Off by default: _LoopClosureDetector is O(K^2) brute-force descriptor matching (fine for
         # an offline research run, not yet acceptable as an always-on interactive-tool cost), and
@@ -2106,9 +2154,8 @@ class SlamSolver:
         enable_loop_closure: bool = False,
     ) -> None:
         self._data = data
-        self._feature_detection_result = feature_detection_result
-        self._stereo_matching_result = stereo_matching_result
-        self._optical_flow_result = optical_flow_result
+        self._start_s = start_s
+        self._duration_s = duration_s
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._enable_loop_closure = enable_loop_closure
         self.result: Optional[SlamResult] = None
@@ -2131,8 +2178,7 @@ class SlamSolver:
         # process's memory: no spawn, no reimport, no pickling data across a process boundary.
         try:
             self.result = _compute(
-                self._data, self._feature_detection_result, self._stereo_matching_result,
-                self._optical_flow_result, set_progress,
+                self._data, self._start_s, self._duration_s, set_progress,
                 enable_loop_closure=self._enable_loop_closure)
         except _SolveCancelled:
             pass

@@ -33,13 +33,16 @@ _DATA_PATHS = [
 
 
 class Pipeline:
-    """Owns the feature detection -> (optical flow, stereo matching) -> (coordinate mapping, SLAM)
-    chain for one loaded dataset. One object per run: constructing a Pipeline wires every stage's on_result
-    callback to the next stage on *this* instance, so a callback firing late from a superseded
-    Pipeline can only ever touch that Pipeline's own (by-then-cancelled) view models, never a
-    newer one's -- restarting is "stop this Pipeline, build a new one," not "rewire a shared set
-    of attributes in place," which is what let a stale callback reach into the wrong dataset's
-    state before (see stop(), and the cam0/cam1 dataset-mismatch investigation this came from).
+    """Owns the feature detection -> (optical flow, stereo matching) -> coordinate mapping chain
+    for one loaded dataset, plus SLAM running independently alongside it (SlamSolver computes its
+    own feature detection/stereo matching/optical flow internally -- see _compute in slam.py --
+    rather than depending on this chain's results, so it doesn't need to wait on it). One object
+    per run: constructing a Pipeline wires every stage's on_result callback to the next stage on
+    *this* instance, so a callback firing late from a superseded Pipeline can only ever touch that
+    Pipeline's own (by-then-cancelled) view models, never a newer one's -- restarting is "stop
+    this Pipeline, build a new one," not "rewire a shared set of attributes in place," which is
+    what let a stale callback reach into the wrong dataset's state before (see stop(), and the
+    cam0/cam1 dataset-mismatch investigation this came from).
     """
 
     def __init__(
@@ -64,12 +67,16 @@ class Pipeline:
         self.stereo_matching_view_model = StereoMatchingViewModel(data, on_result=self._on_stereo_matching_result)
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
         self.imu_initialization_view_model = ImuInitializationViewModel(data)
-        self.slam_view_model = SlamViewModel(data, run_loop_closure=run_loop_closure)
+        self.slam_view_model = SlamViewModel(data, start_s, duration_s, run_loop_closure=run_loop_closure)
 
     def start(self) -> None:
         self.feature_detection_view_model.start()
         if self._run_imu_initialization:
             self.imu_initialization_view_model.start()
+        # No longer waits on feature detection/stereo matching/optical flow: SlamSolver computes
+        # that data itself now (see _compute in slam.py), so it can start as soon as the dataset
+        # is loaded, fully decoupled from whether the diagnostic views above even run.
+        self.slam_view_model.start()
 
     def stop(self) -> None:
         # Every stage, in one place: adding a stage here is the only thing needed to make
@@ -87,13 +94,6 @@ class Pipeline:
 
     def _on_optical_flow_result(self, result: OpticalFlowResult) -> None:
         self.optical_flow_result = result
-        # Always set by now: optical flow only starts (from _on_stereo_matching_result) after
-        # both of these are -- Pylance can't prove that invariant from the Optional types.
-        assert self.feature_detection_result is not None
-        assert self.stereo_matching_result is not None
-        # SLAM waits on optical flow too now: _build_landmark_tracks links landmark observations
-        # across keyframes using optical flow's track ids instead of re-matching ORB descriptors.
-        self.slam_view_model.start(self.feature_detection_result, self.stereo_matching_result, result)
 
     def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
         self.stereo_matching_result = result

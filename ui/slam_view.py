@@ -8,11 +8,8 @@ import numpy as np
 from imgui_bundle import imgui, hello_imgui
 
 from slam.data import EuRoCMAVData
-from slam.feature_detection import FeatureDetectionResult
 from slam.imu_initialization import ImuInitializationResult
-from slam.optical_flow import OpticalFlowResult
 from slam.slam import RPE_DELTA_S, SlamResult, SlamSolver
-from slam.stereo_matching import StereoMatchingResult
 from ui.utils import figure_to_image, image_to_texture
 
 
@@ -272,8 +269,12 @@ def _render_imu_linear_accelerations(results: SlamResult) -> np.ndarray:
 
 
 class SlamViewModel:
-    def __init__(self, data: EuRoCMAVData, run_loop_closure: bool = False) -> None:
+    def __init__(
+        self, data: EuRoCMAVData, start_s: float, duration_s: float, run_loop_closure: bool = False,
+    ) -> None:
         self._data = data
+        self._start_s = start_s
+        self._duration_s = duration_s
         self._run_loop_closure = run_loop_closure
         self._solver: Optional[SlamSolver] = None
         self._tex_positions: Optional[hello_imgui.TextureGpu] = None
@@ -297,15 +298,9 @@ class SlamViewModel:
         self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
         self.omega_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
 
-    def start(
-        self,
-        feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
-        optical_flow_result: OpticalFlowResult,
-    ) -> None:
+    def start(self) -> None:
         self._solver = SlamSolver(
-            self._data, feature_detection_result, stereo_matching_result, optical_flow_result,
-            enable_loop_closure=self._run_loop_closure)
+            self._data, self._start_s, self._duration_s, enable_loop_closure=self._run_loop_closure)
         # Stash old textures so GC doesn't run glDeleteTextures on this (non-render) thread.
         # slam_view() clears _stale_textures on the main render thread.
         for tex in [self._tex_positions, self._tex_attitudes, self._tex_rotation_matrices,
