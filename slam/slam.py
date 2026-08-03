@@ -11,7 +11,6 @@ import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
 from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult, detect_features_for_frame
-from slam.imu_initialization import ImuInitializationResult
 from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult, OpticalFlowTracker
 from slam.orb_vocabulary import ORBVocabulary
 from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult, match_and_triangulate_stereo

@@ -19,7 +19,6 @@ class ConfigViewModel:
     run_stereo_matching: bool = False
     run_optical_flow: bool = False
     run_coordinate_mapping_check: bool = False
-    run_imu_initialization: bool = False
     # Unlike the diagnostics above, this drives SLAM's own solve (SlamSolver's enable_loop_closure)
     # rather than a redundant side computation -- on by default now that it's been validated as a
     # net win; see SlamSolver.__init__'s enable_loop_closure for the remaining known tradeoff.
@@ -93,9 +92,6 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     model.run_coordinate_mapping_check = _dependent_checkbox(
         "Coordinate Mapping Check", model.run_coordinate_mapping_check, model.run_stereo_matching,
         "Stereo Matching")
-    _, model.run_imu_initialization = imgui.checkbox(
-        "IMU Initialization", model.run_imu_initialization
-    )
     # Off by default: loop closure's candidate search is O(K^2) brute-force descriptor matching
     # (not yet cheap enough to run unconditionally) and its candidate-consolidation step is
     # validated-but-not-tuned (see slam.py's _LoopClosureDetector docstring) --
