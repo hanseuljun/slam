@@ -2,7 +2,7 @@ import threading
 from typing import Callable, Optional
 
 import numpy as np
-from imgui_bundle import hello_imgui, imgui, implot
+from imgui_bundle import hello_imgui, imgui, implot, implot3d
 
 from slam.data import EuRoCMAVData
 from slam.slam import RPE_DELTA_S, SlamResult, SlamSolver
@@ -88,6 +88,35 @@ def _plot_single_lines(
                         spec=implot.Spec(flags=implot.InfLinesFlags_.horizontal))
                 implot.end_plot()
         implot.end_subplots()
+
+
+def _draw_3d_trajectory(result: SlamResult) -> None:
+    """The same gt/pnp/gtsam positions _draw_positions breaks into 3 separate X/Y/Z-vs-time
+    charts, drawn instead as one actual 3D path -- ImPlot3D is bundled with imgui_bundle (the same
+    package already providing ImPlot), so this needs no new dependency and renders in-process, the
+    same as every other panel here (see tmp/3d_viz_library_recommendations.html).
+    """
+    imgui.text('3D Trajectory')
+    all_series = [
+        (result.gt.positions, 'gt'),
+        (result.pnp.positions, 'pnp'),
+        (result.gtsam.positions, 'gtsam'),
+    ]
+    # Flags_.equal: keeps X/Y/Z at the same scale so the path's shape is geometrically correct
+    # (an auto-fit-per-axis plot would otherwise stretch/squash it to fill the frame).
+    if implot3d.begin_plot("##3d_trajectory", size=(-1, 500), flags=implot3d.Flags_.equal):
+        implot3d.setup_axes(
+            'X [m]', 'Y [m]', 'Z [m]',
+            implot3d.AxisFlags_.auto_fit, implot3d.AxisFlags_.auto_fit, implot3d.AxisFlags_.auto_fit)
+        for positions, name in all_series:
+            if len(positions) == 0:
+                continue
+            implot3d.plot_line(
+                name,
+                np.ascontiguousarray(positions[:, 0], dtype=np.float64),
+                np.ascontiguousarray(positions[:, 1], dtype=np.float64),
+                np.ascontiguousarray(positions[:, 2], dtype=np.float64))
+        implot3d.end_plot()
 
 
 def _draw_positions(result: SlamResult) -> None:
@@ -241,6 +270,7 @@ def slam_view(model: SlamViewModel) -> None:
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
+    _draw_3d_trajectory(result)
     _draw_positions(result)
     _draw_attitudes(result)
     _draw_rotation_matrices(result)

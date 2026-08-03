@@ -251,9 +251,12 @@ def main():
     runner_params.ini_filename = "slam.ini"
     runner_params.callbacks.show_gui = lambda: root_view(model)
 
-    # with_implot: the SLAM view's plots are ImPlot-based (see ui/slam_view.py) -- ImPlot needs
-    # its own context created before any begin_plot/begin_subplots call, which this handles.
-    immapp.run(runner_params, add_ons_params=immapp.AddOnsParams(with_implot=True))
+    # with_implot/with_implot3d: the SLAM view's plots are ImPlot/ImPlot3D-based (see
+    # ui/slam_view.py) -- both need their own context created before any begin_plot call, which
+    # this handles.
+    immapp.run(
+        runner_params,
+        add_ons_params=immapp.AddOnsParams(with_implot=True, with_implot3d=True))
 
 
 if __name__ == "__main__":
