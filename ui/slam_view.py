@@ -307,7 +307,7 @@ def slam_view(model: SlamViewModel) -> None:
     if result is None:
         return
 
-    imgui.text(f"PnP: {result.pnp.elapsed_time:.1f}s   GTSAM: {result.gtsam.elapsed_time:.1f}s")
+    imgui.text(f"GTSAM: {result.gtsam.elapsed_time:.1f}s")
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
