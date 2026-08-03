@@ -1,15 +1,9 @@
-import os
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Optional
 
 import cv2
 import numpy as np
 
 from slam.data import EuRoCMAVData
-from slam.feature_detection import FeatureDetectionResult
 
 
 # Reject a stereo match if its (undistorted) points sit more than this far, in pixels, from the
@@ -44,11 +38,11 @@ def match_and_triangulate_stereo(
     cam0_keypoints: list, cam0_descriptors: np.ndarray,
     cam1_keypoints: list, cam1_descriptors: np.ndarray,
 ) -> tuple[list, np.ndarray]:
-    """Ratio-test + epipolar-gated cam0<->cam1 match, then triangulate. Extracted out of
-    StereoMatchingSolver so other callers (optical_flow.py, seeding a track's one-time depth) can
-    reuse the exact same geometry rather than duplicating it -- takes an explicit keypoint/
-    descriptor pair instead of a whole FeatureDetectionFrame so it also works on an arbitrary
-    subset (e.g. just this frame's newly-seeded candidates, not its full detected set).
+    """Ratio-test + epipolar-gated cam0<->cam1 match, then triangulate. A free function (not tied
+    to a single-purpose solver class) so other callers (optical_flow.py, seeding a track's
+    one-time depth) can reuse the exact same geometry rather than duplicating it -- takes an
+    explicit keypoint/descriptor pair instead of a whole FeatureDetectionFrame so it also works on
+    an arbitrary subset (e.g. just this frame's newly-seeded candidates, not its full detected set).
 
     Returns (matches, points_3d) with points_3d shape (3, N), points_3d[:, i] <-> matches[i]
     (queryIdx into cam0_keypoints/cam0_descriptors, trainIdx into cam1_keypoints/cam1_descriptors).
@@ -115,45 +109,3 @@ def match_and_triangulate_stereo(
     points_3d = points_4d[:3, :] / points_4d[3, :]
 
     return good_matches, points_3d
-
-
-class StereoMatchingSolver:
-    def __init__(
-        self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> None:
-        self._data = data
-        self._feature_detection_result = feature_detection_result
-        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
-        self.progress: float = 0.0
-
-    def _process_frame(self, i: int) -> StereoMatchingFrame:
-        fd = self._feature_detection_result.frames[i]
-        matches, points_3d = match_and_triangulate_stereo(
-            self._data, fd.cam0_keypoints, fd.cam0_descriptors, fd.cam1_keypoints, fd.cam1_descriptors)
-        return StereoMatchingFrame(timestamp_ns=fd.timestamp_ns, matches=matches, points_3d=points_3d)
-
-    def run(self) -> StereoMatchingResult:
-        n = len(self._feature_detection_result.frames)
-        frames: list[StereoMatchingFrame | None] = [None] * n
-        t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            future_to_index = {
-                executor.submit(self._process_frame, i): i
-                for i in range(n)
-            }
-            completed = 0
-            for future in as_completed(future_to_index):
-                if self._cancel_event.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                i = future_to_index[future]
-                frames[i] = future.result()
-                completed += 1
-                self.progress = completed / n
-        elapsed_s = time.monotonic() - t0
-        # Cancellation can break out of the loop above before every slot is filled; the caller
-        # always discards a result once it sees its own cancel_event set, but drop the unfilled
-        # slots here too so the return type stays honestly non-Optional either way.
-        completed_frames = [f for f in frames if f is not None]
-        return StereoMatchingResult(frames=completed_frames, elapsed_s=elapsed_s)

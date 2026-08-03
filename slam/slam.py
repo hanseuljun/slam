@@ -10,92 +10,14 @@ import gtsam
 import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
-from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult, detect_features_for_frame
-from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult, OpticalFlowTracker
+from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
+from slam.frontend import FrontendFrameComputer
+from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
 from slam.orb_vocabulary import ORBVocabulary
-from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult, match_and_triangulate_stereo
+from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
 RPE_DELTA_S = 1.0  # RPE window: how far apart (in time) the two poses being compared are [s]
-
-
-class _FrontendFrameComputer:
-    """Feature detection + stereo matching + optical flow for one frame at a time -- the per-frame
-    body _compute_frontend_incrementally (below) loops over, pulled out so _compute's own
-    per-frame loop (which also drives _KeyframeScanner/_GtsamBuilder) can call it directly instead
-    of needing a separate complete pass before keyframe selection can even start.
-
-    Each camera image is loaded once and reused for both feature detection and optical flow
-    (detect_features_for_frame accepts pre-loaded images for exactly this reason) -- today's
-    separate FeatureDetectionSolver/OpticalFlowSolver each load cam0 independently. A single
-    OpticalFlowTracker is owned across the whole lifetime of this object, since track identity has
-    to stay continuous frame to frame the same way it does inside OpticalFlowSolver.run() -- see
-    OpticalFlowTracker's docstring.
-    """
-
-    def __init__(self, data: EuRoCMAVData) -> None:
-        self._data = data
-        self._tracker = OpticalFlowTracker()
-
-    def add_frame(self, ts: int) -> tuple[FeatureDetectionFrame, StereoMatchingFrame, OpticalFlowFrame]:
-        cam0_img = cv2.imread(str(self._data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        cam1_img = cv2.imread(str(self._data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-        fd_frame = detect_features_for_frame(self._data, ts, cam0_img, cam1_img)
-
-        matches, points_3d = match_and_triangulate_stereo(
-            self._data, fd_frame.cam0_keypoints, fd_frame.cam0_descriptors,
-            fd_frame.cam1_keypoints, fd_frame.cam1_descriptors)
-        sm_frame = StereoMatchingFrame(timestamp_ns=ts, matches=matches, points_3d=points_3d)
-
-        of_frame = self._tracker.add_frame(fd_frame, sm_frame, cam0_img)
-        return fd_frame, sm_frame, of_frame
-
-
-def _compute_frontend_incrementally(
-    data: EuRoCMAVData,
-    start_s: float,
-    duration_s: float,
-    cancel_event: threading.Event,
-    on_progress: Optional[Callable[[float], None]] = None,
-) -> tuple[FeatureDetectionResult, StereoMatchingResult, OpticalFlowResult]:
-    """Feature detection + stereo matching + optical flow for every frame in
-    [start_s, start_s + duration_s], computed one frame at a time in strictly increasing order via
-    _FrontendFrameComputer -- no ThreadPoolExecutor precomputation across the window (that's what
-    FeatureDetectionSolver/StereoMatchingSolver do; both are safe to call one frame at a time
-    since neither carries state across frames), and no frame ever read before its own turn.
-
-    Produces the exact same FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult shape
-    the batch solvers return -- this only changes *how* that data gets computed (incrementally,
-    inside this module, from raw images) rather than *what* it contains.
-    """
-    first_ts = data.cam_timestamps_ns[0]
-    min_ts = first_ts + int(start_s * 1e9)
-    max_ts = min_ts + int(duration_s * 1e9)
-    timestamps = [t for t in data.cam_timestamps_ns if min_ts <= t <= max_ts]
-    n = len(timestamps)
-
-    computer = _FrontendFrameComputer(data)
-    fd_frames: list[FeatureDetectionFrame] = []
-    sm_frames: list[StereoMatchingFrame] = []
-    of_frames: list[OpticalFlowFrame] = []
-
-    t0 = time.monotonic()
-    for i, ts in enumerate(timestamps):
-        if cancel_event.is_set():
-            break
-        fd_frame, sm_frame, of_frame = computer.add_frame(ts)
-        fd_frames.append(fd_frame)
-        sm_frames.append(sm_frame)
-        of_frames.append(of_frame)
-        if on_progress is not None:
-            on_progress((i + 1) / n)
-
-    elapsed_s = time.monotonic() - t0
-    return (
-        FeatureDetectionResult(frames=fd_frames, elapsed_s=elapsed_s),
-        StereoMatchingResult(frames=sm_frames, elapsed_s=elapsed_s),
-        OpticalFlowResult(frames=of_frames, elapsed_s=elapsed_s),
-    )
 
 
 @dataclass
@@ -797,7 +719,7 @@ class _LandmarkTrackBuilder:
     Correspondence across keyframes comes from optical flow's already-tracked ids (a track id is
     valid correspondence through every intermediate frame, not just the two keyframes being
     linked) instead of re-matching ORB descriptors keyframe-to-keyframe -- the same fast-rotation
-    failure mode OpticalFlowSolver's docstring documents for that approach.
+    failure mode OpticalFlowTracker's docstring documents for that approach.
 
     Stateful, fed one keyframe at a time via add_keyframe, rather than taking the whole
     keyframe_indices array at once: each call reads only that keyframe's own stereo/feature/
@@ -2130,11 +2052,11 @@ def _compute(
     selection, and GTSAM graph construction -- as one incremental pass over
     [start_s, start_s + duration_s], instead of requiring three fully-precomputed
     FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in from outside. Frame i
-    is computed (_FrontendFrameComputer), then immediately offered to keyframe selection
+    is computed (FrontendFrameComputer), then immediately offered to keyframe selection
     (_KeyframeScanner) and, for any keyframe it produces, the pose graph (_GtsamBuilder) -- before
-    frame i+1 is ever touched. FeatureDetectionSolver/StereoMatchingSolver/OpticalFlowSolver still
-    exist unchanged for their own diagnostic views (see tmp/fold_pipeline_into_slam_plan.html);
-    this recomputes the same data independently rather than depending on their output.
+    frame i+1 is ever touched. FrontendSolver (ui/frontend_view.py's diagnostic tab) still exists
+    unchanged for its own diagnostic view (see tmp/fold_pipeline_into_slam_plan.html); this
+    recomputes the same data independently rather than depending on its output.
 
     If on_partial_result is given, it's called with a full SlamResult (ground truth/IMU/extra
     unchanged from the final one -- none of those depend on the growing SLAM estimate -- but pnp
@@ -2181,7 +2103,7 @@ def _compute(
     extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
 
     # Frame computation, keyframe selection, and GTSAM graph construction as one pass: each
-    # frame's fd/sm/of is computed (_FrontendFrameComputer) and appended to these growing result
+    # frame's fd/sm/of is computed (FrontendFrameComputer) and appended to these growing result
     # containers, then immediately offered to _KeyframeScanner and, for any keyframe it returns,
     # _GtsamBuilder -- before the next frame is ever touched. Both scanner/builder read from these
     # same containers (that's how they see earlier frames' data), so the containers are shared,
@@ -2190,7 +2112,7 @@ def _compute(
     compute_t0 = time.monotonic()
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
 
-    frontend = _FrontendFrameComputer(data)
+    frontend = FrontendFrameComputer(data)
     feature_detection_result = FeatureDetectionResult(frames=[], elapsed_s=0.0)
     stereo_matching_result = StereoMatchingResult(frames=[], elapsed_s=0.0)
     optical_flow_result = OpticalFlowResult(frames=[], elapsed_s=0.0)
@@ -2273,7 +2195,7 @@ class _SolveCancelled(Exception):
 class SlamSolver:
     """Runs the whole SLAM stage over [start_s, start_s + duration_s] -- feature detection,
     stereo matching, optical flow, keyframe selection, and GTSAM graph construction -- from raw
-    EuRoCMAVData alone, the same (data, start_s, duration_s) shape FeatureDetectionSolver takes.
+    EuRoCMAVData alone, the same (data, start_s, duration_s) shape FrontendSolver takes.
     Doesn't need a FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in: it
     recomputes that data itself, incrementally (see _compute), rather than depending on those
     solvers having already run. They still exist unchanged for their own diagnostic views.

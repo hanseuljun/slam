@@ -1,14 +1,11 @@
-import threading
-import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
 import numpy as np
 
-from slam.data import EuRoCMAVData
-from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
-from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
+from slam.feature_detection import FeatureDetectionFrame
+from slam.stereo_matching import StereoMatchingFrame
 
 # Pyramidal Lucas-Kanade parameters. 21x21/3 levels is the standard VIO choice (e.g. VINS-Mono) --
 # large enough a window to survive motion blur, enough pyramid levels to handle a fast frame's
@@ -53,10 +50,10 @@ class OpticalFlowResult:
 
 
 class OpticalFlowTracker:
-    """Owns one continuous KLT tracking state, advanced one frame at a time via add_frame -- the
-    per-iteration body of what used to be OpticalFlowSolver.run()'s single loop, pulled out so
-    slam.py's own incremental per-frame loop can drive the same tracking logic frame-by-frame
-    without needing a fully materialized FeatureDetectionResult/StereoMatchingResult up front.
+    """Owns one continuous KLT tracking state, advanced one frame at a time via add_frame -- driven
+    by slam/frontend.py's FrontendFrameComputer/FrontendSolver and by slam.py's own incremental
+    per-frame loop alike, both frame-by-frame rather than needing a fully materialized
+    FeatureDetectionResult/StereoMatchingResult up front.
 
     Tracks cam0 points continuously frame-to-frame via pyramidal KLT, rather than independently
     re-detecting and re-matching ORB descriptors at each keyframe. A point's track id is stable
@@ -71,9 +68,9 @@ class OpticalFlowTracker:
     rather than a separate detector call, reusing work already done upstream. A candidate only
     becomes a track if it also has a valid, epipolar-consistent cam0<->cam1 stereo match -- this
     gives every track a metric depth at birth instead of seeding blind, undepthed points. That
-    match comes from a StereoMatchingFrame (computed *before* this tracker sees the frame, same as
-    OpticalFlowSolver running as a step after stereo matching) rather than matching seed
-    candidates itself -- redoing that match here would be pure duplicated work.
+    match comes from a StereoMatchingFrame (computed *before* this tracker sees the frame, same
+    as -- stereo matching always runs first) rather than matching seed candidates itself --
+    redoing that match here would be pure duplicated work.
     """
 
     def __init__(self) -> None:
@@ -149,39 +146,3 @@ class OpticalFlowTracker:
         self._prev_img, self._prev_pts, self._prev_ids = cam0_img, cur_pts, cur_ids
         return OpticalFlowFrame(
             timestamp_ns=fd.timestamp_ns, track_uv=track_uv, seeded_point_cam0=seeded_point_cam0)
-
-
-class OpticalFlowSolver:
-    """Batch driver over OpticalFlowTracker: loads each frame's cam0 image and feeds it through
-    the same tracker instance in order, so track ids stay continuous across the whole window --
-    see OpticalFlowTracker's docstring for the tracking algorithm itself.
-    """
-
-    def __init__(
-        self, data: EuRoCMAVData, feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
-        cancel_event: Optional[threading.Event] = None,
-    ) -> None:
-        self._data = data
-        self._feature_detection_result = feature_detection_result
-        self._stereo_matching_result = stereo_matching_result
-        self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
-        self.progress: float = 0.0
-
-    def run(self) -> OpticalFlowResult:
-        frames = self._feature_detection_result.frames
-        stereo_frames = self._stereo_matching_result.frames
-        n = len(frames)
-        result_frames: list[OpticalFlowFrame] = []
-        t0 = time.monotonic()
-
-        tracker = OpticalFlowTracker()
-        for i, (fd, sm_frame) in enumerate(zip(frames, stereo_frames)):
-            if self._cancel_event.is_set():
-                break
-            cam0_img = cv2.imread(str(self._data.get_cam0_image_path(fd.timestamp_ns)), cv2.IMREAD_GRAYSCALE)
-            result_frames.append(tracker.add_frame(fd, sm_frame, cam0_img))
-            self.progress = (i + 1) / n
-
-        elapsed_s = time.monotonic() - t0
-        return OpticalFlowResult(frames=result_frames, elapsed_s=elapsed_s)

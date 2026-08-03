@@ -7,13 +7,12 @@ from typing import Optional
 from imgui_bundle import imgui, hello_imgui, immapp  # pyright: ignore[reportMissingModuleSource]
 from imgui_bundle import icons_fontawesome_6 as fa
 
-from slam import EuRoCMAVData, FeatureDetectionResult, OpticalFlowResult, StereoMatchingResult
+from slam import EuRoCMAVData
+from slam.frontend import FrontendResult
 from ui.coordinate_mapping_view import CoordinateMappingViewModel, coordinate_mapping_view
 from ui.data_view import DataViewModel, data_view
-from ui.feature_detection_view import FeatureDetectionViewModel, feature_detection_view
-from ui.optical_flow_view import OpticalFlowViewModel, optical_flow_view
+from ui.frontend_view import FrontendViewModel, frontend_view
 from ui.slam_view import SlamViewModel, slam_view
-from ui.stereo_matching_view import StereoMatchingViewModel, stereo_matching_view
 from ui.config_view import ConfigViewModel, config_view
 
 _DATA_PATHS = [
@@ -32,13 +31,13 @@ _DATA_PATHS = [
 
 
 class Pipeline:
-    """Owns the feature detection -> stereo matching -> (optical flow, coordinate mapping) chain
-    for one loaded dataset, each stage individually optional (see the run_* flags below). Each
-    stage's own start is gated purely on its own flag -- that's only safe because
-    ConfigViewModel.sanitize already guarantees a stage's flag can't be True while something it
-    depends on is False, so this class doesn't need to re-derive or defend against that itself.
-    Plus SLAM running independently alongside all of it (SlamSolver computes its own feature
-    detection/stereo matching/optical flow internally -- see _compute in slam.py -- rather than
+    """Owns the frontend (feature detection + stereo matching + optical flow, see
+    slam/frontend.py) -> coordinate mapping check chain for one loaded dataset, each stage
+    individually optional (see the run_* flags below). Each stage's own start is gated purely on
+    its own flag -- that's only safe because ConfigViewModel.sanitize already guarantees a stage's
+    flag can't be True while something it depends on is False, so this class doesn't need to
+    re-derive or defend against that itself. Plus SLAM running independently alongside all of it
+    (SlamSolver computes its own frontend internally -- see _compute in slam.py -- rather than
     depending on this chain's results, so none of the flags above affect it). One object
     per run: constructing a Pipeline wires every stage's on_result callback to the next stage on
     *this* instance, so a callback firing late from a superseded Pipeline can only ever touch that
@@ -53,67 +52,41 @@ class Pipeline:
         data: EuRoCMAVData,
         start_s: float,
         duration_s: float,
-        run_feature_detection: bool,
-        run_stereo_matching: bool,
-        run_optical_flow: bool,
+        run_frontend: bool,
         run_coordinate_mapping_check: bool,
         run_loop_closure: bool,
     ) -> None:
         self.data = data
-        self.feature_detection_result: Optional[FeatureDetectionResult] = None
-        self.stereo_matching_result: Optional[StereoMatchingResult] = None
-        self.optical_flow_result: Optional[OpticalFlowResult] = None
-        # ConfigViewModel.sanitize already enforces that these can't be True while something they
-        # depend on is False, but stored here as given -- this class doesn't re-derive that.
-        self._run_feature_detection = run_feature_detection
-        self._run_stereo_matching = run_stereo_matching
-        self._run_optical_flow = run_optical_flow
+        self.frontend_result: Optional[FrontendResult] = None
+        # ConfigViewModel.sanitize already enforces that this can't be True while something it
+        # depends on is False, but stored here as given -- this class doesn't re-derive that.
+        self._run_frontend = run_frontend
         self._run_coordinate_mapping_check = run_coordinate_mapping_check
 
-        self.feature_detection_view_model = FeatureDetectionViewModel(
-            data, on_result=self._on_feature_detection_result, start_s=start_s, duration_s=duration_s)
-        self.optical_flow_view_model = OpticalFlowViewModel(data, on_result=self._on_optical_flow_result)
-        self.stereo_matching_view_model = StereoMatchingViewModel(data, on_result=self._on_stereo_matching_result)
+        self.frontend_view_model = FrontendViewModel(
+            data, on_result=self._on_frontend_result, start_s=start_s, duration_s=duration_s)
         self.coordinate_mapping_view_model = CoordinateMappingViewModel(data)
         self.slam_view_model = SlamViewModel(data, start_s, duration_s, run_loop_closure=run_loop_closure)
 
     def start(self) -> None:
-        # Feature detection/stereo matching/optical flow are entirely optional now: SlamSolver
-        # computes that data itself (see _compute in slam.py), so none of them gate SLAM starting
-        # -- they only exist for their own diagnostic tabs, skipped here if those aren't wanted.
-        if self._run_feature_detection:
-            self.feature_detection_view_model.start()
+        # The frontend is entirely optional now: SlamSolver computes it internally (see _compute
+        # in slam.py), so it doesn't gate SLAM starting -- it only exists for its own diagnostic
+        # tab, skipped here if that isn't wanted.
+        if self._run_frontend:
+            self.frontend_view_model.start()
         self.slam_view_model.start()
 
     def stop(self) -> None:
         # Every stage, in one place: adding a stage here is the only thing needed to make
         # restart() stop it too, instead of a second call site that's easy to forget.
-        self.feature_detection_view_model.stop()
-        self.optical_flow_view_model.stop()
-        self.stereo_matching_view_model.stop()
+        self.frontend_view_model.stop()
         self.coordinate_mapping_view_model.stop()
         self.slam_view_model.stop()
 
-    def _on_feature_detection_result(self, result: FeatureDetectionResult) -> None:
-        self.feature_detection_result = result
-        if self._run_stereo_matching:
-            self.stereo_matching_view_model.start(result)
-
-    def _on_optical_flow_result(self, result: OpticalFlowResult) -> None:
-        self.optical_flow_result = result
-
-    def _on_stereo_matching_result(self, result: StereoMatchingResult) -> None:
-        self.stereo_matching_result = result
-        # Always set by now: this callback only fires after _on_feature_detection_result already
-        # set it, and stereo matching starts strictly after that -- Pylance can't prove that
-        # invariant from the attribute's Optional type.
-        assert self.feature_detection_result is not None
-        # Optical flow runs after stereo matching (rather than in parallel with it) so it can
-        # reuse stereo matching's per-frame cam0<->cam1 match instead of redoing it for seeding.
-        if self._run_optical_flow:
-            self.optical_flow_view_model.start(self.feature_detection_result, result)
+    def _on_frontend_result(self, result: FrontendResult) -> None:
+        self.frontend_result = result
         if self._run_coordinate_mapping_check:
-            self.coordinate_mapping_view_model.start(self.feature_detection_result, result)
+            self.coordinate_mapping_view_model.start(result.feature_detection, result.stereo_matching)
 
 
 class RootViewModel:
@@ -132,9 +105,7 @@ class RootViewModel:
             data,
             start_s=cfg.start_s,
             duration_s=cfg.duration_s,
-            run_feature_detection=cfg.run_feature_detection,
-            run_stereo_matching=cfg.run_stereo_matching,
-            run_optical_flow=cfg.run_optical_flow,
+            run_frontend=cfg.run_frontend,
             run_coordinate_mapping_check=cfg.run_coordinate_mapping_check,
             run_loop_closure=cfg.run_loop_closure,
         )
@@ -198,19 +169,9 @@ def root_view(model: RootViewModel) -> None:
             data_view(model.data_view_model)
             imgui.end_tab_item()
 
-        if model.time_range_view_model.run_feature_detection:
-            if imgui.begin_tab_item("Feature Detection")[0]:
-                feature_detection_view(pipeline.feature_detection_view_model)
-                imgui.end_tab_item()
-
-        if model.time_range_view_model.run_stereo_matching:
-            if imgui.begin_tab_item("Stereo Matching")[0]:
-                stereo_matching_view(pipeline.stereo_matching_view_model)
-                imgui.end_tab_item()
-
-        if model.time_range_view_model.run_optical_flow:
-            if imgui.begin_tab_item("Optical Flow")[0]:
-                optical_flow_view(pipeline.optical_flow_view_model)
+        if model.time_range_view_model.run_frontend:
+            if imgui.begin_tab_item("Frontend")[0]:
+                frontend_view(pipeline.frontend_view_model)
                 imgui.end_tab_item()
 
         if model.time_range_view_model.run_coordinate_mapping_check:
