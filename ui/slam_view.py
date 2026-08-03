@@ -13,6 +13,13 @@ _BIAS_ROW_LABELS = ['accel bias', 'gyro bias']
 _BIAS_ROW_UNITS = ['m/s²', 'rad/s']
 _BIAS_COMPONENT_NAMES = ['x', 'y', 'z']
 
+# Target height per subplot *row*, in pixels -- total grid height passed to _plot_series_grid/
+# _plot_single_lines is nrows * this, so every individual y-axis gets the same generous vertical
+# room regardless of how many rows its grid has, instead of a fixed total height getting divided
+# thinner and thinner as row count grows (a 4-row grid at a shared 340px total, for example, was
+# only ~85px per row -- not enough to actually read the data).
+_ROW_HEIGHT_PX = 260
+
 
 def _plot_series_grid(
     title: str,
@@ -158,7 +165,7 @@ def _draw_positions(result: SlamResult) -> None:
         (result.gtsam.times, result.gtsam.positions, 'gtsam'),
     ]
     _plot_series_grid(
-        'Position in World Frame', 1, 3, 260, all_series,
+        'Position in World Frame', 1, 3, 1 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{_XYZ[col]} [m]', value_fn=lambda row, col, data: data[:, col])
 
 
@@ -169,7 +176,7 @@ def _draw_attitudes(result: SlamResult) -> None:
         (result.gtsam.times, result.gtsam.attitudes, 'gtsam'),
     ]
     _plot_series_grid(
-        'Attitude (Rotation Vector) in World Frame', 1, 3, 260, all_series,
+        'Attitude (Rotation Vector) in World Frame', 1, 3, 1 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{_XYZ[col]} [rad]', value_fn=lambda row, col, data: data[:, col])
 
 
@@ -180,7 +187,7 @@ def _draw_rotation_matrices(result: SlamResult) -> None:
         (result.gtsam.times, result.gtsam.rotation_matrices, 'gtsam'),
     ]
     _plot_series_grid(
-        'Rotation Axes in World Frame', 3, 3, 640, all_series,
+        'Rotation Axes in World Frame', 3, 3, 3 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{_AXIS_NAMES[row]} {_XYZ[col]}',
         value_fn=lambda row, col, data: data[:, col, row])
 
@@ -188,7 +195,7 @@ def _draw_rotation_matrices(result: SlamResult) -> None:
 def _draw_velocities(result: SlamResult) -> None:
     all_series = [(result.gtsam.times, result.gtsam.velocities, 'gtsam')]
     _plot_series_grid(
-        'Velocity in World Frame', 3, 1, 340, all_series,
+        'Velocity in World Frame', 3, 1, 3 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{["vx", "vy", "vz"][row]} [m/s]',
         value_fn=lambda row, col, data: data[:, row])
 
@@ -196,7 +203,7 @@ def _draw_velocities(result: SlamResult) -> None:
 def _draw_biases(result: SlamResult) -> None:
     all_series = [(result.gtsam.times, result.gtsam.biases, 'gtsam')]
     _plot_series_grid(
-        'IMU Bias (Body Frame)', 2, 3, 240, all_series,
+        'IMU Bias (Body Frame)', 2, 3, 2 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{_BIAS_ROW_LABELS[row]} {_BIAS_COMPONENT_NAMES[col]} [{_BIAS_ROW_UNITS[row]}]',
         value_fn=lambda row, col, data: data[:, row * 3 + col])
 
@@ -206,7 +213,7 @@ def _draw_gtsam_diagnostics(result: SlamResult) -> None:
     rmse = float(np.sqrt(np.mean(g.position_errors ** 2))) if len(g.position_errors) else float('nan')
     valid = ~np.isnan(g.reprojection_rmse)
     mean_reproj = float(np.mean(g.reprojection_rmse[valid])) if np.any(valid) else float('nan')
-    _plot_single_lines('GTSAM Diagnostics', 340, [
+    _plot_single_lines('GTSAM Diagnostics', 3 * _ROW_HEIGHT_PX, [
         (g.times, g.position_errors, 'pos error vs GT [m]', (rmse, f'RMSE = {rmse:.3f} m')),
         (g.times, g.reprojection_rmse, 'reprojection RMSE [px]', (mean_reproj, f'mean = {mean_reproj:.2f} px')),
         (g.times, g.landmark_counts, '# landmarks', None),
@@ -220,7 +227,7 @@ def _draw_ate_rpe(result: SlamResult) -> None:
     valid = ~np.isnan(g.rpe_translation_errors)
     rpe_trans_rmse = float(np.sqrt(np.mean(g.rpe_translation_errors[valid] ** 2))) if np.any(valid) else float('nan')
     rpe_rot_rmse = float(np.sqrt(np.mean(g.rpe_rotation_errors[valid] ** 2))) if np.any(valid) else float('nan')
-    _plot_single_lines('ATE / RPE (batch-aligned, yaw + translation)', 440, [
+    _plot_single_lines('ATE / RPE (batch-aligned, yaw + translation)', 4 * _ROW_HEIGHT_PX, [
         (g.times, g.ate_position_errors, 'ATE pos [m]', (ate_rmse, f'RMSE = {ate_rmse:.3f} m')),
         (g.times, g.ate_rotation_errors, 'ATE rot [deg]', (ate_rot_rmse, f'RMSE = {ate_rot_rmse:.3f} deg')),
         (g.times, g.rpe_translation_errors, f'RPE trans [m] ({RPE_DELTA_S:g}s window)',
@@ -237,7 +244,7 @@ def _draw_angular_velocities(result: SlamResult) -> None:
         (result.gtsam.angular_velocity_times, result.gtsam.angular_velocities, 'gtsam'),
     ]
     _plot_series_grid(
-        'Angular Velocity in World Frame', 3, 1, 340, all_series,
+        'Angular Velocity in World Frame', 3, 1, 3 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{["wx", "wy", "wz"][row]} [rad/s]',
         value_fn=lambda row, col, data: data[:, row])
 
@@ -249,7 +256,7 @@ def _draw_linear_accelerations(result: SlamResult) -> None:
     ]
     gravity = result.extra.gravity
     _plot_series_grid(
-        'Linear Acceleration in World Frame', 3, 1, 340, all_series,
+        'Linear Acceleration in World Frame', 3, 1, 3 * _ROW_HEIGHT_PX, all_series,
         ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
         value_fn=lambda row, col, data: data[:, row],
         axhline_fn=lambda row, col: (-gravity[row], '-gravity'))
