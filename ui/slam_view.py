@@ -111,11 +111,23 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
     model.trajectory_scrub_t = min(model.trajectory_scrub_t, max_t)
 
     # Flags_.equal: keeps X/Y/Z at the same scale so the path's shape is geometrically correct
-    # (an auto-fit-per-axis plot would otherwise stretch/squash it to fill the frame).
+    # (a per-axis-independent range would otherwise stretch/squash it to fill the frame).
     if implot3d.begin_plot("##3d_trajectory", size=(-1, 500), flags=implot3d.Flags_.equal):
-        implot3d.setup_axes(
-            'X [m]', 'Y [m]', 'Z [m]',
-            implot3d.AxisFlags_.auto_fit, implot3d.AxisFlags_.auto_fit, implot3d.AxisFlags_.auto_fit)
+        implot3d.setup_axes('X [m]', 'Y [m]', 'Z [m]')
+        # Explicit per-axis limits, recomputed from the actual data every frame, instead of
+        # AxisFlags_.auto_fit: verified (via a synthetic growing-trajectory repro) that ImPlot3D's
+        # auto_fit does not reliably track a *growing* dataset's full extent -- it can lock onto
+        # an early, smaller range and clip later data that falls outside it, instead of expanding.
+        # Cond_.always forces this exact range every frame, so it can't go stale like that.
+        all_positions = [positions for _, positions, _ in all_series if len(positions) > 0]
+        if all_positions:
+            combined = np.concatenate(all_positions, axis=0)
+            for axis, col in (
+                (implot3d.ImAxis3D_.x, 0), (implot3d.ImAxis3D_.y, 1), (implot3d.ImAxis3D_.z, 2),
+            ):
+                lo, hi = float(combined[:, col].min()), float(combined[:, col].max())
+                margin = max((hi - lo) * 0.05, 1e-3)
+                implot3d.setup_axis_limits(axis, lo - margin, hi + margin, implot3d.Cond_.always)
         for times, positions, name in all_series:
             if len(positions) == 0:
                 continue
