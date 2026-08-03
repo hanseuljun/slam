@@ -3,15 +3,11 @@ import threading
 from typing import Optional
 
 import cv2
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.figure import Figure
 # hello_imgui is registered into sys.modules dynamically at runtime (imgui_bundle/__init__.py's
 # _publish()), not via a normal static submodule -- Pylance can't verify that against source,
 # even though its real .pyi stub (imgui_bundle/hello_imgui.pyi) is still used for type info.
-from imgui_bundle import imgui, hello_imgui  # pyright: ignore[reportMissingModuleSource]
+from imgui_bundle import imgui, hello_imgui, implot  # pyright: ignore[reportMissingModuleSource]
 
 from slam.coordinate_mapping_check import (
     CoordinateMappingCheckResult,
@@ -20,7 +16,7 @@ from slam.coordinate_mapping_check import (
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
 from slam.stereo_matching import StereoMatchingResult
-from ui.utils import figure_to_image, image_to_texture
+from ui.utils import image_to_texture
 
 
 def _match_color(i: int, total: int) -> tuple[int, int, int]:
@@ -30,49 +26,36 @@ def _match_color(i: int, total: int) -> tuple[int, int, int]:
     return (int(color_bgr[0]), int(color_bgr[1]), int(color_bgr[2]))
 
 
-def _plot_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool]) -> Figure:
-    times = result.times
+def _draw_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool]) -> None:
+    times = np.ascontiguousarray(result.times, dtype=np.float64)
     mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
     mean_icp_errors = np.array([np.mean(f.icp_projection_errors) if f.icp_projection_errors else float('nan') for f in result.frames])
-    num_matches = np.array([len(f.matches) for f in result.frames])
+    num_matches = np.array([len(f.matches) for f in result.frames], dtype=np.float64)
 
-    show_error = enabled.get('gt') or enabled.get('icp')
-    show_matches = enabled.get('matches', False)
-    active = [s for s in ['errors', 'matches']
-              if (s == 'errors' and show_error) or (s == 'matches' and show_matches)]
+    show_error = bool(enabled.get('gt') or enabled.get('icp'))
+    show_matches = bool(enabled.get('matches', False))
+    n_active = int(show_error) + int(show_matches)
+    if n_active == 0:
+        imgui.text("(enable gt / icp / matches above to show a plot)")
+        return
 
-    if not active:
-        fig, ax = plt.subplots(1, 1, figsize=(12, 2))
-        ax.axis('off')
-        plt.tight_layout()
-        return fig
-
-    fig, axes = plt.subplots(len(active), 1, figsize=(12, 4 * len(active)))
-    if len(active) == 1:
-        axes = [axes]
-    fig.suptitle('Coordinate Mapping Check (Ground Truth Poses)')
-    ax_iter = iter(axes)
-
-    if show_error:
-        ax = next(ax_iter)
-        if enabled.get('gt'):
-            ax.plot(times, mean_errors, label='GT')
-        if enabled.get('icp'):
-            ax.plot(times, mean_icp_errors, label='ICP', color='green')
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel('Projection Error [px]')
-        ax.set_title('Mean Projection Error per Adjacent Frame Pair')
-        ax.legend()
-
-    if show_matches:
-        ax = next(ax_iter)
-        ax.plot(times, num_matches, color='orange')
-        ax.set_xlabel('Time [s]')
-        ax.set_ylabel('Count')
-        ax.set_title('Number of Matched Features per Adjacent Frame Pair')
-
-    plt.tight_layout()
-    return fig
+    imgui.text('Coordinate Mapping Check (Ground Truth Poses)')
+    flags = implot.SubplotFlags_.link_all_x if n_active > 1 else 0
+    if implot.begin_subplots("##cm_plot", n_active, 1, size=(-1, 260 * n_active), flags=flags):
+        if show_error:
+            if implot.begin_plot("Mean Projection Error per Adjacent Frame Pair"):
+                implot.setup_axes('Time [s]', 'Projection Error [px]')
+                if enabled.get('gt'):
+                    implot.plot_line('GT', times, np.ascontiguousarray(mean_errors, dtype=np.float64))
+                if enabled.get('icp'):
+                    implot.plot_line('ICP', times, np.ascontiguousarray(mean_icp_errors, dtype=np.float64))
+                implot.end_plot()
+        if show_matches:
+            if implot.begin_plot("Number of Matched Features per Adjacent Frame Pair"):
+                implot.setup_axes('Time [s]', 'Count')
+                implot.plot_line('matches', times, num_matches)
+                implot.end_plot()
+        implot.end_subplots()
 
 
 def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> bool:
@@ -96,7 +79,6 @@ class CoordinateMappingViewModel:
         self._result: Optional[CoordinateMappingCheckResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None
-        self._plot_texture: Optional[hello_imgui.TextureGpu] = None
         self.frame_index: int = 0
         self.match_index_min: int = 0
         self.match_index_max: int = 0
@@ -119,7 +101,6 @@ class CoordinateMappingViewModel:
         self._result = None
         self._loading = True
         self._error = None
-        self._plot_texture = None
         self.frame_index = 0
         self.match_index_min = 0
         self.match_index_max = 0
@@ -292,10 +273,5 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
 
     imgui.separator()
 
-    if _checkboxes(model.plot_enabled, "cm_plot"):
-        model._plot_texture = None
-    if model._plot_texture is None:
-        model._plot_texture = image_to_texture(figure_to_image(_plot_result(model._result, model.plot_enabled)))
-
-    plot_tex = model._plot_texture
-    imgui.image(imgui.ImTextureRef(plot_tex.texture_id()), (plot_tex.width, plot_tex.height))
+    _checkboxes(model.plot_enabled, "cm_plot")
+    _draw_result(model._result, model.plot_enabled)

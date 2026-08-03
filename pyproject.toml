@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "simultaneous localization and mapping"
 requires-python = ">=3.14"
 dependencies = [
-    "matplotlib",
     "imgui-bundle",
     "opencv-python",
     "pyyaml",
