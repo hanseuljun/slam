@@ -90,26 +90,33 @@ def _plot_single_lines(
         implot.end_subplots()
 
 
-def _draw_3d_trajectory(result: SlamResult) -> None:
+def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
     """The same gt/gtsam positions _draw_positions breaks into 3 separate X/Y/Z-vs-time charts,
     drawn instead as one actual 3D path -- ImPlot3D is bundled with imgui_bundle (the same
     package already providing ImPlot), so this needs no new dependency and renders in-process, the
     same as every other panel here (see tmp/3d_viz_library_recommendations.html). pnp deliberately
     left out here (unlike the 2D panels) -- its raw dead-reckoning drift makes the path hard to
     read at 3D-path scale, and gt/gtsam already show what actually matters.
+
+    A slider below the plot (model.trajectory_scrub_t, persisted across frames so it survives a
+    scroll/redraw) picks a point in time; a bigger marker on each line shows exactly where that
+    trajectory was at that moment, the 3D-path equivalent of scrubbing a video.
     """
     imgui.text('3D Trajectory')
     all_series = [
-        (result.gt.positions, 'gt'),
-        (result.gtsam.positions, 'gtsam'),
+        (result.gt.times, result.gt.positions, 'gt'),
+        (result.gtsam.times, result.gtsam.positions, 'gtsam'),
     ]
+    max_t = max((times[-1] for times, positions, _ in all_series if len(times) > 0), default=0.0)
+    model.trajectory_scrub_t = min(model.trajectory_scrub_t, max_t)
+
     # Flags_.equal: keeps X/Y/Z at the same scale so the path's shape is geometrically correct
     # (an auto-fit-per-axis plot would otherwise stretch/squash it to fill the frame).
     if implot3d.begin_plot("##3d_trajectory", size=(-1, 500), flags=implot3d.Flags_.equal):
         implot3d.setup_axes(
             'X [m]', 'Y [m]', 'Z [m]',
             implot3d.AxisFlags_.auto_fit, implot3d.AxisFlags_.auto_fit, implot3d.AxisFlags_.auto_fit)
-        for positions, name in all_series:
+        for times, positions, name in all_series:
             if len(positions) == 0:
                 continue
             implot3d.plot_line(
@@ -117,7 +124,19 @@ def _draw_3d_trajectory(result: SlamResult) -> None:
                 np.ascontiguousarray(positions[:, 0], dtype=np.float64),
                 np.ascontiguousarray(positions[:, 1], dtype=np.float64),
                 np.ascontiguousarray(positions[:, 2], dtype=np.float64))
+        for times, positions, name in all_series:
+            if len(times) == 0:
+                continue
+            idx = min(int(np.searchsorted(times, model.trajectory_scrub_t)), len(times) - 1)
+            p = positions[idx]
+            implot3d.plot_scatter(
+                f"{name} (at t)", np.array([p[0]]), np.array([p[1]]), np.array([p[2]]),
+                spec=implot3d.Spec(marker=implot3d.Marker_.circle, marker_size=8))
         implot3d.end_plot()
+
+    imgui.set_next_item_width(-1)
+    _, model.trajectory_scrub_t = imgui.slider_float(
+        "##trajectory_scrub", model.trajectory_scrub_t, 0.0, max(max_t, 1e-3), "t = %.2f s")
 
 
 def _draw_positions(result: SlamResult) -> None:
@@ -233,6 +252,8 @@ class SlamViewModel:
         self._duration_s = duration_s
         self._run_loop_closure = run_loop_closure
         self._solver: Optional[SlamSolver] = None
+        # Current position of the 3D trajectory's timeline scrubber -- see _draw_3d_trajectory.
+        self.trajectory_scrub_t: float = 0.0
 
     def start(self) -> None:
         self._solver = SlamSolver(
@@ -271,7 +292,7 @@ def slam_view(model: SlamViewModel) -> None:
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
-    _draw_3d_trajectory(result)
+    _draw_3d_trajectory(model, result)
     _draw_positions(result)
     _draw_attitudes(result)
     _draw_rotation_matrices(result)
