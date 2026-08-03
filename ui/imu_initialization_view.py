@@ -17,7 +17,8 @@ def _draw_norms(result: ImuInitializationResult) -> None:
             (result.ang_vel_norms, '||gyro|| [rad/s]'),
         ]:
             if implot.begin_plot(f"##imu_norms_{ylabel}"):
-                implot.setup_axes('Time [s]', ylabel)
+                implot.setup_axes(
+                    'Time [s]', ylabel, implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
                 implot.plot_line(
                     ylabel, np.ascontiguousarray(result.times, dtype=np.float64),
                     np.ascontiguousarray(values, dtype=np.float64))

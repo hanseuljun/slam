@@ -44,7 +44,9 @@ def _draw_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool])
     if implot.begin_subplots("##cm_plot", n_active, 1, size=(-1, 260 * n_active), flags=flags):
         if show_error:
             if implot.begin_plot("Mean Projection Error per Adjacent Frame Pair"):
-                implot.setup_axes('Time [s]', 'Projection Error [px]')
+                implot.setup_axes(
+                    'Time [s]', 'Projection Error [px]',
+                    implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
                 if enabled.get('gt'):
                     implot.plot_line('GT', times, np.ascontiguousarray(mean_errors, dtype=np.float64))
                 if enabled.get('icp'):
@@ -52,7 +54,8 @@ def _draw_result(result: CoordinateMappingCheckResult, enabled: dict[str, bool])
                 implot.end_plot()
         if show_matches:
             if implot.begin_plot("Number of Matched Features per Adjacent Frame Pair"):
-                implot.setup_axes('Time [s]', 'Count')
+                implot.setup_axes(
+                    'Time [s]', 'Count', implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
                 implot.plot_line('matches', times, num_matches)
                 implot.end_plot()
         implot.end_subplots()

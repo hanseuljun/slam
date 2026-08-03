@@ -40,7 +40,9 @@ def _plot_series_grid(
         for row in range(nrows):
             for col in range(ncols):
                 if implot.begin_plot(f"##{title}_{row}_{col}"):
-                    implot.setup_axes(xlabel, ylabel_fn(row, col))
+                    implot.setup_axes(
+                        xlabel, ylabel_fn(row, col),
+                        implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
                     for times, data, name in series:
                         if len(times) == 0:
                             continue
@@ -73,7 +75,8 @@ def _plot_single_lines(
     if implot.begin_subplots(f"##{title}", len(rows), 1, size=(-1, height), flags=implot.SubplotFlags_.link_all_x):
         for times, values, ylabel, axhline_spec in rows:
             if implot.begin_plot(f"##{title}_{ylabel}"):
-                implot.setup_axes(xlabel, ylabel)
+                implot.setup_axes(
+                    xlabel, ylabel, implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
                 if len(times) > 0:
                     implot.plot_line(
                         ylabel, np.ascontiguousarray(times, dtype=np.float64),
