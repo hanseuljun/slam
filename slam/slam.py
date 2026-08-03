@@ -1613,12 +1613,6 @@ def _run_gtsam(
     return poses, velocities, biases, reprojection_rmse, n_lm, keyframe_indices
 
 
-# How many trailing nodes _GtsamBuilder.current_estimate(recompute_window=...) refreshes on each
-# live-preview call (see that method's docstring). ~2x the ~15-20 keyframes empirically observed
-# for a settled node's ISAM2-revised pose/reprojection error to converge, as safety margin.
-_LIVE_PREVIEW_REPROJECTION_WINDOW = 40
-
-
 class _GtsamBuilder:
     """Incremental version of the ISAM2 graph construction in _run_gtsam above: the exact same
     per-keyframe update (IMU factor, chained-PnP fallback, landmark reprojection factors,
@@ -1930,10 +1924,13 @@ class _GtsamBuilder:
         keyframes arrive, not just the newest ones -- measured drift of several centimeters on a
         settled node, converging within roughly 15-20 keyframes -- so a window trades a bounded
         amount of staleness in *old* keyframes' displayed reprojection RMSE during a live-updating
-        run for turning this call from O(K) into O(recompute_window) (O(K) total across a run
-        instead of O(K^2) -- this loop was 13.5% of one profiled run's total time, all of it spent
-        re-deriving reprojection error for landmarks whose contribution had already converged; see
-        tmp/slam_run_profile.html). None (the default) recomputes every node exactly, matching the
+        run for turning this call from O(K) into O(recompute_window). 0 skips the loop entirely --
+        every node's reprojection_rmse/n_lm just reads back whatever's cached (NaN/0 for a node
+        never computed), which is what _build_partial_result now uses: this loop is purely a live
+        diagnostic (reprojection_rmse/landmark_counts feed one UI plot each -- see
+        _draw_gtsam_diagnostics -- and nothing in the graph itself), so the live preview skips it
+        completely rather than paying even a bounded per-keyframe cost for it; see
+        tmp/slam_profile_200s.html. None (the default) recomputes every node exactly, matching the
         original behavior bit-for-bit -- finalize() always uses this, so the *final* result is
         never affected, only intermediate live-preview snapshots (see _build_partial_result).
         """
@@ -2213,8 +2210,11 @@ def _compute(
         partial_pnp_poses = scanner.current_poses(up_to_frame)
         partial_pnp_result = _get_pnp_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, partial_pnp_poses)
-        p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(
-            recompute_window=_LIVE_PREVIEW_REPROJECTION_WINDOW)
+        # recompute_window=0: reprojection_rmse/landmark_counts are pure live diagnostics (see
+        # current_estimate's docstring) -- skip deriving them every keyframe entirely and let them
+        # read back as NaN/0 until finalize() computes them for real, instead of paying even a
+        # bounded per-keyframe cost for a number nothing but one UI plot reads.
+        p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(recompute_window=0)
         partial_gtsam_result = _get_gtsam_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
             gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
