@@ -20,7 +20,10 @@ class ConfigViewModel:
     run_optical_flow: bool = False
     run_coordinate_mapping_check: bool = False
     run_imu_initialization: bool = False
-    run_loop_closure: bool = False
+    # Unlike the diagnostics above, this drives SLAM's own solve (SlamSolver's enable_loop_closure)
+    # rather than a redundant side computation -- on by default now that it's been validated as a
+    # net win; see SlamSolver.__init__'s enable_loop_closure for the remaining known tradeoff.
+    run_loop_closure: bool = True
 
     @property
     def data_path_str(self) -> str:

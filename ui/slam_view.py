@@ -264,7 +264,7 @@ def _draw_linear_accelerations(result: SlamResult) -> None:
 
 class SlamViewModel:
     def __init__(
-        self, data: EuRoCMAVData, start_s: float, duration_s: float, run_loop_closure: bool = False,
+        self, data: EuRoCMAVData, start_s: float, duration_s: float, run_loop_closure: bool = True,
     ) -> None:
         self._data = data
         self._start_s = start_s

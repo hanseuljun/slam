@@ -2283,12 +2283,11 @@ class SlamSolver:
     def __init__(
         self, data: EuRoCMAVData, start_s: float, duration_s: float,
         cancel_event: Optional[threading.Event] = None,
-        # Off by default: _LoopClosureDetector is O(K^2) brute-force descriptor matching (fine for
-        # an offline research run, not yet acceptable as an always-on interactive-tool cost), and
-        # its candidate-consolidation step is validated-but-not-tuned (see
-        # _LoopClosureDetector's docstring) -- clear win on one regression-check sequence, real if
-        # smaller localized regression on another. Opt in explicitly.
-        enable_loop_closure: bool = False,
+        # On by default: a clear win on one regression-check sequence, real if smaller localized
+        # regression on another (see _LoopClosureDetector's docstring). _LoopClosureDetector is
+        # O(K^2) brute-force descriptor matching -- fine for an offline research run, but a caller
+        # doing frequent interactive re-runs on long sequences may want to opt back out.
+        enable_loop_closure: bool = True,
     ) -> None:
         self._data = data
         self._start_s = start_s
