@@ -90,52 +90,52 @@ def _plot_single_lines(
         implot.end_subplots()
 
 
-def _draw_positions(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_positions(result: SlamResult) -> None:
     all_series = [
         (result.gt.times, result.gt.positions, 'gt'),
         (result.pnp.times, result.pnp.positions, 'pnp'),
         (result.gtsam.times, result.gtsam.positions, 'gtsam'),
     ]
     _plot_series_grid(
-        'Position in World Frame', 1, 3, 260, [s for s in all_series if enabled[s[2]]],
+        'Position in World Frame', 1, 3, 260, all_series,
         ylabel_fn=lambda row, col: f'{_XYZ[col]} [m]', value_fn=lambda row, col, data: data[:, col])
 
 
-def _draw_attitudes(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_attitudes(result: SlamResult) -> None:
     all_series = [
         (result.gt.times, result.gt.attitudes, 'gt'),
         (result.pnp.times, result.pnp.attitudes, 'pnp'),
         (result.gtsam.times, result.gtsam.attitudes, 'gtsam'),
     ]
     _plot_series_grid(
-        'Attitude (Rotation Vector) in World Frame', 1, 3, 260, [s for s in all_series if enabled[s[2]]],
+        'Attitude (Rotation Vector) in World Frame', 1, 3, 260, all_series,
         ylabel_fn=lambda row, col: f'{_XYZ[col]} [rad]', value_fn=lambda row, col, data: data[:, col])
 
 
-def _draw_rotation_matrices(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_rotation_matrices(result: SlamResult) -> None:
     all_series = [
         (result.gt.times, result.gt.rotation_matrices, 'gt'),
         (result.pnp.times, result.pnp.rotation_matrices, 'pnp'),
         (result.gtsam.times, result.gtsam.rotation_matrices, 'gtsam'),
     ]
     _plot_series_grid(
-        'Rotation Axes in World Frame', 3, 3, 640, [s for s in all_series if enabled[s[2]]],
+        'Rotation Axes in World Frame', 3, 3, 640, all_series,
         ylabel_fn=lambda row, col: f'{_AXIS_NAMES[row]} {_XYZ[col]}',
         value_fn=lambda row, col, data: data[:, col, row])
 
 
-def _draw_velocities(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_velocities(result: SlamResult) -> None:
     all_series = [(result.gtsam.times, result.gtsam.velocities, 'gtsam')]
     _plot_series_grid(
-        'Velocity in World Frame', 3, 1, 340, [s for s in all_series if enabled[s[2]]],
+        'Velocity in World Frame', 3, 1, 340, all_series,
         ylabel_fn=lambda row, col: f'{["vx", "vy", "vz"][row]} [m/s]',
         value_fn=lambda row, col, data: data[:, row])
 
 
-def _draw_biases(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_biases(result: SlamResult) -> None:
     all_series = [(result.gtsam.times, result.gtsam.biases, 'gtsam')]
     _plot_series_grid(
-        'IMU Bias (Body Frame)', 2, 3, 240, [s for s in all_series if enabled[s[2]]],
+        'IMU Bias (Body Frame)', 2, 3, 240, all_series,
         ylabel_fn=lambda row, col: f'{_BIAS_ROW_LABELS[row]} {_BIAS_COMPONENT_NAMES[col]} [{_BIAS_ROW_UNITS[row]}]',
         value_fn=lambda row, col, data: data[:, row * 3 + col])
 
@@ -169,26 +169,26 @@ def _draw_ate_rpe(result: SlamResult) -> None:
     ])
 
 
-def _draw_angular_velocities(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_angular_velocities(result: SlamResult) -> None:
     all_series = [
         (result.gt.angular_velocity_times, result.gt.angular_velocities, 'gt'),
         (result.pnp.angular_velocity_times, result.pnp.angular_velocities, 'pnp'),
         (result.gtsam.angular_velocity_times, result.gtsam.angular_velocities, 'gtsam'),
     ]
     _plot_series_grid(
-        'Angular Velocity in World Frame', 3, 1, 340, [s for s in all_series if enabled[s[2]]],
+        'Angular Velocity in World Frame', 3, 1, 340, all_series,
         ylabel_fn=lambda row, col: f'{["wx", "wy", "wz"][row]} [rad/s]',
         value_fn=lambda row, col, data: data[:, row])
 
 
-def _draw_linear_accelerations(result: SlamResult, enabled: dict[str, bool]) -> None:
+def _draw_linear_accelerations(result: SlamResult) -> None:
     all_series = [
         (result.imu.times, result.extra.linear_accelerations_in_world, 'imu'),
         (result.gtsam.angular_velocity_times, result.gtsam.linear_accelerations, 'gtsam'),
     ]
     gravity = result.extra.gravity
     _plot_series_grid(
-        'Linear Acceleration in World Frame', 3, 1, 340, [s for s in all_series if enabled[s[2]]],
+        'Linear Acceleration in World Frame', 3, 1, 340, all_series,
         ylabel_fn=lambda row, col: f'{["ax", "ay", "az"][row]} [m/s²]',
         value_fn=lambda row, col, data: data[:, row],
         axhline_fn=lambda row, col: (-gravity[row], '-gravity'))
@@ -203,12 +203,6 @@ class SlamViewModel:
         self._duration_s = duration_s
         self._run_loop_closure = run_loop_closure
         self._solver: Optional[SlamSolver] = None
-        self.pos_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
-        self.att_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
-        self.vel_enabled: dict[str, bool] = {'gtsam': True}
-        self.bias_enabled: dict[str, bool] = {'gtsam': True}
-        self.lin_acc_enabled: dict[str, bool] = {'imu': True, 'gtsam': True}
-        self.omega_enabled: dict[str, bool] = {'gt': True, 'pnp': True, 'gtsam': True}
 
     def start(self) -> None:
         self._solver = SlamSolver(
@@ -219,14 +213,6 @@ class SlamViewModel:
         if self._solver is not None:
             self._solver.cancel()
         self._solver = None
-
-
-def _checkboxes(enabled: dict[str, bool], id_suffix: str) -> None:
-    labels = list(enabled)
-    for i, label in enumerate(labels):
-        _, enabled[label] = imgui.checkbox(f"{label}##{id_suffix}", enabled[label])
-        if i < len(labels) - 1:
-            imgui.same_line()
 
 
 def slam_view(model: SlamViewModel) -> None:
@@ -255,27 +241,15 @@ def slam_view(model: SlamViewModel) -> None:
 
     imgui.begin_child("##slam_scroll", (0, 0), False)
 
-    _checkboxes(model.pos_enabled, "pos")
-    _draw_positions(result, model.pos_enabled)
-
-    _checkboxes(model.att_enabled, "att")
-    _draw_attitudes(result, model.att_enabled)
-    _draw_rotation_matrices(result, model.att_enabled)
-
-    _checkboxes(model.vel_enabled, "vel")
-    _draw_velocities(result, model.vel_enabled)
-
-    _checkboxes(model.bias_enabled, "bias")
-    _draw_biases(result, model.bias_enabled)
-
+    _draw_positions(result)
+    _draw_attitudes(result)
+    _draw_rotation_matrices(result)
+    _draw_velocities(result)
+    _draw_biases(result)
     _draw_gtsam_diagnostics(result)
     _draw_ate_rpe(result)
-
-    _checkboxes(model.omega_enabled, "omega")
-    _draw_angular_velocities(result, model.omega_enabled)
-
-    _checkboxes(model.lin_acc_enabled, "lin_acc")
-    _draw_linear_accelerations(result, model.lin_acc_enabled)
+    _draw_angular_velocities(result)
+    _draw_linear_accelerations(result)
     g = result.extra.gravity
     imgui.text(f"Gravity: [{g[0]:.4f}, {g[1]:.4f}, {g[2]:.4f}]")
 
