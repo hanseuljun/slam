@@ -91,15 +91,16 @@ def _plot_single_lines(
 
 
 def _draw_3d_trajectory(result: SlamResult) -> None:
-    """The same gt/pnp/gtsam positions _draw_positions breaks into 3 separate X/Y/Z-vs-time
-    charts, drawn instead as one actual 3D path -- ImPlot3D is bundled with imgui_bundle (the same
+    """The same gt/gtsam positions _draw_positions breaks into 3 separate X/Y/Z-vs-time charts,
+    drawn instead as one actual 3D path -- ImPlot3D is bundled with imgui_bundle (the same
     package already providing ImPlot), so this needs no new dependency and renders in-process, the
-    same as every other panel here (see tmp/3d_viz_library_recommendations.html).
+    same as every other panel here (see tmp/3d_viz_library_recommendations.html). pnp deliberately
+    left out here (unlike the 2D panels) -- its raw dead-reckoning drift makes the path hard to
+    read at 3D-path scale, and gt/gtsam already show what actually matters.
     """
     imgui.text('3D Trajectory')
     all_series = [
         (result.gt.positions, 'gt'),
-        (result.pnp.positions, 'pnp'),
         (result.gtsam.positions, 'gtsam'),
     ]
     # Flags_.equal: keeps X/Y/Z at the same scale so the path's shape is geometrically correct
