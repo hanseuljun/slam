@@ -36,7 +36,10 @@ def detect_features_for_frame(
     per-frame loop (which loads cam0 once and passes it in here, since it also needs the same
     image for optical flow -- passing cam0_img/cam1_img in avoids loading either a second time).
     """
-    orb = cv2.ORB.create(nfeatures=2000)
+    # FAST_SCORE (reuses the FAST corner strength) instead of the default HARRIS_SCORE (a separate
+    # Harris-corner response pass per keypoint) -- the same tradeoff real-time VO/VIO pipelines like
+    # ORB-SLAM make; see tmp/orb_speedup_options.html.
+    orb = cv2.ORB.create(nfeatures=2000, scoreType=cv2.ORB_FAST_SCORE)
     if cam0_img is None:
         cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
     if cam1_img is None:
