@@ -89,8 +89,7 @@ def _plot_single_lines(
 
 
 def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
-    """The gt/gtsam positions as one 3D path, via ImPlot3D (bundled with imgui_bundle). pnp is left
-    out: its dead-reckoning drift makes the path hard to read at this scale.
+    """The gt/gtsam positions as one 3D path, via ImPlot3D (bundled with imgui_bundle).
 
     A slider below the plot (model.trajectory_scrub_t) picks a point in time, and a bigger marker on
     each line shows where that trajectory was then.
@@ -170,7 +169,6 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
 def _draw_positions(result: SlamResult) -> None:
     all_series = [
         (result.gt.times, result.gt.positions, 'gt'),
-        (result.pnp.times, result.pnp.positions, 'pnp'),
         (result.gtsam.times, result.gtsam.positions, 'gtsam'),
     ]
     _plot_series_grid(
@@ -181,7 +179,6 @@ def _draw_positions(result: SlamResult) -> None:
 def _draw_attitudes(result: SlamResult) -> None:
     all_series = [
         (result.gt.times, result.gt.attitudes, 'gt'),
-        (result.pnp.times, result.pnp.attitudes, 'pnp'),
         (result.gtsam.times, result.gtsam.attitudes, 'gtsam'),
     ]
     _plot_series_grid(
@@ -192,7 +189,6 @@ def _draw_attitudes(result: SlamResult) -> None:
 def _draw_rotation_matrices(result: SlamResult) -> None:
     all_series = [
         (result.gt.times, result.gt.rotation_matrices, 'gt'),
-        (result.pnp.times, result.pnp.rotation_matrices, 'pnp'),
         (result.gtsam.times, result.gtsam.rotation_matrices, 'gtsam'),
     ]
     _plot_series_grid(
@@ -249,7 +245,6 @@ def _draw_ate_rpe(result: SlamResult) -> None:
 def _draw_angular_velocities(result: SlamResult) -> None:
     all_series = [
         (result.gt.angular_velocity_times, result.gt.angular_velocities, 'gt'),
-        (result.pnp.angular_velocity_times, result.pnp.angular_velocities, 'pnp'),
         (result.gtsam.angular_velocity_times, result.gtsam.angular_velocities, 'gtsam'),
     ]
     _plot_series_grid(

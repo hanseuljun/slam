@@ -40,17 +40,6 @@ class SlamImuResult:
 
 
 @dataclass
-class SlamPnpResult:
-    times: np.ndarray
-    positions: np.ndarray
-    attitudes: np.ndarray
-    rotation_matrices: np.ndarray
-    angular_velocity_times: np.ndarray
-    angular_velocities: np.ndarray
-    elapsed_time: float = 0.0
-
-
-@dataclass
 class SlamGtsamResult:
     times: np.ndarray
     positions: np.ndarray
@@ -89,10 +78,8 @@ class SlamExtraResult:
 class SlamResult:
     gt: SlamGroundTruthResult
     imu: SlamImuResult
-    pnp: SlamPnpResult
     gtsam: SlamGtsamResult
     extra: SlamExtraResult
-
 
 
 def _mats_to_rvecs(rotation_matrices: np.ndarray) -> np.ndarray:
@@ -523,53 +510,6 @@ class _LoopClosureDetector:
             LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA)]
 
 
-def _get_pnp_result(
-    data: EuRoCMAVData,
-    stereo_matching_result: StereoMatchingResult,
-    first_timestamp_ns: int,
-    min_timestamp_ns: int,
-    pnp_poses: list[np.ndarray],
-) -> SlamPnpResult:
-    # pnp_poses is the per-frame cam0 dead-reckoning trajectory from _KeyframeScanner.
-    cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
-    # Anchor to GT at the first GT sample inside the window (after start_s), not the dataset's
-    # first, which precedes the window.
-    first_gt_sample = next(s for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns)
-    closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
-
-    body_T_cam0 = data.cam0_extrinsics
-    cam0_T_body = np.linalg.inv(body_T_cam0)
-
-    world_T_body_first = np.eye(4)
-    world_T_body_first[:3, :3] = quaternion_to_rotation_matrix(first_gt_sample.quaternion)
-    world_T_body_first[:3, 3] = first_gt_sample.position
-
-    pnp_body_poses = [body_T_cam0 @ T @ cam0_T_body for T in pnp_poses]
-    T_comp = world_T_body_first @ np.linalg.inv(pnp_body_poses[closest_cam_index])
-    pnp_world_T_body = np.array([T_comp @ T for T in pnp_body_poses])
-
-    pnp_times = np.array([
-        _elapsed_s(stereo_matching_result.frames[i].timestamp_ns, first_timestamp_ns)
-        for i in range(len(pnp_world_T_body))
-    ])
-
-    angular_velocities = []
-    for i in range(len(pnp_world_T_body) - 1):
-        rotation_matrix = pnp_world_T_body[i, :3, :3].T @ pnp_world_T_body[i + 1, :3, :3]
-        rotation_vector, _ = cv2.Rodrigues(rotation_matrix)
-        angular_velocities.append(rotation_vector.flatten() * data.cam0_rate_hz)
-
-    rotation_matrices = pnp_world_T_body[:, :3, :3]
-    return SlamPnpResult(
-        times=pnp_times,
-        positions=pnp_world_T_body[:, :3, 3],
-        attitudes=_mats_to_rvecs(rotation_matrices),
-        rotation_matrices=rotation_matrices,
-        angular_velocity_times=pnp_times[:-1],
-        angular_velocities=np.array(angular_velocities),
-    )
-
-
 @dataclass(frozen=True)
 class LandmarkObservation:
     """One sighting of a landmark at a keyframe. uv0/uv1 are undistorted pixels in cam0/cam1;
@@ -713,16 +653,11 @@ class _KeyframeScanner:
         self, data: EuRoCMAVData,
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
-        n: int,
     ) -> None:
         self._data = data
         self._fd_result = feature_detection_result
         self._sm_result = stereo_matching_result
         self.keyframes: list[int] = [0]
-        # Pre-sized: the exception-retry path can write poses[kf] for a kf that isn't the
-        # highest index reached so far.
-        self._poses: list[Optional[np.ndarray]] = [None] * n
-        self._poses[0] = np.eye(4)
         self._ref_idx = 0
         self._ref_covis: Optional[int] = None
 
@@ -757,17 +692,10 @@ class _KeyframeScanner:
                 got = self._accept_keyframe(kf)
                 if got is not None:
                     accepted.append(got)
-                if self._poses[kf] is None:  # never got its own PnP; carry the reference pose
-                    self._poses[kf] = self._poses[self._ref_idx]
                 self._ref_idx, self._ref_covis = kf, None
                 if kf >= i:
                     return accepted
                 continue
-
-            step = _rvec_tvec_to_transform(rvec, tvec)
-            # self._poses[self._ref_idx] is always populated by the time it's read here (index 0
-            # is seeded in __init__, and _ref_idx only ever points at an already-visited frame).
-            self._poses[i] = self._poses[self._ref_idx] @ step  # type: ignore[operator]
 
             if self._ref_covis is None:  # first frame after a keyframe sets the covisibility baseline
                 self._ref_covis = num_matches
@@ -789,25 +717,6 @@ class _KeyframeScanner:
                     accepted.append(got)
                 self._ref_idx, self._ref_covis = i, None
             return accepted
-
-    @staticmethod
-    def _forward_fill(poses: list[Optional[np.ndarray]]) -> list[np.ndarray]:
-        last = np.eye(4)
-        filled = []
-        for p in poses:
-            last = p if p is not None else last
-            filled.append(last)
-        return filled
-
-    def current_poses(self, up_to_frame: int) -> list[np.ndarray]:
-        """Forward-filled poses for frames [0, up_to_frame]; safe to call mid-scan."""
-        return self._forward_fill(self._poses[:up_to_frame + 1])
-
-    def finalize(self) -> list[np.ndarray]:
-        """Call once after every frame in the window has been fed via add_frame: forward-fills
-        any frame that never received its own pose (rare -- see add_frame's exception path)."""
-        return self._forward_fill(self._poses)
-
 
 class _GtsamBuilder:
     """The ISAM2 factor graph, fed one new keyframe at a time via add_keyframe(frame_idx).
@@ -1181,7 +1090,7 @@ def _get_gtsam_result(
     kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
     cam_timestamps_ns = np.array([f.timestamp_ns for f in kf_frames])
     # Anchor to GT at the first GT sample inside the window (after start_s), consistent with
-    # how the GT/PnP series are windowed.
+    # how the GT series is windowed.
     first_gt_sample = next(s for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns)
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
@@ -1345,14 +1254,11 @@ def _compute(
         stereo_matching_result.frames.append(sm_frame)
         optical_flow_result.frames.append(of_frame)
 
-    def _build_partial_result(up_to_frame: int) -> SlamResult:
-        """A full SlamResult reflecting only what's processed through `up_to_frame`: gt/imu/extra
-        are the final values (independent of the growing estimate); pnp and gtsam come from the
-        scanner/builder's live accessors.
+    def _build_partial_result() -> SlamResult:
+        """A full SlamResult reflecting only what's processed so far: gt/imu/extra
+        are the final values (independent of the growing estimate); gtsam comes from the
+        builder's live accessors.
         """
-        partial_pnp_poses = scanner.current_poses(up_to_frame)
-        partial_pnp_result = _get_pnp_result(
-            data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, partial_pnp_poses)
         # recompute_window=0: reprojection_rmse/landmark_counts are live diagnostics only;
         # they read back NaN/0 until finalize() computes them.
         p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(recompute_window=0)
@@ -1363,12 +1269,12 @@ def _compute(
             scanner.keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm, np.zeros((0, 3)),
         )
         return SlamResult(
-            gt=gt_result, imu=imu_result, pnp=partial_pnp_result, gtsam=partial_gtsam_result,
+            gt=gt_result, imu=imu_result, gtsam=partial_gtsam_result,
             extra=extra_result,
         )
 
     _process_frame(timestamps[0])
-    scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result, N)
+    scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result)
     builder = _GtsamBuilder(
         data, feature_detection_result, stereo_matching_result, optical_flow_result,
         imu_samples, gravity, first_keyframe_frame=0, enable_loop_closure=enable_loop_closure)
@@ -1378,9 +1284,8 @@ def _compute(
         for kf in scanner.add_frame(i):
             builder.add_keyframe(kf)
             if on_partial_result is not None:
-                on_partial_result(_build_partial_result(i))
+                on_partial_result(_build_partial_result())
     keyframe_indices = scanner.keyframes
-    pnp_poses = scanner.finalize()
     gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts = builder.finalize()
     landmark_positions = builder.landmark_positions()
     # Frontend computation, scanning, and graph-building are now the same combined pass, so they
@@ -1388,10 +1293,6 @@ def _compute(
     compute_elapsed = time.monotonic() - compute_t0
     for r in (feature_detection_result, stereo_matching_result, optical_flow_result, frontend_result):
         r.elapsed_s = compute_elapsed
-
-    pnp_result = _get_pnp_result(
-        data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, pnp_poses)
-    pnp_result.elapsed_time = compute_elapsed
 
     set_progress(0.96, "Aligning to ground truth...")
     gtsam_result = _get_gtsam_result(
@@ -1407,7 +1308,6 @@ def _compute(
     return SlamResult(
         gt=gt_result,
         imu=imu_result,
-        pnp=pnp_result,
         gtsam=gtsam_result,
         extra=extra_result,
     )
