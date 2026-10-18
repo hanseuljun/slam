@@ -11,12 +11,11 @@ class ConfigViewModel:
     selected_index: int = 0
     start_s: float = 0.0
     duration_s: float = 200.0
-    # Off by default: SLAM doesn't need this anymore -- SlamSolver computes its own frontend
-    # (feature detection + stereo matching + optical flow, see slam/frontend.py) internally (see
-    # _compute in slam.py) -- so it exists purely for its own diagnostic tab, at the cost of
-    # redundant compute duplicating what SLAM already does itself. Opt in explicitly, same as the
-    # other diagnostics below.
-    run_frontend: bool = False
+    # Whether to show the Frontend tab. Free to leave on: it reads the frontend data SLAM already
+    # computes (SlamSolver.frontend_result) instead of running its own pass.
+    run_frontend: bool = True
+    # Off by default: unlike the Frontend tab this is real extra compute (it runs
+    # CoordinateMappingChecker over SLAM's frontend output once SLAM finishes).
     run_coordinate_mapping_check: bool = False
     # Unlike the diagnostics above, this drives SLAM's own solve (SlamSolver's enable_loop_closure)
     # rather than a redundant side computation -- on by default now that it's been validated as a
@@ -27,33 +26,8 @@ class ConfigViewModel:
     def data_path_str(self) -> str:
         return self.data_paths[self.selected_index]
 
-    def sanitize(self) -> None:
-        """Enforce the pipeline's real dependency (coordinate mapping check needs the frontend's
-        feature detection/stereo matching output) regardless of how these flags got set -- so its
-        checkbox can never end up True while the frontend is False.
-        """
-        if not self.run_frontend:
-            self.run_coordinate_mapping_check = False
-
-
-def _dependent_checkbox(label: str, value: bool, enabled: bool, requires: str) -> bool:
-    """A checkbox that's forced off and greyed out whenever its prerequisite stage is disabled,
-    with a tooltip explaining why -- rather than letting the user check a box that would silently
-    do nothing.
-    """
-    if not enabled:
-        value = False
-    imgui.begin_disabled(not enabled)
-    _, value = imgui.checkbox(label, value)
-    imgui.end_disabled()
-    if not enabled and imgui.is_item_hovered():
-        imgui.set_tooltip(f"Requires {requires}")
-    return value
-
 
 def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
-    model.sanitize()
-
     # Stacked vertically (rather than same_line()-chained) since this now renders in the
     # collapsible left sidebar (see root_view in main.py) instead of a full-width top bar.
     labels = [Path(p).parent.name for p in model.data_paths]
@@ -73,17 +47,14 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
     imgui.separator()
     imgui.spacing()
 
-    # Coordinate Mapping Check's checkbox is only interactive while the frontend is enabled --
-    # see ConfigViewModel.sanitize for the dependency this mirrors.
-    _, model.run_frontend = imgui.checkbox("Frontend", model.run_frontend)
+    _, model.run_frontend = imgui.checkbox("Frontend tab", model.run_frontend)
 
     imgui.spacing()
     imgui.separator()
     imgui.spacing()
 
-    model.run_coordinate_mapping_check = _dependent_checkbox(
-        "Coordinate Mapping Check", model.run_coordinate_mapping_check, model.run_frontend,
-        "Frontend")
+    _, model.run_coordinate_mapping_check = imgui.checkbox(
+        "Coordinate Mapping Check", model.run_coordinate_mapping_check)
     # Off by default: loop closure's candidate search is O(K^2) brute-force descriptor matching
     # (not yet cheap enough to run unconditionally) and its candidate-consolidation step is
     # validated-but-not-tuned (see slam.py's _LoopClosureDetector docstring) --

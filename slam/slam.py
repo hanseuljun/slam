@@ -11,7 +11,7 @@ import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
 from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
-from slam.frontend import FrontendFrameComputer
+from slam.frontend import FrontendFrameComputer, FrontendResult
 from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
 from slam.orb_vocabulary import ORBVocabulary
 from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
@@ -2068,6 +2068,7 @@ def _compute(
     set_progress: Callable[[float, str], None],
     enable_loop_closure: bool = False,
     on_partial_result: Optional[Callable[[SlamResult], None]] = None,
+    frontend_result: Optional[FrontendResult] = None,
 ) -> SlamResult:
     """Runs the whole SLAM stage -- feature detection, stereo matching, optical flow, keyframe
     selection, and GTSAM graph construction -- as one incremental pass over
@@ -2075,9 +2076,7 @@ def _compute(
     FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in from outside. Frame i
     is computed (FrontendFrameComputer), then immediately offered to keyframe selection
     (_KeyframeScanner) and, for any keyframe it produces, the pose graph (_GtsamBuilder) -- before
-    frame i+1 is ever touched. FrontendSolver (ui/frontend_view.py's diagnostic tab) still exists
-    unchanged for its own diagnostic view (see tmp/fold_pipeline_into_slam_plan.html); this
-    recomputes the same data independently rather than depending on its output.
+    frame i+1 is ever touched. The frontend tab shows these same containers (frontend_result).
 
     If on_partial_result is given, it's called with a full SlamResult (ground truth/IMU/extra
     unchanged from the final one -- none of those depend on the growing SLAM estimate -- but pnp
@@ -2085,6 +2084,10 @@ def _compute(
     and _GtsamBuilder.current_estimate) after every keyframe, not just once at the end -- for a
     caller that wants to render the trajectory as it grows instead of only once the whole window
     has been processed.
+
+    frontend_result: if given, its (initially empty) feature_detection/stereo_matching/optical_flow
+    containers are the ones filled frame by frame below, so the caller (SlamSolver.frontend_result)
+    can show the frontend's output -- live, while this runs -- without computing it a second time.
     """
     first_timestamp_ns = data.cam_timestamps_ns[0]
     min_ts = first_timestamp_ns + int(start_s * 1e9)
@@ -2134,9 +2137,15 @@ def _compute(
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
 
     frontend = FrontendFrameComputer(data)
-    feature_detection_result = FeatureDetectionResult(frames=[], elapsed_s=0.0)
-    stereo_matching_result = StereoMatchingResult(frames=[], elapsed_s=0.0)
-    optical_flow_result = OpticalFlowResult(frames=[], elapsed_s=0.0)
+    if frontend_result is None:
+        frontend_result = FrontendResult(
+            feature_detection=FeatureDetectionResult(frames=[], elapsed_s=0.0),
+            stereo_matching=StereoMatchingResult(frames=[], elapsed_s=0.0),
+            optical_flow=OpticalFlowResult(frames=[], elapsed_s=0.0),
+            elapsed_s=0.0)
+    feature_detection_result = frontend_result.feature_detection
+    stereo_matching_result = frontend_result.stereo_matching
+    optical_flow_result = frontend_result.optical_flow
 
     def _process_frame(ts: int) -> None:
         fd_frame, sm_frame, of_frame = frontend.add_frame(ts)
@@ -2189,6 +2198,8 @@ def _compute(
     # Frontend computation, scanning, and graph-building are now the same combined pass, so they
     # no longer have separately measurable costs -- both diagnostics report the same total.
     compute_elapsed = time.monotonic() - compute_t0
+    for r in (feature_detection_result, stereo_matching_result, optical_flow_result, frontend_result):
+        r.elapsed_s = compute_elapsed
 
     pnp_result = _get_pnp_result(
         data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, pnp_poses)
@@ -2221,10 +2232,9 @@ class _SolveCancelled(Exception):
 class SlamSolver:
     """Runs the whole SLAM stage over [start_s, start_s + duration_s] -- feature detection,
     stereo matching, optical flow, keyframe selection, and GTSAM graph construction -- from raw
-    EuRoCMAVData alone, the same (data, start_s, duration_s) shape FrontendSolver takes.
-    Doesn't need a FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in: it
-    recomputes that data itself, incrementally (see _compute), rather than depending on those
-    solvers having already run. They still exist unchanged for their own diagnostic views.
+    EuRoCMAVData alone, from raw EuRoCMAVData alone.
+    It computes the frontend data itself, incrementally (see _compute), and exposes it as
+    frontend_result for the diagnostic tabs.
     """
 
     def __init__(
@@ -2242,6 +2252,16 @@ class SlamSolver:
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._enable_loop_closure = enable_loop_closure
         self.result: Optional[SlamResult] = None
+        # The frontend's per-frame output (ORB / stereo matching / optical flow), filled by
+        # _compute as it goes and complete once `loading` is False -- the Frontend and Coordinate
+        # Mapping tabs read this instead of running their own FrontendSolver pass. Frames are
+        # appended one list at a time, so a reader should only trust indices below
+        # min(len(fd.frames), len(sm.frames), len(of.frames)).
+        self.frontend_result = FrontendResult(
+            feature_detection=FeatureDetectionResult(frames=[], elapsed_s=0.0),
+            stereo_matching=StereoMatchingResult(frames=[], elapsed_s=0.0),
+            optical_flow=OpticalFlowResult(frames=[], elapsed_s=0.0),
+            elapsed_s=0.0)
         self.loading: bool = True
         self.error: Optional[str] = None
         self.progress: float = 0.0
@@ -2270,7 +2290,8 @@ class SlamSolver:
         try:
             self.result = _compute(
                 self._data, self._start_s, self._duration_s, set_progress,
-                enable_loop_closure=self._enable_loop_closure, on_partial_result=set_partial_result)
+                enable_loop_closure=self._enable_loop_closure, on_partial_result=set_partial_result,
+                frontend_result=self.frontend_result)
         except _SolveCancelled:
             pass
         except Exception:

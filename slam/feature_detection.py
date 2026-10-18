@@ -28,7 +28,7 @@ def detect_features_for_frame(
     cam0_img: Optional[np.ndarray] = None, cam1_img: Optional[np.ndarray] = None,
 ) -> FeatureDetectionFrame:
     """ORB detect+compute on both cameras for a single frame -- a pure function of that frame's
-    own images, no cross-frame state. Shared by FrontendFrameComputer/FrontendSolver (slam/frontend.py,
+    own images, no cross-frame state. Shared by FrontendFrameComputer (slam/frontend.py,
     loads cam0/cam1 once and passes them in here, since the same images are also needed for stereo
     matching and optical flow) and slam.py's own incremental per-frame loop, which does the same.
     """

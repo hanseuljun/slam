@@ -299,6 +299,10 @@ class SlamViewModel:
         # Current position of the 3D trajectory's timeline scrubber -- see _draw_3d_trajectory.
         self.trajectory_scrub_t: float = 0.0
 
+    @property
+    def solver(self) -> Optional[SlamSolver]:
+        return self._solver
+
     def start(self) -> None:
         self._solver = SlamSolver(
             self._data, self._start_s, self._duration_s, enable_loop_closure=self._run_loop_closure)

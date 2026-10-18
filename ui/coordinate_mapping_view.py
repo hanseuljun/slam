@@ -1,6 +1,6 @@
 import json
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -15,6 +15,7 @@ from slam.coordinate_mapping_check import (
 )
 from slam.data import EuRoCMAVData
 from slam.feature_detection import FeatureDetectionResult
+from slam.slam import SlamSolver
 from slam.stereo_matching import StereoMatchingResult
 from ui.utils import image_to_texture
 
@@ -50,8 +51,15 @@ def _draw_result(result: CoordinateMappingCheckResult) -> None:
 
 
 class CoordinateMappingViewModel:
-    def __init__(self, data: EuRoCMAVData) -> None:
+    """Starts itself (maybe_start, polled by the view) once SLAM has finished, since it needs the
+    complete frontend output SlamSolver.frontend_result ends up holding -- there is no separate
+    frontend pass to wait on.
+    """
+
+    def __init__(self, data: EuRoCMAVData, get_solver: Callable[[], Optional[SlamSolver]]) -> None:
         self._data = data
+        self._get_solver = get_solver
+        self._started: bool = False
         self._cancel_event = threading.Event()
         self._checker: Optional[CoordinateMappingChecker] = None
         self._feature_detection_result: Optional[FeatureDetectionResult] = None
@@ -66,11 +74,20 @@ class CoordinateMappingViewModel:
         self._cache_key: tuple = ()
         self._match_texture: Optional[hello_imgui.TextureGpu] = None
 
+    def maybe_start(self) -> None:
+        if self._started:
+            return
+        solver = self._get_solver()
+        if solver is None or solver.loading or solver.error:
+            return
+        self.start(solver.frontend_result.feature_detection, solver.frontend_result.stereo_matching)
+
     def start(
         self,
         feature_detection_result: FeatureDetectionResult,
         stereo_matching_result: StereoMatchingResult,
     ) -> None:
+        self._started = True
         self._feature_detection_result = feature_detection_result
         self._stereo_matching_result = stereo_matching_result
         self._checker = CoordinateMappingChecker(
@@ -181,8 +198,13 @@ def _download_transforms(result: CoordinateMappingCheckResult) -> None:
 
 
 def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
+    model.maybe_start()
     if model._checker is None:
-        imgui.text("Waiting for stereo matching...")
+        solver = model._get_solver()
+        if solver is not None and solver.error:
+            imgui.text(f"SLAM failed: {solver.error}")
+        else:
+            imgui.text("Waiting for SLAM to finish (this check needs its complete frontend output)...")
         return
     if model._loading:
         imgui.text("Computing coordinate mapping check...")

@@ -1,11 +1,11 @@
-import threading
 from typing import Callable, Optional
 
 import cv2
 from imgui_bundle import hello_imgui, imgui
 
 from slam.data import EuRoCMAVData
-from slam.frontend import FrontendResult, FrontendSolver
+from slam.frontend import FrontendResult
+from slam.slam import SlamSolver
 from ui.utils import image_to_texture
 
 _TRACK_COLOR = (0, 255, 0)
@@ -13,28 +13,22 @@ _TRAIL_COLOR = (0, 200, 255)
 
 
 class FrontendViewModel:
-    """Feature detection + stereo matching + optical flow used to be three separate views, each
-    with its own solver and its own independent frame-index slider even though all three are
-    indexed by the exact same frame sequence -- see FrontendSolver's docstring for why the solvers
-    were merged. One shared frame index here drives all three sections' textures/stats at once.
+    """Read-only view over the frontend data SlamSolver produces as it runs
+    (SlamSolver.frontend_result) -- no frontend computation of its own. Feature detection, stereo
+    matching and optical flow are indexed by the exact same frame sequence, so one shared frame
+    index here drives all three sections' textures/stats at once.
+
+    `get_solver` returns the current SlamSolver (None before SlamViewModel.start()). Frames show up
+    as the solver processes them, so the tab is usable while SLAM is still running.
     """
 
-    def __init__(
-        self, data: EuRoCMAVData,
-        on_result: Callable[[FrontendResult], None] = lambda _: None,
-        start_s: float = 0.0, duration_s: float = 5.0,
-    ) -> None:
+    def __init__(self, data: EuRoCMAVData, get_solver: Callable[[], Optional[SlamSolver]]) -> None:
         self._data = data
-        self._on_result = on_result
-        self._cancel_event = threading.Event()
-        self._solver = FrontendSolver(data, start_s, duration_s, cancel_event=self._cancel_event)
-        self._result: Optional[FrontendResult] = None
-        self._loading: bool = False
-        self._error: Optional[str] = None
-        self._started: bool = False
+        self._get_solver = get_solver
         self.frame_index: int = 0
         self.match_index_min: int = 0
         self.match_index_max: int = 0
+        self._match_range_frame: int = -1  # frame_index match_index_min/max were last reset for
         self.trail_length: int = 10
         self._cached_fd_index: int = -1
         self._fd_texture: Optional[hello_imgui.TextureGpu] = None
@@ -45,39 +39,34 @@ class FrontendViewModel:
         self._cached_of_trail_length: int = -1
         self._of_texture: Optional[hello_imgui.TextureGpu] = None
 
-    def _compute(self) -> None:
-        try:
-            result = self._solver.run()
-            if self._cancel_event.is_set():
-                return
-            self._result = result
-            self.match_index_max = max(0, len(result.stereo_matching.frames[0].matches) - 1)
-            self._on_result(result)
-        except Exception as e:
-            self._error = str(e)
-        finally:
-            self._loading = False
+    @property
+    def solver(self) -> Optional[SlamSolver]:
+        return self._get_solver()
 
-    def start(self) -> None:
-        if self._started:
-            return
-        self._started = True
-        self._loading = True
-        threading.Thread(target=self._compute, daemon=True).start()
+    @property
+    def _result(self) -> Optional[FrontendResult]:
+        solver = self.solver
+        return solver.frontend_result if solver is not None else None
 
-    def stop(self) -> None:
-        self._cancel_event.set()
-        # Breaks the Pipeline <-> view-model reference cycle formed by holding this bound-method
-        # callback -- see FeatureDetectionViewModel.stop()'s longer historical explanation (now
-        # folded into this view), still relevant: a cycle can only be freed by the cyclic GC, which
-        # may run on a non-GL thread and segfault on a texture destructor's glDeleteTextures call.
-        self._on_result = lambda _: None
+    def num_ready_frames(self) -> int:
+        """Frames whose feature detection, stereo matching and optical flow are all present --
+        the three lists are appended one after another by the solver thread, so a reader must
+        only index below the shortest."""
+        result = self._result
+        if result is None:
+            return 0
+        return min(len(result.feature_detection.frames), len(result.stereo_matching.frames),
+                   len(result.optical_flow.frames))
 
     def set_frame_index(self, index: int) -> None:
         self.frame_index = index
-        self.match_index_min = 0
-        if self._result is not None:
-            self.match_index_max = max(0, len(self._result.stereo_matching.frames[index].matches) - 1)
+
+    def sync_match_range(self, num_matches: int) -> None:
+        """Reset the stereo match range to "all matches" whenever the shown frame changed."""
+        if self._match_range_frame != self.frame_index:
+            self.match_index_min = 0
+            self.match_index_max = max(0, num_matches - 1)
+            self._match_range_frame = self.frame_index
 
     def current_fd_texture(self) -> Optional[hello_imgui.TextureGpu]:
         if self._result is None:
@@ -142,24 +131,32 @@ class FrontendViewModel:
 
 
 def frontend_view(model: FrontendViewModel) -> None:
-    if model._loading:
-        imgui.text("Computing frontend (feature detection + stereo matching + optical flow)...")
-        imgui.progress_bar(model._solver.progress, (-1, 0))
-        return
-    if model._error:
-        imgui.text(f"Error: {model._error}")
-        return
-    if model._result is None:
-        return
-
+    solver = model.solver
     result = model._result
+    if solver is None or result is None:
+        imgui.text("Waiting for SLAM to start...")
+        return
+    if solver.error:
+        imgui.text(f"Error: {solver.error}")
+        return
+    # Same reason as in slam_view: idling would stop this from being redrawn to notice new frames.
+    hello_imgui.get_runner_params().fps_idling.enable_idling = not solver.loading
+    n = model.num_ready_frames()
+    if n == 0:
+        imgui.text("Waiting for the first frame...")
+        return
+    if solver.loading:
+        imgui.text(f"Frontend running as part of SLAM: {n} frames so far")
+        imgui.progress_bar(solver.progress, (-1, 0))
+
     data = model._data
-    n = len(result.feature_detection.frames)
     first_ts_ns = data.cam_timestamps_ns[0]
+    model.frame_index = min(model.frame_index, n - 1)
 
     fd_frame = result.feature_detection.frames[model.frame_index]
     sm_frame = result.stereo_matching.frames[model.frame_index]
     of_frame = result.optical_flow.frames[model.frame_index]
+    model.sync_match_range(len(sm_frame.matches))
 
     imgui.text("Frame")
     imgui.same_line()
@@ -170,7 +167,8 @@ def frontend_view(model: FrontendViewModel) -> None:
 
     imgui.text(f"Timestamp: {fd_frame.timestamp_ns} ns")
     imgui.text(f"Time since first frame: {(fd_frame.timestamp_ns - first_ts_ns) / 1e9:.3f} s")
-    imgui.text(f"Elapsed: {result.elapsed_s:.3f} s")
+    if not solver.loading:
+        imgui.text(f"Elapsed (whole SLAM pass, frontend included): {result.elapsed_s:.3f} s")
 
     imgui.begin_child("##frontend_scroll", (0, 0), False)
 

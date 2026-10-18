@@ -51,8 +51,8 @@ class OpticalFlowResult:
 
 class OpticalFlowTracker:
     """Owns one continuous KLT tracking state, advanced one frame at a time via add_frame -- driven
-    by slam/frontend.py's FrontendFrameComputer/FrontendSolver and by slam.py's own incremental
-    per-frame loop alike, both frame-by-frame rather than needing a fully materialized
+    by slam/frontend.py's FrontendFrameComputer from slam.py's own incremental per-frame loop,
+    frame-by-frame rather than needing a fully materialized
     FeatureDetectionResult/StereoMatchingResult up front.
 
     Tracks cam0 points continuously frame-to-frame via pyramidal KLT, rather than independently
