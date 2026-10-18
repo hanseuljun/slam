@@ -1266,7 +1266,7 @@ def _compute(
         partial_gtsam_result = _get_gtsam_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
             gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
-            scanner.keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm, np.zeros((0, 3)),
+            builder_keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm, np.zeros((0, 3)),
         )
         return SlamResult(
             gt=gt_result, imu=imu_result, gtsam=partial_gtsam_result,
@@ -1274,6 +1274,9 @@ def _compute(
         )
 
     _process_frame(timestamps[0])
+    # Keyframes the builder has actually consumed. scanner.keyframes can be ahead of it: one frame
+    # can yield two keyframes, and both are in scanner.keyframes before the first reaches the graph.
+    builder_keyframes = [0]
     scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result)
     builder = _GtsamBuilder(
         data, feature_detection_result, stereo_matching_result, optical_flow_result,
@@ -1283,6 +1286,7 @@ def _compute(
         _process_frame(timestamps[i])
         for kf in scanner.add_frame(i):
             builder.add_keyframe(kf)
+            builder_keyframes.append(kf)
             if on_partial_result is not None:
                 on_partial_result(_build_partial_result())
     keyframe_indices = scanner.keyframes
