@@ -138,6 +138,8 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
                     marker=implot3d.Marker_.circle, marker_size=2,
                     marker_fill_color=imgui.ImVec4(0.6, 0.6, 0.6, 0.5),
                     marker_line_color=imgui.ImVec4(0.6, 0.6, 0.6, 0.5)))
+        # One explicit color per series, shared by its line and its "at t" marker.
+        colors = {name: implot3d.get_colormap_color(i) for i, (_, _, name) in enumerate(all_series)}
         for times, positions, name in all_series:
             if len(positions) == 0:
                 continue
@@ -145,7 +147,8 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
                 name,
                 np.ascontiguousarray(positions[:, 0], dtype=np.float64),
                 np.ascontiguousarray(positions[:, 1], dtype=np.float64),
-                np.ascontiguousarray(positions[:, 2], dtype=np.float64))
+                np.ascontiguousarray(positions[:, 2], dtype=np.float64),
+                spec=implot3d.Spec(line_color=colors[name]))
         for times, positions, name in all_series:
             if len(times) == 0:
                 continue
@@ -153,7 +156,10 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
             p = positions[idx]
             implot3d.plot_scatter(
                 f"{name} (at t)", np.array([p[0]]), np.array([p[1]]), np.array([p[2]]),
-                spec=implot3d.Spec(marker=implot3d.Marker_.circle, marker_size=8))
+                spec=implot3d.Spec(
+                    marker=implot3d.Marker_.circle, marker_size=8,
+                    marker_fill_color=colors[name], marker_line_color=colors[name],
+                    flags=implot3d.ScatterFlags_.no_legend))
         implot3d.end_plot()
 
     imgui.set_next_item_width(-1)
