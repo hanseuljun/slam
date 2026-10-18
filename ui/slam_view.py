@@ -13,11 +13,8 @@ _BIAS_ROW_LABELS = ['accel bias', 'gyro bias']
 _BIAS_ROW_UNITS = ['m/s²', 'rad/s']
 _BIAS_COMPONENT_NAMES = ['x', 'y', 'z']
 
-# Target height per subplot *row*, in pixels -- total grid height passed to _plot_series_grid/
-# _plot_single_lines is nrows * this, so every individual y-axis gets the same generous vertical
-# room regardless of how many rows its grid has, instead of a fixed total height getting divided
-# thinner and thinner as row count grows (a 4-row grid at a shared 340px total, for example, was
-# only ~85px per row -- not enough to actually read the data).
+# Target height per subplot row [px]. Grid height is nrows * this, so every y-axis gets the same
+# room regardless of row count.
 _ROW_HEIGHT_PX = 260
 
 
@@ -32,14 +29,9 @@ def _plot_series_grid(
     axhline_fn: Optional[Callable[[int, int], Optional[tuple[float, str]]]] = None,
     xlabel: str = 'Time [s]',
 ) -> None:
-    """A grid of subplots, each overlaying every entry in `series` -- drawn fresh every call
-    (ImPlot is immediate mode: there's no Figure/Axes to build once and reuse, unlike the
-    matplotlib version this replaced). That's exactly why this is cheap enough to call every UI
-    frame directly from whatever SlamSolver.result currently is, with no caching, no GPU-texture
-    upload, and no background thread: ImPlot submits draw commands into the same GPU pipeline the
-    rest of the UI already uses, instead of rasterizing to a CPU bitmap first (measured well under
-    1ms even for a 9-subplot grid, vs. ~30-40ms/figure for matplotlib even after persistent
-    Figure/Axes reuse -- see tmp/investigate/implot_positions_prototype.py).
+    """A grid of subplots, each overlaying every entry in `series`. ImPlot is immediate mode and
+    GPU-side (well under 1ms for a 9-subplot grid), so this is cheap to call every UI frame straight
+    from SlamSolver.result with no caching.
     """
     imgui.text(title)
     flags = implot.SubplotFlags_.link_all_x if nrows * ncols > 1 else 0
@@ -73,10 +65,9 @@ def _plot_single_lines(
     rows: list[tuple[np.ndarray, np.ndarray, str, Optional[tuple[float, str]]]],
     xlabel: str = 'Time [s]',
 ) -> None:
-    """An Nx1 grid, one line (plus an optional reference axhline) per row, each row pulling from
-    its own distinct array rather than an overlay of named series -- see _plot_series_grid's
-    docstring for why no persistent state is needed here either.
-    rows: (times, values, ylabel, axhline_spec) per subplot; axhline_spec is (value, label) or None.
+    """An Nx1 grid, one line (plus an optional reference axhline) per row, each pulling from its own
+    array. rows: (times, values, ylabel, axhline_spec) per subplot; axhline_spec is (value, label)
+    or None.
     """
     imgui.text(title)
     if implot.begin_subplots(f"##{title}", len(rows), 1, size=(-1, height), flags=implot.SubplotFlags_.link_all_x):
@@ -98,23 +89,14 @@ def _plot_single_lines(
 
 
 def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
-    """The same gt/gtsam positions _draw_positions breaks into 3 separate X/Y/Z-vs-time charts,
-    drawn instead as one actual 3D path -- ImPlot3D is bundled with imgui_bundle (the same
-    package already providing ImPlot), so this needs no new dependency and renders in-process, the
-    same as every other panel here (see tmp/3d_viz_library_recommendations.html). pnp deliberately
-    left out here (unlike the 2D panels) -- its raw dead-reckoning drift makes the path hard to
-    read at 3D-path scale, and gt/gtsam already show what actually matters.
+    """The gt/gtsam positions as one 3D path, via ImPlot3D (bundled with imgui_bundle). pnp is left
+    out: its dead-reckoning drift makes the path hard to read at this scale.
 
-    A slider below the plot (model.trajectory_scrub_t, persisted across frames so it survives a
-    scroll/redraw) picks a point in time; a bigger marker on each line shows exactly where that
-    trajectory was at that moment, the 3D-path equivalent of scrubbing a video.
+    A slider below the plot (model.trajectory_scrub_t) picks a point in time, and a bigger marker on
+    each line shows where that trajectory was then.
 
-    A sparse map layer (result.gtsam.landmark_positions) plots every landmark the factor graph has
-    inserted as small, dim points, styled to read as scene structure sitting behind the trajectory
-    lines rather than competing with them -- see tmp/mapping_sparse_vs_dense.html for why sparse
-    (this is already-computed factor-graph state, not a new CV/compute stage) over semi-dense/dense.
-    Empty during a live-updating run (see SlamGtsamResult.landmark_positions' docstring) -- appears
-    once the run finishes.
+    A sparse map layer (result.gtsam.landmark_positions) draws every inserted landmark as small dim
+    points behind the trajectory lines. It is empty during a live run and appears once it finishes.
     """
     imgui.text('3D Trajectory')
     all_series = [
@@ -129,18 +111,14 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
     # (a per-axis-independent range would otherwise stretch/squash it to fill the frame).
     if implot3d.begin_plot("##3d_trajectory", size=(-1, 500), flags=implot3d.Flags_.equal):
         implot3d.setup_axes('X [m]', 'Y [m]', 'Z [m]')
-        # Explicit per-axis limits, recomputed from the actual data every frame, instead of
-        # AxisFlags_.auto_fit: verified (via a synthetic growing-trajectory repro) that ImPlot3D's
-        # auto_fit does not reliably track a *growing* dataset's full extent -- it can lock onto
-        # an early, smaller range and clip later data that falls outside it, instead of expanding.
-        # Cond_.always forces this exact range every frame, so it can't go stale like that.
+        # Explicit per-axis limits, recomputed every frame: ImPlot3D's auto_fit doesn't
+        # reliably track a growing dataset (it can lock onto an early, smaller range and
+        # clip later data).
         all_positions = [positions for _, positions, _ in all_series if len(positions) > 0]
         if len(landmarks) > 0:
-            # Percentile bounds, not exact min/max, for landmarks specifically: a poorly
-            # triangulated one (thin baseline, near-parallel rays) can land tens of meters from
-            # everything else and single-handedly blow out the whole plot's scale. Every landmark
-            # still gets drawn below -- this only keeps a rare outlier from setting the axis range
-            # the vast majority of (good) landmarks would otherwise look fine in.
+            # Percentile bounds for landmarks: one poorly triangulated landmark can
+            # land tens of meters away and blow out the plot's scale. Every landmark
+            # is still drawn.
             all_positions.append(np.percentile(landmarks, [1, 99], axis=0))
         if all_positions:
             combined = np.concatenate(all_positions, axis=0)
@@ -319,17 +297,15 @@ def slam_view(model: SlamViewModel) -> None:
     if solver is None:
         imgui.text("Waiting for stereo matching...")
         return
-    # A result can arrive (and keep changing) while still loading -- see on_partial_result in
-    # SlamSolver.run -- so loading/error are shown as a status line above whatever's already
-    # there, not as an early return that hides it.
+    # A result can arrive while still loading (partial results), so loading/error are a status
+    # line above it, not an early return.
     if solver.loading:
         imgui.text(solver.progress_label)
         imgui.progress_bar(solver.progress, (-1, 0))
     elif solver.error:
         imgui.text(f"Error: {solver.error}")
-    # Idling (the default) throttles redraws when there's no input, which would stop this
-    # function from ever being called to notice the background solver thread's progress. Only
-    # needed while a run is still in flight -- once it's done there's nothing left to poll for.
+    # Idling throttles redraws when there's no input, which would stop this function from
+    # noticing the solver thread's progress. Only needed while a run is in flight.
     hello_imgui.get_runner_params().fps_idling.enable_idling = not solver.loading
 
     result = solver.result

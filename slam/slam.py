@@ -59,26 +59,19 @@ class SlamGtsamResult:
     velocities: np.ndarray
     biases: np.ndarray  # per-keyframe IMU bias, shape (K, 6): [accel(3), gyro(3)]
     position_errors: np.ndarray  # per-keyframe position error vs nearest GT sample [m], shape (K,)
-    # ATE: batch (whole-trajectory) yaw+translation alignment, then per-keyframe error. Yaw-only
-    # (not full 3D rotation) because gravity makes roll/pitch observable for a VIO system; letting
-    # the alignment absorb them would hide real error instead of exposing it. See Zhang &
-    # Scaramuzza, "A Tutorial on Quantitative Trajectory Evaluation for VIO", IROS 2018.
+    # ATE: whole-trajectory yaw+translation alignment, then per-keyframe error. Yaw-only
+    # because gravity makes roll/pitch observable in VIO (Zhang & Scaramuzza, IROS 2018).
     ate_position_errors: np.ndarray  # shape (K,) [m]
     ate_rotation_errors: np.ndarray  # shape (K,) [deg]
-    # RPE: relative motion error over a fixed time window, alignment-free by construction (a
-    # constant misalignment cancels out of a relative transform), so it isolates local/per-step
-    # accuracy from the cumulative drift ATE reports. NaN where no keyframe falls within the
-    # window of the trajectory's end.
+    # RPE: relative motion error over a fixed time window. Needs no alignment, so it isolates
+    # local accuracy from drift. NaN where no keyframe falls within the window of the
+    # trajectory's end.
     rpe_translation_errors: np.ndarray  # shape (K,) [m]
     rpe_rotation_errors: np.ndarray  # shape (K,) [deg]
     reprojection_rmse: np.ndarray  # per-keyframe landmark reprojection RMSE [px], shape (K,)
     landmark_counts: np.ndarray  # per-keyframe number of observed landmarks, shape (K,)
-    # World-frame position of every landmark the graph has inserted (see
-    # _GtsamBuilder.landmark_positions), shape (M, 3) -- a sparse map, not a per-keyframe series
-    # like the fields above. Empty during a live-updating run's intermediate snapshots (see
-    # _build_partial_result) -- only ever populated once, at finalize(), same tradeoff already
-    # made for reprojection_rmse/landmark_counts and for the same reason: walking a growing
-    # landmark set on every keyframe would reintroduce an O(K^2) live-preview cost.
+    # World-frame position of every inserted landmark, shape (M, 3). Only populated at
+    # finalize(); empty in live partial results.
     landmark_positions: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
@@ -151,12 +144,8 @@ def _rotation_angle_deg(rotation_matrix: np.ndarray) -> float:
 
 
 def _nearest_sorted_indices(sorted_reference: np.ndarray, queries: np.ndarray) -> np.ndarray:
-    """For each query, the index into sorted_reference whose value is closest -- same result as
-    argmin(abs(sorted_reference[:, None] - queries[None, :]), axis=0), but via binary search
-    instead of a dense (len(sorted_reference) x len(queries)) broadcast. That broadcast is O(n*m)
-    in both time and memory: matching ~29k IMU samples against ~29k ground-truth samples over a
-    145s sequence built an 836M-element array (~6.7GB, plus another same-sized array for the abs())
-    for a single nearest-timestamp lookup. This is O((n + m) log n) time, O(m) memory.
+    """For each query, the index into sorted_reference of the closest value. Binary search instead
+    of a dense broadcast, which is O(n*m) in memory (~6.7GB for 29k x 29k samples).
     """
     idx = np.searchsorted(sorted_reference, queries, side="left")
     idx = np.clip(idx, 1, len(sorted_reference) - 1)
@@ -165,21 +154,15 @@ def _nearest_sorted_indices(sorted_reference: np.ndarray, queries: np.ndarray) -
 
 
 def _yaw_translation_align(est_positions: np.ndarray, gt_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Least-squares rotation-about-z (yaw) + translation aligning est_positions to gt_positions.
+    """Least-squares yaw (rotation about z) + translation aligning est_positions to gt_positions.
 
-    Restricted to yaw rather than a full 3D (Umeyama) rotation: both trajectories are already
-    gravity-aligned (nav frame's z is "up"), and for a VIO system gravity makes roll/pitch
-    observable, so a full-rotation alignment could quietly absorb a real roll/pitch error instead
-    of reporting it. Closed form: for fixed yaw the optimal translation is the centroid offset;
-    substituting that in reduces the remaining 1D optimization to maximizing
-    A*cos(theta) + B*sin(theta), solved by theta = atan2(B, A).
+    Yaw-only rather than full 3D (Umeyama): the nav frame is gravity-aligned and roll/pitch are
+    observable for VIO, so a full rotation could hide a real tilt error. Closed form: the optimal
+    translation is the centroid offset, and theta = atan2(B, A) maximizes A*cos(theta) +
+    B*sin(theta).
 
-    Only observable when the trajectory has real horizontal spread: fit purely from positions, so
-    over a short or near-stationary window (e.g. EuRoC's static lead-in before takeoff) the
-    horizontal signal is too small to pin theta down, and the resulting yaw -- and therefore
-    ate_rotation_errors -- can be noisy or biased even though the fit is the true least-squares
-    optimum for that window. Not a defect in the estimate; a property of evaluating too short/still
-    a stretch. Prefer windows with a few meters of horizontal travel when reading ATE rotation.
+    Needs a few meters of horizontal travel; over a short or stationary window the yaw, and so the
+    ATE rotation error, is noisy.
     """
     p_mean, q_mean = est_positions.mean(axis=0), gt_positions.mean(axis=0)
     p, q = est_positions - p_mean, gt_positions - q_mean
@@ -196,9 +179,9 @@ def _compute_ate(
     positions: np.ndarray, rotation_matrices: np.ndarray,
     gt_positions: np.ndarray, gt_rotation_matrices: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Absolute Trajectory Error: batch-align the whole estimated trajectory to ground truth
-    once (yaw + translation), then report per-keyframe position/rotation error after that single
-    alignment -- comparable to how other VIO/SLAM systems' ATE is usually reported."""
+    """Absolute Trajectory Error: align the whole estimated trajectory to ground truth once (yaw +
+    translation), then report per-keyframe position/rotation error.
+    """
     R, t = _yaw_translation_align(positions, gt_positions)
     aligned_positions = positions @ R.T + t
     position_errors = np.linalg.norm(aligned_positions - gt_positions, axis=1)
@@ -214,10 +197,9 @@ def _compute_rpe(
     times: np.ndarray, positions: np.ndarray, rotation_matrices: np.ndarray,
     gt_positions: np.ndarray, gt_rotation_matrices: np.ndarray, delta_s: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Relative Pose Error: for each keyframe, compare the estimated relative motion over the
-    next delta_s seconds to ground truth's relative motion over the same interval. Needs no
-    alignment -- a constant misalignment cancels out of a relative (inv(T_i) @ T_j) transform --
-    so unlike ATE this isolates local/per-step accuracy from cumulative drift."""
+    """Relative Pose Error: for each keyframe, compare estimated vs ground-truth relative motion
+    over the next delta_s seconds. Needs no alignment.
+    """
     K = len(times)
     translation_errors = np.full(K, np.nan)
     rotation_errors = np.full(K, np.nan)
@@ -364,10 +346,9 @@ class LoopClosureCandidate:
 
 @dataclass(frozen=True)
 class LoopClosureFactor:
-    """A closure ready to insert into the pose graph -- either auto-detected (converted from a
-    LoopClosureCandidate, see _run_gtsam) or supplied directly as a manual test/override hook
-    (_run_gtsam's extra_loop_closures). from_frame/to_frame are frame indices, not node indices --
-    see extra_loop_closures' docstring for why."""
+    """A closure ready to insert into the pose graph. from_frame/to_frame are frame indices, not
+    node indices.
+    """
     from_frame: int
     to_frame: int
     body_relative_pose: np.ndarray  # 4x4, from_frame_body <- to_frame_body
@@ -388,98 +369,46 @@ class _LoopClosureEdge:
     noise_mode: str
 
 
-# Sanity bound on a verified closure's recovered translation magnitude: no real revisit inside a
-# single EuRoC room traverses farther than this. Needed because verification (num_matches,
-# reprojection_error) does not by itself catch a degenerate PnP/RANSAC solution -- an
-# instrumented sweep on V2_03_difficult found ~1.1% of otherwise-plausible-looking verified pairs
-# come back with translation magnitudes in the millions of meters (obvious RANSAC garbage from a
-# bad point configuration), and neither of the other two signals flagged them.
+# Sanity bound on a verified closure's translation magnitude [m]. Match count and reprojection
+# error don't catch degenerate PnP/RANSAC solutions (~1% of verified pairs on V2_03_difficult had
+# translations in the millions of meters).
 LOOP_CLOSURE_MAX_TRANSLATION_M = 20.0
 
-# Noise for an auto-detected closure inserted into the real pose graph (see _run_gtsam's
-# enable_loop_closure). Plain Gaussian, not Huber or DCS: both were tested and found to cap or
-# outright zero a *correct* closure's pull once the prior disagreement is many multiples of
-# sigma, which it always is right after a long blackout -- see the Loop Closure plan's Phase 2/3
-# writeup. False-positive protection lives entirely in _LoopClosureDetector's verification gate
-# (match count + degeneracy check), not in this noise model.
+# Noise for an auto-detected closure. Plain Gaussian: Huber and DCS cap or zero the pull of a
+# correct closure when the prior disagreement is many sigma, which it is after a long blackout.
+# False-positive protection lives in _LoopClosureDetector's verification gate.
 LOOP_CLOSURE_ROT_SIGMA = 0.02   # rad
 LOOP_CLOSURE_TRANS_SIGMA = 0.05  # m
 
 
-# Candidates this close together in *both* query time and anchor time are treated as the same
-# revisit event rather than independent evidence -- chained (each candidate compared to the
-# previous one already placed in the cluster, not to the cluster's first member) so a slowly
-# drifting match target during a hover/settle still merges into one cluster even though its first
-# and last anchors may differ by more than this on their own.
+# Candidates close together in both query and anchor time (chained: each compared to the previous
+# cluster member) count as one revisit event.
 LOOP_CLOSURE_CLUSTER_GAP_S = 2.0
 
 
 class _LoopClosureDetector:
-    """Detects loop closures one keyframe at a time, instead of scanning the whole finalized
-    keyframe set in a single batch pass. For every keyframe, checks whether it revisits an
-    earlier one: a bag-of-words shortlist (ORBVocabulary; see orb_vocabulary.py) as the cheap
-    place-recognition signal, then PnP/RANSAC geometric verification via the same _run_pnp_step
-    already used for temporal matching elsewhere in this module. add_keyframe(node, frame) only
-    ever searches against nodes 0..node-1, already added -- never one added later.
+    """Detects loop closures one keyframe at a time; add_keyframe(node, frame) only searches nodes
+    0..node-1.
 
-    The vocabulary itself is a fixed asset trained offline, once, on a *different* sequence than
-    whatever this detector runs on (see tmp/investigate/train_orb_vocab.py) -- not something
-    derived from this run's own frames, so using it doesn't reintroduce the kind of lookahead the
-    rest of this module avoids. What varies per query is only which of the *already-added*
-    keyframes' bag-of-words vectors it's compared against.
+    A bag-of-words shortlist (ORBVocabulary, see orb_vocabulary.py) ranks earlier keyframes cheaply,
+    the best of the shortlist is re-scored with full descriptors, and the winner is verified by
+    PnP/RANSAC (_run_pnp_step). A candidate must clear min_matches and the translation sanity bound.
+    The vocabulary is a fixed asset trained offline on a different sequence, so using it adds no
+    lookahead.
 
-    Only the single best-scoring earlier candidate is kept per query, and same-event clusters are
-    then consolidated into one representative each -- a stay-put stretch has every one of its
-    keyframes independently "rediscover" the same historical match, and inserting all of them as
-    separate factors overcounts what is really one correlated observation as if it were N
-    independent ones (verified: this artificially over-stiffens that part of the graph and
-    perturbs other, untouched regions through the shared IMU/bias chain, on a regression check
-    against MH_02_easy and MH_04_difficult). A candidate is only returned if it clears
-    min_matches (an instrumented precision/recall sweep on V2_03_difficult found ~84-92%
-    precision, measured as correct relative-pose recovery rather than raw position proximity, at
-    150-300) *and* the translation-magnitude sanity check below.
+    Only the best earlier candidate is kept per query, and same-event clusters are consolidated into
+    one representative (the member with the most temporal matches): a stay-put stretch otherwise
+    rediscovers the same match at every keyframe, overcounting one observation as many. A cluster
+    closes when a later non-matching candidate arrives or on flush(), a delay bounded by
+    LOOP_CLOSURE_CLUSTER_GAP_S.
 
-    Consolidation is a small streaming state machine: a cluster only closes -- and its
-    representative (the member with the most temporal matches) becomes a ready _LoopClosureEdge
-    -- once a later, non-matching candidate arrives (add_keyframe's return value) or the caller
-    calls flush() at the end of the run. That's a delay bounded by LOOP_CLOSURE_CLUSTER_GAP_S
-    worth of keyframes, not a whole-sequence lookahead: by the time a cluster closes, its own
-    to_node may be several keyframes in the past, but never one not yet added.
-    Improved, not resolved -- re-checked against all three regression-check datasets after adding
-    this consolidation. MH_04_difficult's regression (from an earlier per-query,
-    no-consolidation version) is essentially gone (~12% worse than baseline in its
-    known-sensitive ~46s region -> ~1% or better). MH_02_easy is mixed -- some points improved,
-    but its worst regression point barely moved and the overall final-trajectory error got worse
-    than the unconsolidated version (still better than no closures at all, just not as good). And
-    on V2_03_difficult itself (94 closures -> 15), the correction is measurably weaker during the
-    transition into the corrected region, though still a >95% reduction from baseline overall. So
-    some of what this collapses down was real corrective signal, not pure redundancy --
-    collapsing every same-event cluster to exactly one representative is too aggressive in at
-    least one direction. LOOP_CLOSURE_CLUSTER_GAP_S=2.0 and "keep only the single best match per
-    cluster" are both first guesses, not tuned values; likely next step is keeping a small spread
-    of representatives per cluster instead of one.
-
-    The original batch version (see git history) got its speed from a thread pool across all K
-    queries at once, which stopped being available once a query only exists after its own keyframe
-    arrives -- see zero_lookahead reports in tmp/ for that finding. Bag-of-words replaced that lost
-    parallelism with less total work instead: profiled on V2_03_difficult 0-90s, the brute-force
-    truncated-descriptor probe this replaced spent 22.6s of 30.6s in knnMatch (44,074 calls, one
-    per earlier candidate per query); the inverted-index shortlist here cuts that to ~5 knnMatch
-    calls per query (SHORTLIST_N, on the BoW-selected shortlist only), for a ~40% faster
-    end-to-end run with equivalent or better accuracy on every regression-check sequence tested
-    (MH_02_easy, MH_04_difficult, V2_03_difficult).
+    One representative per cluster is a first guess and likely too aggressive; keeping a small
+    spread per cluster is the obvious next step.
     """
 
-    # BoW gives a cheap similarity *ranking*, not a precise match -- same role the old truncated
-    # brute-force probe used to play. ORB returns keypoints response-ordered, so the strongest
-    # ~PROBE_N carry most of the discriminative signal, same rationale as _scan_keyframes' own
-    # PROBE_N=500 probe; truncating here bounds the cost of assigning a keyframe's descriptors to
-    # vocabulary words. The BoW ranking alone isn't trusted to pick the actual winner (a coarse
-    # signal can rank the truly-best candidate a few slots off) -- so it only builds a shortlist
-    # here; SHORTLIST_N candidates are then re-scored with full descriptors (O(SHORTLIST_N) exact
-    # comparisons per query, not O(earlier) of them) before picking the winner. Final PnP
-    # verification (once per query on that winner) is always full-descriptor and unaffected either
-    # way.
+    # Only the strongest PROBE_N descriptors (ORB returns them response-ordered) are assigned
+    # to vocabulary words, bounding the cost. BoW only builds a SHORTLIST_N shortlist; those
+    # are re-scored with full descriptors before picking the winner.
     PROBE_N = 500
     SHORTLIST_N = 5
 
@@ -508,10 +437,9 @@ class _LoopClosureDetector:
         self._open_cluster: list[tuple[int, int, LoopClosureCandidate]] = []
 
     def add_keyframe(self, node: int, frame: int) -> list[_LoopClosureEdge]:
-        """Search for a revisit at this keyframe against every earlier one already added, then
-        feed any match into the consolidation state machine. Returns newly-finalized edges, if a
-        cluster just closed as a result -- its own to_node may be several keyframes in the past,
-        never one not yet added.
+        """Search for a revisit at this keyframe among earlier ones, feeding any match into the
+        consolidation state machine. Returns edges from a cluster that just closed (its to_node may
+        be several keyframes back).
         """
         q_time = _elapsed_s(self._sm_result.frames[frame].timestamp_ns, self._first_ts)
         q_desc_full = self._fd_result.frames[frame].cam0_descriptors
@@ -534,9 +462,8 @@ class _LoopClosureDetector:
         return self._close_cluster()
 
     def _bow_shortlist(self, q_time: float, query_vec: dict[int, float]) -> list[int]:
-        """Nodes sharing at least one vocabulary word with the query, ranked by BoW similarity
-        (dot product of L2-normalized TF-IDF vectors), via the inverted index -- a candidate with
-        zero shared words is never even touched, unlike a brute-force scan of every earlier node.
+        """Nodes sharing a vocabulary word with the query, ranked by BoW similarity (dot product of
+        L2-normalized TF-IDF vectors) via the inverted index, at least min_temporal_gap_s older.
         """
         scores: dict[int, float] = {}
         for word, qw in query_vec.items():
@@ -621,9 +548,8 @@ def _get_pnp_result(
     # pnp_poses is the per-frame cam0 dead-reckoning trajectory from the shared keyframe scan
     # (_scan_keyframes) -- no separate PnP pass is run here.
     cam_timestamps_ns = np.array([f.timestamp_ns for f in stereo_matching_result.frames])
-    # Anchor the trajectory to GT at the first GT sample inside the window (after start_s),
-    # not the dataset's first sample -- otherwise the windowed poses get aligned to a GT pose
-    # from before the window even begins.
+    # Anchor to GT at the first GT sample inside the window (after start_s), not the dataset's
+    # first, which precedes the window.
     first_gt_sample = next(s for s in data.ground_truth_samples if s.timestamp_ns >= min_timestamp_ns)
     closest_cam_index = np.argmin(np.abs(cam_timestamps_ns - first_gt_sample.timestamp_ns))
 
@@ -662,10 +588,8 @@ def _get_pnp_result(
 
 @dataclass(frozen=True)
 class LandmarkObservation:
-    """A single sighting of one landmark at one keyframe. uv0/uv1 are undistorted pixel
-    coordinates in cam0/cam1 (matching a Cal3_S2 pinhole model); point_cam0 is the
-    stereo-triangulated 3D point in the cam0 frame at that observation, used only to seed the
-    landmark's initial 3D guess -- the shared position estimate itself lives in the factor graph.
+    """One sighting of a landmark at a keyframe. uv0/uv1 are undistorted pixels in cam0/cam1;
+    point_cam0 is the stereo-triangulated point, used only to seed the landmark's initial position.
     """
     node: int  # graph-node index (into keyframe_indices) that observed the landmark
     uv0: np.ndarray
@@ -673,29 +597,19 @@ class LandmarkObservation:
     point_cam0: np.ndarray
 
 
-# Match a keyframe's stereo-matched cam0 keypoint to the optical-flow track currently sitting on
-# it, if any. A track is seeded from an ORB keypoint (optical_flow.py) and drifts sub-pixel from
-# there via KLT, so it rarely lands exactly on a keypoint re-detected fresh at a later frame --
-# but a real corner keeps getting re-detected close to where the track still is, so a small pixel
-# radius is enough to identify it without any descriptor matching. ORB keypoints can still cluster
-# tightly enough that two of them both fall within this radius of the same track (common on richly
-# textured regions), so _snap_obs_to_tracks additionally enforces one obs per track. 3.0 was too
-# tight on V1_03_difficult's fast-rotation segments (KLT drift between keyframes up to MAX_GAP_S=0.75s
-# (15 frames at the nominal 20Hz cam rate) apart exceeded it, dropping real correspondences and starving keyframes of landmarks --
-# fewer, sparser tracks hurt rotation accuracy more than the snap collisions they avoided). Kept
-# comfortably under optical_flow.MIN_TRACK_SEPARATION_PX (8px) so it still can't straddle two
-# distinct live tracks.
+# A stereo-matched cam0 keypoint is matched to the optical-flow track within this many pixels. KLT
+# tracks drift sub-pixel, so a small radius identifies the same corner without descriptors. 3.0
+# was too tight on V1_03_difficult's fast rotations; keep it under
+# optical_flow.MIN_TRACK_SEPARATION_PX (8) so it can't straddle two tracks.
 LANDMARK_SNAP_PX = 6.0
 
 
 def _snap_obs_to_tracks(
     fd: FeatureDetectionFrame, sm: StereoMatchingFrame, optical_flow_frame: OpticalFlowFrame,
 ) -> dict[int, int]:
-    """obs index (into sm.matches) -> optical-flow track id, for the nearest live track within
-    LANDMARK_SNAP_PX, if any. Each track claims at most one obs (its closest) -- ORB keypoints can
-    cluster tightly enough that two of them both land within the snap radius of the same track;
-    without this a track could pick up two observations at the same keyframe, which breaks the
-    one-observation-per-node assumption _LandmarkTrackBuilder and _run_gtsam rely on.
+    """obs index (into sm.matches) -> optical-flow track id for the nearest live track within
+    LANDMARK_SNAP_PX. Each track claims at most one obs (its closest), since _LandmarkTrackBuilder
+    and the graph assume one observation per track per node.
     """
     if not sm.matches or not optical_flow_frame.track_uv:
         return {}
@@ -719,24 +633,17 @@ def _snap_obs_to_tracks(
 
 
 class _LandmarkTrackBuilder:
-    """Chains stereo-matched features into persistent landmark tracks, one keyframe at a time.
+    """Chains stereo-matched features into persistent landmark tracks, one keyframe at a time via
+    add_keyframe.
 
-    Only cam0-cam1 stereo inliers are tracked, so every observation carries a metric depth for
-    initialization; observations are pre-undistorted so they match a Cal3_S2 pinhole model.
-    Correspondence across keyframes comes from optical flow's already-tracked ids (a track id is
-    valid correspondence through every intermediate frame, not just the two keyframes being
-    linked) instead of re-matching ORB descriptors keyframe-to-keyframe -- the same fast-rotation
-    failure mode OpticalFlowTracker's docstring documents for that approach.
+    Only cam0-cam1 stereo inliers are tracked, so every observation has a metric depth for
+    initialization; observations are pre-undistorted for a Cal3_S2 pinhole model. Correspondence
+    across keyframes comes from optical flow's track ids, not descriptor re-matching (which fails on
+    fast rotation, see OpticalFlowTracker).
 
-    Stateful, fed one keyframe at a time via add_keyframe, rather than taking the whole
-    keyframe_indices array at once: each call reads only that keyframe's own stereo/feature/
-    optical-flow data plus this object's own running state (self.tracks, and which optical-flow
-    track id was alive at the *previous* add_keyframe call) -- nothing from a keyframe not yet
-    added. There is deliberately no minimum-track-length filtering here: a track's eventual length
-    isn't knowable at the node where it starts, so gating on it would reintroduce a lookahead.
-    self.tracks holds every chained observation, mature or not; _process_node_landmarks (in
-    _run_gtsam) is what decides -- per node, using only that node and earlier -- whether a track is
-    mature enough to insert into the graph.
+    There is deliberately no minimum-track-length filter here, since a track's final length isn't
+    known where it starts; _process_node_landmarks decides per node whether a track is mature enough
+    for the graph.
     """
 
     def __init__(
@@ -763,10 +670,8 @@ class _LandmarkTrackBuilder:
         self._prev_flow_tid_to_tid: dict[int, int] = {}
 
     def add_keyframe(self, node: int, frame: int) -> list[int]:
-        """Process the keyframe at graph-node index `node` (original frame index `frame`),
-        extending self.tracks in place. Returns the track ids that received a new observation at
-        this node -- both continuations and freshly started tracks -- so the caller can update its
-        own node -> track-id bookkeeping for `node` alone.
+        """Process the keyframe at graph node `node` (original frame `frame`), extending
+        self.tracks. Returns the track ids that got a new observation here (continued or new).
         """
         sm = self._sm_result.frames[frame]
         touched: list[int] = []
@@ -791,9 +696,7 @@ class _LandmarkTrackBuilder:
             landmark_obs = LandmarkObservation(node, uv0u[i], uv1u[i], pts[i])
             tid = self._prev_flow_tid_to_tid.get(flow_tid)
             if tid is None:
-                # A brand-new track: gate its depth now, using only this (its first) observation
-                # -- the same check the old batch version made from obs[0] once a track's full
-                # extent was known, just made at obs[0]'s own time instead of at the end.
+                # New track: gate its depth on this first observation.
                 if not (self._depth_min < landmark_obs.point_cam0[2] < self._depth_max):
                     continue
                 tid = self._next_tid
@@ -813,49 +716,28 @@ def _scan_keyframes(
     N: int,
     on_progress: Optional[Callable[[float], None]] = None,
 ) -> tuple[list[int], list[np.ndarray]]:
-    """Single per-frame PnP scan that yields BOTH the factor-graph nodes and a per-frame PnP
-    trajectory, so the ref->frame ORB matching (the SLAM stage's dominant cost) is done once
-    rather than separately for keyframe selection and the PnP diagnostic.
+    """Batch version of _KeyframeScanner (unused by the app).
 
-    Adaptive keyframing: a single PnP from the current reference keyframe to frame i yields both
-    signals we need at once -- the temporal-match count (covisibility with the reference, which
-    decays as we move away) and the relative pose (motion since the reference). We open a new
-    keyframe when overlap drops below a fraction of the post-keyframe baseline, when enough
-    translation/rotation has accrued, or when a hard frame cap is hit -- all clamped by a min gap
-    so we never place near-duplicate nodes. Compared to a fixed stride this keeps large,
-    well-conditioned baselines when the camera moves fast and avoids zero-parallax nodes when it
-    hovers. The chained relative poses are also returned as a per-frame cam0 dead-reckoning
-    trajectory for the PnP diagnostic view.
+    A PnP from the current reference keyframe to frame i gives covisibility (match count) and
+    relative pose; a keyframe opens on weak overlap, enough motion, or a hard time cap, all clamped
+    by a minimum gap. Also returns the chained poses as a per-frame dead-reckoning trajectory.
     """
     MIN_GAP = 3                     # never place keyframes closer than this (avoid duplicate nodes)
-    # Time-based, not frame-count: a frame-count cap silently doubles its effective time span
-    # whenever the camera's actual frame rate drops below the nominal 20Hz it was tuned for (e.g.
-    # cam0 dropping to ~10Hz during V2_03_difficult's ~65-75s exposure glitch), which is exactly
-    # when this bound on IMU-only preintegration drift matters most. 0.75s = 15 frames at 20Hz,
-    # matching the original tuning.
+    # Time-based, not frame-count, so a camera frame-rate drop doesn't silently widen the gap
+    # (e.g. V2_03_difficult's exposure glitch).
     MAX_GAP_S = 0.75                # force a keyframe at least this often (bound IMU preint. drift)
     COVIS_RATIO = 0.6               # new keyframe once covisibility falls below this * baseline
     TRANS_THRESH = 0.2              # ... or once translation since the reference exceeds this [m]
     ROT_THRESH = np.deg2rad(10.0)   # ... or rotation exceeds this [rad]
-    # This probe only needs a covisibility *count* and a rough relative pose to decide where to
-    # place nodes -- not a precise reconstruction. ORB brute-force matching is O(features^2) and
-    # dominates the whole SLAM stage, so match only the strongest PROBE_N descriptors (ORB returns
-    # them response-ordered). The covisibility ratio is scale-free (baseline and current are both
-    # capped the same way), so placement is essentially unchanged at a fraction of the cost.
+    # Probe with only the strongest PROBE_N descriptors (ORB returns them response-ordered):
+    # the covisibility ratio is scale-free and brute-force matching dominates the cost.
     PROBE_N = 500
-    # Never anchor a graph node on a "dead-vision" frame -- one with too few stereo matches to
-    # triangulate/observe landmarks (motion blur, low texture). Such a keyframe gets no landmark
-    # reprojection factors, so its pose leans entirely on a noisy chained PnP + the IMU factor;
-    # ISAM2 then reconciles their disagreement by spiking the gyro bias, corrupting the pose and
-    # injecting a permanent trajectory offset (see the ~20 s failure on MH_02_easy). The floor is
-    # ~1st percentile of per-frame stereo-match counts, so it only rejects the genuinely starved
-    # tail, not ordinary low-overlap keyframes. Decided the moment each candidate is proposed (see
-    # _accept_keyframe below), not in a later pass over the finalized list.
+    # A node on a "dead-vision" frame (blur, low texture) gets no reprojection factors, so
+    # ISAM2 explains the mismatch by spiking the gyro bias and corrupts the pose (seen on
+    # MH_02_easy). The floor is ~1st percentile of per-frame stereo-match counts.
     MIN_KF_MATCHES = 80
-    # A dead-vision candidate is merged into the ongoing IMU-only gap rather than becoming its own
-    # node -- but only up to this bound, so a run of dead-vision candidates can't open an
-    # unbounded gap; past it, keep the candidate anyway as the least-bad option, to cap
-    # preintegration drift. Time-based (see MAX_GAP_S above) for the same reason.
+    # A dead-vision candidate is merged into the IMU-only gap, but only up to this bound; past
+    # it, keep the candidate to cap preintegration drift.
     DROP_MAX_GAP_S = 2 * MAX_GAP_S
 
     def _stereo_count(frame_idx: int) -> int:
@@ -864,13 +746,9 @@ def _scan_keyframes(
     keyframes = [0]
 
     def _accept_keyframe(candidate: int) -> None:
-        """Add `candidate` as a keyframe, unless it landed on dead vision *and* doing so wouldn't
-        open too wide an IMU-only gap -- in which case it's silently merged into the gap instead.
-        Uses only `candidate`'s own (already-available) stereo count and the last *kept*
-        keyframe's timestamp -- never anything about a candidate not yet proposed. No exemption
-        for whichever candidate turns out to be the last one: the same DROP_MAX_GAP_S bound
-        that already governs every interior merge governs the tail too (a real-time stream has
-        no "last frame" to special-case in the first place).
+        """Add `candidate` as a keyframe unless it is dead-vision and merging wouldn't open too wide
+        an IMU-only gap. Uses only the candidate's stereo count and the last kept keyframe's
+        timestamp.
         """
         elapsed_s = _elapsed_s(stereo_matching_result.frames[candidate].timestamp_ns,
                                stereo_matching_result.frames[keyframes[-1]].timestamp_ns)
@@ -906,9 +784,8 @@ def _scan_keyframes(
             continue
 
         step = _rvec_tvec_to_transform(rvec, tvec)
-        # poses[ref_idx] is always populated by the time it's read here (poses[0] is seeded
-        # above, and ref_idx only ever points at an already-visited frame) -- Pylance can't
-        # prove that invariant from the list's `Optional[np.ndarray]` element type.
+        # poses[ref_idx] is always populated here (seeded at 0; ref_idx only points at
+        # visited frames).
         poses[i] = poses[ref_idx] @ step  # type: ignore[operator]
 
         if ref_covis is None:  # first frame after a keyframe sets the covisibility baseline
@@ -930,21 +807,8 @@ def _scan_keyframes(
             ref_idx, ref_covis = i, None
         i += 1
 
-    # No forced keyframe at the last frame of the window, and no exemption from the dead-vision
-    # merge either. There used to be both: an unconditional `keyframes.append(N - 1)` if the loop
-    # hadn't already placed one there, and a separate pass afterward that dropped dead-vision
-    # candidates from everywhere *except* whichever one turned out to be first or last. Both
-    # required knowing where the data ends -- true for this offline/windowed tool, never true for
-    # a live stream, which just keeps going. Neither is needed: MAX_GAP_S already guarantees a
-    # keyframe candidate at least every 0.75s regardless of motion, and DROP_MAX_GAP_S (in
-    # _accept_keyframe, applied uniformly now, including to whatever candidate turns out to be
-    # last) bounds how much further a dead-vision candidate can push that gap -- so the tail is
-    # never more than DROP_MAX_GAP_S short of wherever the window actually ends, a small bounded
-    # difference, not an unrepresented trajectory segment. The per-frame dead-reckoning trajectory
-    # (`poses`, returned alongside keyframes) still covers every frame up to N-1 regardless; only
-    # the GTSAM graph's own last node can land short of the requested window's end. (frame 0 stays
-    # unconditionally exempt from the dead-vision check -- not a lookahead issue, since it's
-    # simply wherever this scan starts, never a decision made using data from later frames.)
+    # No forced keyframe at the window's last frame (that would need to know where the data
+    # ends): MAX_GAP_S and DROP_MAX_GAP_S already bound the tail gap.
 
     # Forward-fill any frame that never received a pose (rare: skipped by an exception jump).
     last = np.eye(4)
@@ -956,19 +820,11 @@ def _scan_keyframes(
 
 
 class _KeyframeScanner:
-    """Incremental version of the adaptive-keyframing PnP scan above (_scan_keyframes): the exact
-    same algorithm -- a per-frame PnP against a floating reference decides both keyframe placement
-    and a per-frame dead-reckoning pose -- restructured so a caller feeds it one frame at a time
-    (add_frame) as that frame's fd/sm becomes available, instead of handing it the fully
-    materialized [0, N) result up front.
+    """Incremental version of _scan_keyframes, fed one frame at a time via add_frame(i).
 
-    add_frame(i) requires frame i's own fd/sm to already be present in the
-    feature_detection_result/stereo_matching_result passed to __init__ (both are the same
-    incrementally-growing containers the caller's own per-frame loop is building) -- a frame after
-    i is never touched. Returns the frame index(es), if any, that became a keyframe as a direct
-    result of processing frame i: almost always 0 or 1, occasionally 2 -- mirroring
-    _scan_keyframes' original while loop, which could resolve an earlier reference frame's fate
-    (via the exception-retry path) while handling the frame it was actually called for.
+    Frame i's fd/sm must already be in the result containers passed to __init__; later frames are
+    never touched. Returns the frame indices that became keyframes from processing frame i: usually
+    0 or 1, occasionally 2 (the exception-retry path can resolve an earlier reference's fate).
     """
     MIN_GAP = 3
     MAX_GAP_S = 0.75
@@ -989,10 +845,8 @@ class _KeyframeScanner:
         self._fd_result = feature_detection_result
         self._sm_result = stereo_matching_result
         self.keyframes: list[int] = [0]
-        # Pre-sized (not append-only): the original writes poses[kf] for whatever kf the
-        # exception-retry path resolves, which isn't always the highest index reached so far --
-        # see add_frame's docstring. Sizing to `n` up front is a memory reservation for this
-        # window's known frame count, not a read of any frame's content ahead of its own turn.
+        # Pre-sized: the exception-retry path can write poses[kf] for a kf that isn't the
+        # highest index reached so far.
         self._poses: list[Optional[np.ndarray]] = [None] * n
         self._poses[0] = np.eye(4)
         self._ref_idx = 0
@@ -1022,12 +876,9 @@ class _KeyframeScanner:
                     cur_fd.cam0_descriptors[:self.PROBE_N],
                 )
             except Exception:
-                # Overlap with the reference is gone: anchor a keyframe at the last connected
-                # frame (or one past the reference if that is already frame i-1). kf is always
-                # exactly i-1 or i (never less -- see _scan_keyframes' identical branch), so
-                # either we still owe frame i its own resolution (kf == i-1: retry against the
-                # new reference) or frame i's fate was just decided as a side effect (kf == i:
-                # nothing more to do for this call).
+                # Overlap with the reference is gone: anchor a keyframe at the
+                # last connected frame (kf is i-1 or i). If i-1, retry frame i
+                # against the new reference; if i, nothing more to do.
                 kf = max(i - 1, self._ref_idx + 1)
                 got = self._accept_keyframe(kf)
                 if got is not None:
@@ -1075,10 +926,7 @@ class _KeyframeScanner:
         return filled
 
     def current_poses(self, up_to_frame: int) -> list[np.ndarray]:
-        """Forward-filled poses for frames [0, up_to_frame] -- unlike finalize(), safe to call
-        mid-scan (before every frame in the window has been fed via add_frame), for a caller that
-        wants to render the dead-reckoning trajectory as it grows.
-        """
+        """Forward-filled poses for frames [0, up_to_frame]; safe to call mid-scan."""
         return self._forward_fill(self._poses[:up_to_frame + 1])
 
     def finalize(self) -> list[np.ndarray]:
@@ -1096,32 +944,19 @@ def _run_gtsam(
     gravity: np.ndarray,
     keyframe_indices: list[int],
     on_progress: Callable[[float, str], None],
-    # Runs automated loop-closure detection (_LoopClosureDetector) and inserts whatever it finds
-    # into this graph, using LOOP_CLOSURE_ROT_SIGMA/TRANS_SIGMA with plain Gaussian noise. Off by
-    # default -- see SlamSolver.__init__'s enable_loop_closure for why. Ignored if
-    # extra_loop_closures below is given explicitly (manual override always wins over
-    # auto-detection).
+    # Run automated loop-closure detection and insert what it finds. Ignored if
+    # extra_loop_closures is given.
     enable_loop_closure: bool = False,
-    # Manual override / test hook (see tmp/investigate/v2_03_loop_closure_phase*.py). Frame
-    # indices (not node indices) -- resolved to nodes internally once keyframe_indices is final.
-    # noise_mode in {"gaussian", "huber", "dcs"} -- use "gaussian"; see the noise construction
-    # below (at the point of use) for why the other two underperform.
-    # Defaults to a no-op: omitting both this and enable_loop_closure leaves _run_gtsam's output
-    # byte-for-byte unchanged.
+    # Manual override / test hook, in frame indices (resolved to nodes internally). noise_mode
+    # is "gaussian", "huber" or "dcs"; use "gaussian".
     extra_loop_closures: Optional[list[LoopClosureFactor]] = None,
-    # Test-only introspection hook (see v2_03_loop_closure_phase2b.py): if provided, filled with
-    # {'isam2': isam2} so a caller can run its own batch re-optimization over the full factor
-    # graph afterward, without _run_gtsam's return signature changing for existing callers.
+    # Test-only: if given, filled with {'isam2': isam2}.
     debug_out: Optional[dict] = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray, list[int]]:
     N = len(stereo_matching_result.frames)
     imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
-    # Mark read-only: these absolute-ns timestamps are a lookup table we only ever *read* (via
-    # `imu_timestamps_ns - cam_timestamps_ns[0]` etc.). Without this, NumPy's temporary-elision
-    # optimization can execute that subtraction in place -- when this array is large (long IMU
-    # prefix) and has refcount 1, `a - scalar` mutates `a` and returns it -- silently turning
-    # every timestamp relative, emptying every IMU window, and producing zero-dt (degenerate)
-    # ImuFactors that make ISAM2 indeterminate. Read-only arrays are never elided.
+    # Read-only: otherwise NumPy's temporary elision can run `imu_timestamps_ns - scalar` in
+    # place, silently making every timestamp relative and emptying every IMU window.
     imu_timestamps_ns.flags.writeable = False
     imu_lin_accs      = np.array([s.linear_acceleration for s in imu_samples])
     imu_ang_vels      = np.array([s.angular_velocity for s in imu_samples])
@@ -1130,24 +965,15 @@ def _run_gtsam(
     body_T_cam0 = data.cam0_extrinsics
     cam0_T_body = np.linalg.inv(body_T_cam0)
 
-    # Estimate the gravity direction in the body frame *at frame 0* by averaging the
-    # accelerometer over a short window there (at rest it senses specific force, "up").
-    # A global most-static window would measure gravity at a different body orientation,
-    # because the body is generally rotated differently by the time it settles; integrating
-    # the gyro across that gap drifts too much to correct for it reliably.
+    # Gravity direction in the body frame at frame 0: average the accelerometer over a short
+    # window there. A global most-static window would be at a different orientation.
     grav_win = max(1, int(data.imu0_rate_hz * 0.5))
     i0 = int(np.argmin(np.abs(imu_timestamps_ns - cam_timestamps_ns[0])))
     gravity_in_body = imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
-    # Progress budget across this stage's sub-steps (fractions of the GTSAM phase):
-    #   setup                [0.00, 0.10]
-    #   ISAM2 forward loop   [0.10, 0.92]
-    #   reprojection metrics [0.92, 1.00]
-    # No separate loop-closure-search slice: detection (when enabled) runs interleaved with the
-    # ISAM2 loop, one query per new keyframe, rather than as an upfront batch pass -- so its cost
-    # is already spread across the same range the loop's own progress reports advance through.
-    # keyframe_indices (from the shared _scan_keyframes pass) maps graph node j -> original frame
-    # index; gaps between them vary since nodes are chosen adaptively (covisibility + motion).
+    # Progress budget (fractions of the GTSAM phase): setup [0, 0.10], ISAM2 loop [0.10,
+    # 0.92], metrics [0.92, 1]. Loop-closure detection runs interleaved with the ISAM2 loop.
+    # keyframe_indices maps graph node j -> frame index.
     K = len(keyframe_indices)
 
     X = lambda i: gtsam.symbol('x', i)
@@ -1167,35 +993,22 @@ def _run_gtsam(
     # Loose enough that the optimizer can actually estimate the (constant) IMU bias. A tight
     # prior here pins bias to zero, so the real accelerometer bias double-integrates into drift.
     PRIOR_BIAS_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 0.1)
-    # Per-step (adjacent-frame) PnP sigmas. A keyframe constraint chains the intermediate steps,
-    # so its error accumulates like a random walk -> scale the sigmas by sqrt(gap) per interval,
-    # where gap is that interval's frame count. Built inside the loop since gaps now vary.
+    # Per-step (adjacent-frame) PnP sigmas. A keyframe constraint chains the steps, so sigmas
+    # are scaled by sqrt(gap) in the loop.
     PNP_STEP_SIGMAS  = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05])
-    # Random-walk noise letting the (per-keyframe) IMU bias evolve between keyframes instead of
-    # being pinned to a single constant. The accumulated std over an interval of duration dt is
-    # (diffusion_density * sqrt(dt)) per axis, so it is built inside the loop (keyframe gaps vary).
-    # Both terms use the IMU datasheet's physical diffusion (EuRoC ADIS16448, imu0/sensor.yaml).
-    # The gyro term was tightened first -- the old blanket sigma=0.1 permitted ~1 rad/s jumps per
-    # keyframe and let the optimizer absorb a pose/rotation error by spiking the gyro bias (the
-    # ~20 s MH_02_easy failure), forcing that residual into the (vision-correctable) pose instead.
-    # The accel term used to stay at the same loose blanket 0.1 (with no sqrt(dt) scaling at all)
-    # to "soak up unmodeled gravity/scale error" -- but that let accel bias free-walk in axes vision
-    # can't correct (e.g. z on a near-level flight segment, where there's almost no vertical
-    # parallax to check it against), producing a near-linear position drift over tens of seconds.
-    # Tightened to the same physical-diffusion treatment as gyro.
+    # Random-walk noise letting the IMU bias evolve between keyframes: std over dt is
+    # density*sqrt(dt) per axis, with the datasheet diffusion (EuRoC imu0/sensor.yaml). Both
+    # terms are tight on purpose: a loose gyro sigma let the optimizer absorb pose error by
+    # spiking the gyro bias (MH_02_easy ~20 s), and a loose accel sigma let accel bias drift
+    # in axes vision can't correct (z on level flight).
     GYRO_BIAS_RW  = 1.9393e-05   # [rad/s^2/sqrt(Hz)]  gyroscope_random_walk from imu0/sensor.yaml
     ACCEL_BIAS_RW = 3.0000e-03   # [m/s^3/sqrt(Hz)]    accelerometer_random_walk from imu0/sensor.yaml
-    # Fallback regularizer for a keyframe that ends up with neither a PnP between-factor nor any
-    # landmark reprojection factor -- e.g. fast motion where feature tracks break and the chained
-    # PnP fails. Such a pose would hang off only its IMU factor (yaw about gravity unobservable),
-    # making ISAM2's system indeterminate. A weak prior at the IMU-predicted pose pins the free
-    # directions without fighting real constraints; it is far looser than PnP/reprojection noise.
+    # Weak prior at the IMU-predicted pose for a keyframe with neither a PnP factor nor any
+    # reprojection factor, which would otherwise leave ISAM2 indeterminate (yaw unobservable).
     FALLBACK_POSE_NOISE = gtsam.noiseModel.Isotropic.Sigma(6, 1.0)
 
-    # --- Landmarks (rung 2: explicit structure / bundle adjustment) ---------------------
-    # Persistent 3D landmarks tied to poses by reprojection factors. A point seen across
-    # several keyframes becomes one shared variable with many rigid constraints (errors
-    # average), instead of a chain of noisy relative PnP poses (errors compound).
+    # --- Landmarks --- Persistent 3D points tied to poses by reprojection factors: errors
+    # average across observations instead of compounding along a PnP chain.
     MIN_TRACK_LEN   = 3       # observations before a landmark is trusted enough to add
     PNP_FALLBACK_COVIS = 15   # if a keyframe pair shares >= this many landmarks, drop PnP
     PX_SIGMA        = 1.5     # reprojection sigma [px]
@@ -1211,47 +1024,25 @@ def _run_gtsam(
     PX_NOISE = gtsam.noiseModel.Robust.Create(
         gtsam.noiseModel.mEstimator.Huber.Create(1.345),
         gtsam.noiseModel.Isotropic.Sigma(2, PX_SIGMA))
-    # Weak prior anchoring each landmark to its stereo-triangulated init. Far / low-parallax
-    # points are barely constrained along the viewing ray and would make ISAM2's system
-    # indeterminate; this regularizes them. It is orders of magnitude looser than the pixel
-    # factors, so it is negligible for well-observed landmarks.
+    # Weak prior anchoring each landmark to its triangulated init; regularizes far/low-
+    # parallax points that would make ISAM2 indeterminate, negligible next to the pixel
+    # factors.
     LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
 
     on_progress(0.0, "Building landmark tracks...")
-    # Fed one keyframe at a time below (node 0 here, node j+1 inside _add_keyframe_to_graph, right
-    # before that node's factors are built) instead of handed the whole keyframe_indices array up
-    # front -- see _LandmarkTrackBuilder's docstring. `tracks` aliases the builder's own dict, so
-    # later add_keyframe calls are visible through it without any extra bookkeeping.
+    # Fed one keyframe at a time below (node 0 here, node j+1 in _add_keyframe_to_graph).
+    # `tracks` aliases the builder's dict.
     track_builder = _LandmarkTrackBuilder(
         data, feature_detection_result, stereo_matching_result, optical_flow_result,
         DEPTH_MIN, DEPTH_MAX)
     tracks = track_builder.tracks
 
-    # No landmark-starvation keyframe drop here. There used to be one: a keyframe whose per-node
-    # landmark-track count fell under a MIN_KF_LANDMARKS threshold got merged into the IMU-only
-    # gap between its neighbours, on the theory that a node with too few reprojection factors
-    # hangs entirely off the IMU factor and lets ISAM2 explain the shortfall by spiking the bias
-    # instead of the pose (see the accel-bias runaway this caused on MH_04_difficult ~46s,
-    # historically). Two problems with it:
-    #   - It's non-causal even in its best form: whether a track clears MIN_TRACK_LEN isn't known
-    #     until MIN_TRACK_LEN-1 keyframes after it starts (tracks are contiguous runs, so this is
-    #     bounded, not unbounded -- but it's still a lookahead a real-time caller would have to
-    #     buffer for).
-    #   - It's no longer needed for the failure mode it was built for. _add_keyframe_to_graph
-    #     already has FALLBACK_POSE_NOISE (below) as a weak prior for exactly the case this gate
-    #     was trying to avoid -- a node with neither a PnP between-factor nor any reprojection
-    #     factor. Tested removing this gate entirely (keep every _scan_keyframes keyframe, causal
-    #     by construction since there's no drop decision to make) against the two sequences that
-    #     originally motivated it plus two more: mean ATE improved or was statistically flat on
-    #     all four (MH_02_easy 0.042m -> 0.019m, MH_04_difficult 0.333m -> 0.224m,
-    #     MH_05_difficult 0.521m -> 0.532m, V2_03_difficult 3.435m -> 0.514m). No regression found.
-    #   Trade-off: keeps more keyframes (e.g. 391 vs 207 on V2_03_difficult's 0-200s window), so
-    #   more ISAM2 work per run.
+    # No landmark-starvation keyframe drop: it was non-causal (track maturity isn't known
+    # until later keyframes) and FALLBACK_POSE_NOISE already covers a node with no
+    # constraints. Removing it improved or left mean ATE flat on MH_02, MH_04, MH_05 and
+    # V2_03.
 
-    # Manual extra_loop_closures (if given) always overrides auto-detection rather than adding to
-    # it -- keeps the test/override path from Phase 2/3 exact and predictable. It's a batch,
-    # fully-offline API by nature (the caller already knows every closure up front), so it's
-    # resolved to node indices here, all at once, same as it always was.
+    # Manual extra_loop_closures always override auto-detection; resolved to nodes up front.
     did_auto_detect_loop_closures = enable_loop_closure and extra_loop_closures is None
     loop_closures_by_node: dict[int, list[_LoopClosureEdge]] = {}
     if extra_loop_closures:
@@ -1263,9 +1054,7 @@ def _run_gtsam(
                 from_node, to_node, factor.body_relative_pose, factor.rot_sigma, factor.trans_sigma,
                 factor.noise_mode))
 
-    # Auto-detection, when it runs, is fed one keyframe at a time from inside the ISAM2 loop below
-    # (loop_detector.add_keyframe, alongside track_builder.add_keyframe) instead of scanning the
-    # whole finalized keyframe set up front -- see _LoopClosureDetector's docstring.
+    # Auto-detection is fed one keyframe at a time from inside the ISAM2 loop below.
     loop_detector = (
         _LoopClosureDetector(data, feature_detection_result, stereo_matching_result)
         if did_auto_detect_loop_closures else None)
@@ -1276,32 +1065,22 @@ def _run_gtsam(
             base_noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([edge.rot_sigma] * 3 + [edge.trans_sigma] * 3))
             if edge.noise_mode == "huber":
-                # Linear (not quadratic) loss beyond ~1.35 sigma -- caps a *correct* closure's
-                # pull once the prior disagreement is many multiples of sigma, which it always is
-                # right after a long blackout (measured: ~30% of the correction "gaussian" gets).
-                # Left in as an option; "gaussian" is what's actually used by auto-detection.
+                # Linear loss beyond ~1.35 sigma caps a correct closure's pull
+                # after a long blackout (~30% of gaussian's correction). Option
+                # only; auto-detection uses gaussian.
                 loop_noise = gtsam.noiseModel.Robust.Create(
                     gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
             elif edge.noise_mode == "dcs":
-                # DCS's scale factor is min(1, 2c / (c + ||r||^2)) where ||r||^2 is the whitened
-                # (chi-squared) residual -- so c must be calibrated to this factor's degrees of
-                # freedom (6, for a Pose3 BetweenFactor), not left at the textbook-example c=1.
-                # A genuinely-consistent 6-DOF residual has ||r||^2 around 6 on average; c=1
-                # measured this down to a ~0.29 scale for an *already-correct* closure (verified
-                # empirically: it made a 94-closure test on V2_03_difficult behave identically to
-                # having no closures at all). c=6 keeps full trust up to the expected value and
-                # only meaningfully down-weights past the ~12.6 (95th-percentile chi2_6) mark --
-                # i.e. genuine outliers, not closures merely large-but-correct after a long
-                # blackout.
+                # c must match this factor's 6 degrees of freedom (a consistent
+                # residual has chi-squared ~6); c=1 down-weighted already-correct
+                # closures to ~0.29.
                 loop_noise = gtsam.noiseModel.Robust.Create(
                     gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
             else:
                 loop_noise = base_noise
             factors.add(gtsam.BetweenFactorPose3(X(edge.from_node), X(edge.to_node), delta, loop_noise))
 
-    # node -> track ids observed there; and per-interval covisibility for the PnP gate. Filled
-    # incrementally as each node is added below (node 0 here, node j+1 inside
-    # _add_keyframe_to_graph) rather than derived from the full `tracks` dict up front.
+    # node -> track ids observed there, filled as each node is added.
     nodes_to_tracks: dict[int, list[int]] = {jj: [] for jj in range(K)}
     node_seen: list[set[int]] = [set() for _ in range(K)]
 
@@ -1331,10 +1110,8 @@ def _run_gtsam(
                                 factors: gtsam.NonlinearFactorGraph,
                                 values: gtsam.Values) -> int:
         """Add reprojection factors for landmarks observed at node jj (X(jj) already staged).
-
-        Returns how many landmark observations were staged *at node jj* -- i.e. how many
-        projection factors now reference X(jj). The caller uses this to tell whether the new
-        pose picked up any structure constraint (see the underconstrained-pose guard below).
+        Returns how many observations were staged at jj, so the caller can tell whether the new pose
+        got a structure constraint.
         """
         n_at_node = 0
         for tid in nodes_to_tracks[jj]:
@@ -1363,9 +1140,8 @@ def _run_gtsam(
 
     isam2 = gtsam.ISAM2(gtsam.ISAM2Params())
 
-    # Anchor the GTSAM navigation frame G to be gravity-aligned: rotate body-frame-0
-    # so its measured gravity lands on the nav-frame gravity axis. At rest the
-    # accelerometer reads "up" (specific force), so R_G_body0 @ gravity_in_body = -gravity.
+    # Gravity-align the nav frame: rotate body-0 so its measured gravity (the accelerometer
+    # reads "up") lands on -gravity.
     R_G_body0 = _align_vectors(gravity_in_body, -gravity)
     pose0 = gtsam.Pose3(gtsam.Rot3(R_G_body0), gtsam.Point3(0.0, 0.0, 0.0))
 
@@ -1379,10 +1155,9 @@ def _run_gtsam(
     isam2.update(f0, v0)
 
     def _add_keyframe_to_graph(j: int) -> None:
-        """Add keyframe j+1 to the graph: an IMU factor from the preintegrated window since
-        keyframe j, a chained-PnP between-factor when landmark covisibility isn't yet strong
-        enough to constrain the pose on its own, reprojection factors for any landmarks observed
-        at the new keyframe, and any loop-closure factors targeting it -- then commit the update.
+        """Add keyframe j+1: an IMU factor from the preintegrated window since j, a chained-PnP
+        between-factor when landmark covisibility is weak, reprojection factors for its landmarks,
+        and any loop-closure factors; then commit the update.
         """
         est = isam2.calculateEstimate()
         pose_i = est.atPose3(X(j))
@@ -1394,10 +1169,8 @@ def _run_gtsam(
         # Extend landmark tracks to this node before anything below reads node_seen[j+1] or
         # tracks[tid] for it (strong_covis just below, then _process_node_landmarks).
         _register_node_tracks(j + 1, track_builder.add_keyframe(j + 1, keyframe_indices[j + 1]))
-        # Same for auto-detected loop closures: search for a revisit at this keyframe now, against
-        # whatever's been added so far. Anything this returns is edge(s) whose consolidation
-        # cluster just closed -- their own to_node may be an earlier node than j+1 (added and
-        # optimized in a previous update), not necessarily this one.
+        # Search for a revisit at this keyframe. Returned edges are from a cluster that
+        # just closed; their to_node may be earlier than j+1.
         new_loop_edges = loop_detector.add_keyframe(j + 1, keyframe_indices[j + 1]) if loop_detector is not None else []
 
         new_factors, new_values = gtsam.NonlinearFactorGraph(), gtsam.Values()
@@ -1425,19 +1198,12 @@ def _run_gtsam(
         pose_init = nav_j.pose()
         vel_init  = nav_j.velocity()
 
-        # Build the keyframe->keyframe PnP constraint by chaining the intermediate
-        # adjacent-frame PnP steps. Each step is between neighbouring frames, where feature
-        # overlap is high, so it is well-conditioned; a single direct match across the full
-        # ~10-frame gap would have little overlap and fail often. If any step fails, drop the
-        # whole constraint for this interval and let the IMU factor carry it.
-        #
-        # PnP is now a *fallback*: when this keyframe pair already shares plenty of *inserted*
-        # landmarks, their reprojection factors constrain the relative pose directly, so adding
-        # PnP on top would double-count the same pixels. Only count landmarks that are already
-        # mature (inserted) and seen at both endpoints -- those are the ones that actually
-        # contribute factors linking X(j) and X(j+1) after this update. A track that is merely
-        # covisible but not yet mature contributes nothing here, so PnP must still carry it,
-        # otherwise the new pose would be left underconstrained (indeterminate system).
+        # Chain adjacent-frame PnP steps for the keyframe-to-keyframe constraint (a direct
+        # match across the gap would have little overlap); on any failure drop it and let
+        # the IMU carry the interval. PnP is only a fallback: when the pair already shares
+        # enough inserted landmarks, their reprojection factors constrain the pose and PnP
+        # would double-count the pixels. Only inserted (mature) landmarks seen at both
+        # ends count.
         strong_covis = sum(
             1 for tid in (node_seen[j] & node_seen[j + 1]) if tid in inserted_landmarks)
         pnp_added = False
@@ -1468,13 +1234,10 @@ def _run_gtsam(
         new_values.insert(X(j + 1), pose_init)
         new_values.insert(V(j + 1), vel_init)
         new_values.insert(B(j + 1), bias_i)
-        # Reprojection factors for landmarks observed at the new keyframe. X(j+1) is staged in
-        # new_values (valid within this same update); landmark inits use poses from `est`, all
-        # of which predate node j+1, so they are already in the estimate.
+        # Landmark inits use poses from `est`, which all predate node j+1.
         n_proj_at_next = _process_node_landmarks(j + 1, est, new_factors, new_values)
-        # Guard: never add a keyframe without a relative constraint. If neither the PnP fallback
-        # nor any landmark reprojection factor touched X(j+1), it would hang off only its IMU
-        # factor and make ISAM2 indeterminate. Anchor it with a weak prior at the IMU prediction.
+        # Guard: a keyframe with neither PnP nor reprojection factors hangs off its IMU
+        # factor alone (ISAM2 indeterminate); anchor it with a weak prior.
         if not pnp_added and n_proj_at_next == 0:
             new_factors.add(gtsam.PriorFactorPose3(X(j + 1), pose_init, FALLBACK_POSE_NOISE))
 
@@ -1490,9 +1253,7 @@ def _run_gtsam(
         _add_keyframe_to_graph(j)
 
     if loop_detector is not None:
-        # Whatever cluster was still open when the run ended (its to_node is necessarily <= K-1,
-        # already in the graph) -- add_keyframe only closes a cluster when a *later* candidate
-        # arrives, so the very last one never gets that chance without this.
+        # A cluster is only closed by a later candidate, so the last one needs this flush.
         final_edges = loop_detector.flush()
         if final_edges:
             tail_factors = gtsam.NonlinearFactorGraph()
@@ -1507,9 +1268,8 @@ def _run_gtsam(
     velocities = [final.atVector(V(j)) for j in range(K)]
     biases = [final.atConstantBias(B(j)).vector() for j in range(K)]  # [accel(3), gyro(3)]
 
-    # Per-keyframe landmark-quality metrics: reprojection RMSE [px] and how many landmarks were
-    # observed there. Reproject each final landmark into every keyframe that saw it, through
-    # both cameras, and compare to the (undistorted) measurement.
+    # Per-keyframe reprojection RMSE and landmark count: reproject each landmark into every
+    # keyframe that saw it, through both cameras.
     inv_Twc0 = [np.linalg.inv(pm @ body_T_cam0) for pm in poses]
     inv_Twc1 = [np.linalg.inv(pm @ data.cam1_extrinsics) for pm in poses]
     sq_px = np.zeros(K)
@@ -1542,23 +1302,12 @@ def _run_gtsam(
 
 
 class _GtsamBuilder:
-    """Incremental version of the ISAM2 graph construction in _run_gtsam above: the exact same
-    per-keyframe update (IMU factor, chained-PnP fallback, landmark reprojection factors,
-    loop-closure factors), restructured so a caller feeds it one *new* keyframe at a time
-    (add_keyframe) as soon as _KeyframeScanner confirms it, instead of handing it a complete
-    keyframe_indices list up front.
+    """Incremental _run_gtsam: feed it one new keyframe at a time via add_keyframe(frame_idx).
 
-    add_keyframe(frame_idx) requires every frame's fd/sm from the previous keyframe through
-    frame_idx to already be present in the feature_detection_result/stereo_matching_result passed
-    to __init__ (needed for the chained-PnP fallback, which steps through every intermediate
-    frame) -- a frame after frame_idx is never touched. optical_flow_result only needs frame_idx's
-    own entry (track_builder/loop_detector index by frame, not by interval).
-
-    Scope note: unlike _run_gtsam, this does not support the manual extra_loop_closures/debug_out
-    test hooks -- those are an inherently batch, fully-offline API (the caller already knows every
-    closure up front; see LoopClosureFactor's docstring) used only by tmp/investigate's phase2/
-    phase3 scripts, which call _run_gtsam directly and are unaffected by this class existing
-    alongside it.
+    Per keyframe: IMU factor, chained-PnP fallback, landmark reprojection factors, loop-closure
+    factors. Requires every frame's fd/sm from the previous keyframe through frame_idx (the PnP
+    fallback steps through intermediate frames); later frames are never touched. Does not support
+    _run_gtsam's extra_loop_closures/debug_out test hooks.
     """
 
     def __init__(
@@ -1720,9 +1469,9 @@ class _GtsamBuilder:
             factors.add(gtsam.BetweenFactorPose3(self._X(edge.from_node), self._X(edge.to_node), delta, loop_noise))
 
     def add_keyframe(self, frame_idx: int) -> None:
-        """Add a new node for `frame_idx` to the graph, linked to the previously-added node by an
-        IMU factor (and a chained-PnP fallback when landmark covisibility isn't yet strong enough
-        on its own) -- see _run_gtsam's _add_keyframe_to_graph for the algorithm this mirrors.
+        """Add a node for `frame_idx`, linked to the previous node by an IMU factor and, when
+        landmark covisibility is weak, a chained-PnP fallback (see _run_gtsam's
+        _add_keyframe_to_graph).
         """
         j = self._j
         est = self._isam2.calculateEstimate()
@@ -1802,12 +1551,8 @@ class _GtsamBuilder:
     def _reprojection_for_node(
         self, node: int, final: gtsam.Values, inv_Twc0: list[np.ndarray], inv_Twc1: list[np.ndarray],
     ) -> tuple[float, float, float]:
-        """sq_px/n_px/n_lm contributed by every inserted landmark observed at exactly this node,
-        using the given (already current) camera-from-world transforms and landmark estimate --
-        the per-node unit of work current_estimate's caching selectively redoes. Visits the same
-        (landmark, observation) pairs the single pass over self._inserted_landmarks used to,
-        just grouped by node instead of by landmark, via self._nodes_to_tracks (already maintained
-        for the PnP covisibility gate) instead of re-scanning every landmark's whole history.
+        """sq_px, n_px and n_lm contributed by every inserted landmark observed at exactly this
+        node, grouped by node via self._nodes_to_tracks.
         """
         sq_px = 0.0
         n_px = 0.0
@@ -1839,28 +1584,14 @@ class _GtsamBuilder:
     def current_estimate(
         self, recompute_window: Optional[int] = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
-        """Poses/velocities/biases/reprojection metrics for every node added so far. Unlike
-        finalize(), doesn't flush any still-open loop-closure cluster (flushing early would
-        prematurely close a cluster that a later keyframe might still have joined) -- safe to call
-        after any keyframe, not just the last one, for a caller that wants to render a
-        live-updating partial trajectory.
+        """Poses, velocities, biases and reprojection metrics for every node added so far. Safe to
+        call after any keyframe (it doesn't flush a still-open loop-closure cluster).
 
-        recompute_window: if given, only the last `recompute_window` nodes' reprojection metrics
-        are freshly recomputed from the current estimate on this call; every earlier node reuses
-        whichever value was last computed for it (cached on self._sq_px/_n_px/_n_lm, grown as new
-        nodes are added). This matters because ISAM2 keeps revising *past* poses/landmarks as new
-        keyframes arrive, not just the newest ones -- measured drift of several centimeters on a
-        settled node, converging within roughly 15-20 keyframes -- so a window trades a bounded
-        amount of staleness in *old* keyframes' displayed reprojection RMSE during a live-updating
-        run for turning this call from O(K) into O(recompute_window). 0 skips the loop entirely --
-        every node's reprojection_rmse/n_lm just reads back whatever's cached (NaN/0 for a node
-        never computed), which is what _build_partial_result now uses: this loop is purely a live
-        diagnostic (reprojection_rmse/landmark_counts feed one UI plot each -- see
-        _draw_gtsam_diagnostics -- and nothing in the graph itself), so the live preview skips it
-        completely rather than paying even a bounded per-keyframe cost for it; see
-        tmp/slam_profile_200s.html. None (the default) recomputes every node exactly, matching the
-        original behavior bit-for-bit -- finalize() always uses this, so the *final* result is
-        never affected, only intermediate live-preview snapshots (see _build_partial_result).
+        recompute_window: if given, only the last N nodes' reprojection metrics are recomputed and
+        earlier nodes reuse cached values (ISAM2 keeps revising past nodes, so cached values can go
+        stale). 0 skips the loop entirely (cached values only, NaN/0 if never computed): used for
+        live previews, since only one UI plot reads these. None recomputes every node exactly;
+        finalize() always uses it.
         """
         K = self._j + 1
         final = self._isam2.calculateEstimate()
@@ -1890,9 +1621,8 @@ class _GtsamBuilder:
         return poses, velocities, biases, reprojection_rmse, self._n_lm[:K].copy()
 
     def finalize(self) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], np.ndarray, np.ndarray]:
-        """Call once after every keyframe has been added: flushes any still-open loop-closure
-        cluster, then returns current_estimate() -- see _run_gtsam's tail for the algorithm this
-        mirrors.
+        """Call once after the last keyframe: flushes any open loop-closure cluster, then returns
+        current_estimate().
         """
         if self._loop_detector is not None:
             final_edges = self._loop_detector.flush()
@@ -1907,11 +1637,9 @@ class _GtsamBuilder:
         return self.current_estimate(recompute_window=None)
 
     def landmark_positions(self) -> np.ndarray:
-        """World-frame 3D position of every landmark the graph has inserted (self._inserted_landmarks),
-        from the current factor-graph estimate -- a sparse map, for _draw_3d_trajectory's point-cloud
-        layer. Call once, after finalize(): this is a fresh calculateEstimate() plus a pass over the
-        full (by-then-final) landmark set, the same shape of cost current_estimate's docstring already
-        flags as unsafe to repeat on every live-preview keyframe (see recompute_window=0).
+        """World-frame position of every inserted landmark, for the sparse-map layer. Call once
+        after finalize(): it does a full calculateEstimate() plus a pass over the landmark set, too
+        costly per live keyframe.
         """
         if not self._inserted_landmarks:
             return np.zeros((0, 3))
@@ -1920,17 +1648,9 @@ class _GtsamBuilder:
 
 
 def _get_full_gt_arrays(data: EuRoCMAVData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Ground-truth timestamps/positions/rotation-matrices for the *entire* dataset (every sample
-    in data.ground_truth_samples, not just the run's window) -- meant to be computed once in
-    _compute and passed into every _get_gtsam_result call, rather than each call rebuilding it
-    from scratch (215x redundant reconstruction of a 29,993-sample array on one 60s/keyframe-215
-    profiled run -- 14.9% of total run time; see tmp/slam_run_profile.html).
-
-    Deliberately left unwindowed rather than narrowed to [min_timestamp_ns, max_timestamp_ns]:
-    _get_gtsam_result searches this for the nearest ground-truth sample to each keyframe, and the
-    true nearest sample to a keyframe right at the run's start/end boundary can legitimately fall
-    just outside that window -- narrowing the search space would silently change which sample
-    "nearest" finds there.
+    """Ground-truth timestamps/positions/rotations for the entire dataset, computed once per run and
+    shared across _get_gtsam_result calls. Left unwindowed because the nearest GT sample to a
+    boundary keyframe can fall just outside the window.
     """
     gt_timestamps_ns = np.array([s.timestamp_ns for s in data.ground_truth_samples])
     gt_positions = np.array([s.position for s in data.ground_truth_samples])
@@ -1954,14 +1674,8 @@ def _get_gtsam_result(
     landmark_counts: np.ndarray,
     landmark_positions: np.ndarray,
 ) -> SlamGtsamResult:
-    """Ground-truth alignment and ATE/RPE metrics for an already-computed GTSAM trajectory.
-    Doesn't run the graph itself -- see _compute, which drives _KeyframeScanner and
-    _GtsamBuilder together in one pass and passes the resulting tuple straight in here, the same
-    way _get_pnp_result already takes a pre-computed pnp_poses rather than deriving it itself.
-
-    gt_timestamps_ns/gt_positions/gt_rotation_matrices_all come from _get_full_gt_arrays, computed
-    once per run and shared across every call -- see that function's docstring for why they cover
-    the whole dataset rather than just this run's window.
+    """Ground-truth alignment and ATE/RPE metrics for an already-computed GTSAM trajectory (see
+    _compute). The gt_* arrays come from _get_full_gt_arrays.
     """
     K = len(poses)
 
@@ -1981,18 +1695,13 @@ def _get_gtsam_result(
 
     times = np.array([_elapsed_s(f.timestamp_ns, first_timestamp_ns) for f in kf_frames])
 
-    # Per-keyframe position error vs the nearest ground-truth sample [m]. Poses are already
-    # anchored to GT at closest_cam_index (T_comp), so this is a single-point-aligned error,
-    # consistent with how positions are overlaid against GT in the view.
+    # Per-keyframe position error [m] vs the nearest GT sample; poses are single-point-
+    # anchored to GT (T_comp), as overlaid in the view.
     nearest_gt = _nearest_sorted_indices(gt_timestamps_ns, cam_timestamps_ns)
     position_errors = np.linalg.norm(world_T_body_poses[:, :3, 3] - gt_positions[nearest_gt], axis=1)
 
-    # ATE / RPE use the *raw*, un-anchored poses (before T_comp): T_comp is a full 6-DOF
-    # transform derived from one GT sample's quaternion, so it can rotate the "up" axis away from
-    # true gravity-up -- the raw poses are still exactly the gravity-aligned nav frame _run_gtsam
-    # built, which _yaw_translation_align's roll/pitch-observable assumption depends on. RPE would
-    # be unaffected either way (a constant transform cancels out of a relative pose), but ATE's
-    # yaw-only alignment would not be consistent applied to the already-anchored poses.
+    # ATE/RPE use the raw poses (before T_comp): T_comp comes from one GT quaternion and can
+    # tilt "up" away from gravity, which _yaw_translation_align's assumption depends on.
     raw_positions = np.array([p[:3, 3] for p in poses])
     raw_rotation_matrices = np.array([p[:3, :3] for p in poses])
     gt_positions_at_kf = gt_positions[nearest_gt]
@@ -2070,43 +1779,31 @@ def _compute(
     on_partial_result: Optional[Callable[[SlamResult], None]] = None,
     frontend_result: Optional[FrontendResult] = None,
 ) -> SlamResult:
-    """Runs the whole SLAM stage -- feature detection, stereo matching, optical flow, keyframe
-    selection, and GTSAM graph construction -- as one incremental pass over
-    [start_s, start_s + duration_s], instead of requiring three fully-precomputed
-    FeatureDetectionResult/StereoMatchingResult/OpticalFlowResult handed in from outside. Frame i
-    is computed (FrontendFrameComputer), then immediately offered to keyframe selection
-    (_KeyframeScanner) and, for any keyframe it produces, the pose graph (_GtsamBuilder) -- before
-    frame i+1 is ever touched. The frontend tab shows these same containers (frontend_result).
+    """Runs the whole SLAM stage as one incremental pass over [start_s, start_s + duration_s]: each
+    frame is computed (FrontendFrameComputer), then immediately offered to keyframe selection
+    (_KeyframeScanner) and, for any keyframe, the pose graph (_GtsamBuilder), before the next frame
+    is touched.
 
-    If on_partial_result is given, it's called with a full SlamResult (ground truth/IMU/extra
-    unchanged from the final one -- none of those depend on the growing SLAM estimate -- but pnp
-    and gtsam reflecting only what's been processed so far, via _KeyframeScanner.current_poses
-    and _GtsamBuilder.current_estimate) after every keyframe, not just once at the end -- for a
-    caller that wants to render the trajectory as it grows instead of only once the whole window
-    has been processed.
+    If on_partial_result is given, it's called after every keyframe with a full SlamResult
+    reflecting only what's been processed so far, to render the trajectory as it grows.
 
-    frontend_result: if given, its (initially empty) feature_detection/stereo_matching/optical_flow
-    containers are the ones filled frame by frame below, so the caller (SlamSolver.frontend_result)
-    can show the frontend's output -- live, while this runs -- without computing it a second time.
+    frontend_result: if given, its empty containers are the ones filled frame by frame, so the
+    caller can show the frontend's output live without computing it twice.
     """
     first_timestamp_ns = data.cam_timestamps_ns[0]
     min_ts = first_timestamp_ns + int(start_s * 1e9)
     max_ts = min_ts + int(duration_s * 1e9)
     timestamps = [t for t in data.cam_timestamps_ns if min_ts <= t <= max_ts]
     N = len(timestamps)
-    # SLAM runs on the frames sliced to the config's [start_s, start_s + duration_s] window, so
-    # the first/last frame that actually exists in that range mark the window start/end -- not
-    # min_ts/max_ts themselves, which may fall between two real frames. Trimming GT/IMU/extra to
-    # the same bounds makes every series' time axis begin at start_s (times stay relative to the
-    # dataset start), matching the PnP/GTSAM series that are already windowed.
+    # The first/last frame that exists in the window mark its bounds (min_ts/max_ts may fall
+    # between frames). Trimming GT/IMU/extra to them makes every series start at start_s.
     min_timestamp_ns = timestamps[0]
     max_timestamp_ns = timestamps[-1]
 
     gravity = np.array([0.0, 0.0, -9.81])
 
-    # Progress budget across the whole solver so every step advances the bar:
-    #   ground truth [0.00, 0.03]  IMU [0.03, 0.06]  frontend + keyframes + GTSAM [0.06, 0.96]
-    #   extra/finishing [0.97, 1.00]
+    # Progress: ground truth [0, 0.03], IMU [0.03, 0.06], frontend + keyframes + GTSAM [0.06,
+    # 0.96], finishing [0.97, 1].
     set_progress(0.0, "Loading ground truth...")
     gt_result = _get_ground_truth_result(data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns)
     gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all = _get_full_gt_arrays(data)
@@ -2121,17 +1818,13 @@ def _compute(
         data, first_timestamp_ns, min_timestamp_ns, max_timestamp_ns,
         gt_result.rotation_matrices, first_gt_timestamp_ns,
     )
-    # Depends only on gt_result/imu_result/gravity, all already available -- never on the growing
-    # SLAM estimate -- so it's computed once here rather than after the loop below, to be ready
-    # for on_partial_result's snapshots too (see _build_partial_result).
+    # Depends only on gt_result/imu_result/gravity, never on the growing estimate, so it is
+    # computed once for the partial snapshots too.
     extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
 
-    # Frame computation, keyframe selection, and GTSAM graph construction as one pass: each
-    # frame's fd/sm/of is computed (FrontendFrameComputer) and appended to these growing result
-    # containers, then immediately offered to _KeyframeScanner and, for any keyframe it returns,
-    # _GtsamBuilder -- before the next frame is ever touched. Both scanner/builder read from these
-    # same containers (that's how they see earlier frames' data), so the containers are shared,
-    # mutable state across the loop below, not a return value handed off afterward.
+    # Each frame's fd/sm/of is appended to these growing containers, then immediately offered
+    # to _KeyframeScanner and _GtsamBuilder. Both read earlier frames from the same
+    # containers, so they are shared mutable state.
     set_progress(0.06, "Processing frames...")
     compute_t0 = time.monotonic()
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
@@ -2154,21 +1847,17 @@ def _compute(
         optical_flow_result.frames.append(of_frame)
 
     def _build_partial_result(up_to_frame: int) -> SlamResult:
-        """A full SlamResult reflecting only what's been processed through `up_to_frame` so far
-        -- gt/imu/extra are the same final values computed above (none of them depend on the
-        growing estimate); pnp and gtsam come from the scanner/builder's own live accessors.
+        """A full SlamResult reflecting only what's processed through `up_to_frame`: gt/imu/extra
+        are the final values (independent of the growing estimate); pnp and gtsam come from the
+        scanner/builder's live accessors.
         """
         partial_pnp_poses = scanner.current_poses(up_to_frame)
         partial_pnp_result = _get_pnp_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns, partial_pnp_poses)
-        # recompute_window=0: reprojection_rmse/landmark_counts are pure live diagnostics (see
-        # current_estimate's docstring) -- skip deriving them every keyframe entirely and let them
-        # read back as NaN/0 until finalize() computes them for real, instead of paying even a
-        # bounded per-keyframe cost for a number nothing but one UI plot reads.
+        # recompute_window=0: reprojection_rmse/landmark_counts are live diagnostics only;
+        # they read back NaN/0 until finalize() computes them.
         p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(recompute_window=0)
-        # landmark_positions empty here too -- the sparse map, like reprojection_rmse/
-        # landmark_counts above, is only ever populated once at finalize() (see
-        # _GtsamBuilder.landmark_positions' docstring).
+        # landmark_positions is likewise only populated at finalize().
         partial_gtsam_result = _get_gtsam_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
             gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
@@ -2230,9 +1919,7 @@ class _SolveCancelled(Exception):
 
 
 class SlamSolver:
-    """Runs the whole SLAM stage over [start_s, start_s + duration_s] -- feature detection,
-    stereo matching, optical flow, keyframe selection, and GTSAM graph construction -- from raw
-    EuRoCMAVData alone, from raw EuRoCMAVData alone.
+    """Runs the whole SLAM stage over [start_s, start_s + duration_s] from raw EuRoCMAVData alone.
     It computes the frontend data itself, incrementally (see _compute), and exposes it as
     frontend_result for the diagnostic tabs.
     """
@@ -2240,10 +1927,9 @@ class SlamSolver:
     def __init__(
         self, data: EuRoCMAVData, start_s: float, duration_s: float,
         cancel_event: Optional[threading.Event] = None,
-        # On by default: a clear win on one regression-check sequence, real if smaller localized
-        # regression on another (see _LoopClosureDetector's docstring). _LoopClosureDetector is
-        # O(K^2) brute-force descriptor matching -- fine for an offline research run, but a caller
-        # doing frequent interactive re-runs on long sequences may want to opt back out.
+        # On by default: a clear win on one regression-check sequence, a smaller localized
+        # regression on another. Detection is O(K^2) brute-force descriptor matching, so
+        # frequent interactive re-runs on long sequences may want to opt out.
         enable_loop_closure: bool = True,
     ) -> None:
         self._data = data
@@ -2252,11 +1938,9 @@ class SlamSolver:
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._enable_loop_closure = enable_loop_closure
         self.result: Optional[SlamResult] = None
-        # The frontend's per-frame output (ORB / stereo matching / optical flow), filled by
-        # _compute as it goes and complete once `loading` is False -- the Frontend and Coordinate
-        # Mapping tabs read this instead of running their own FrontendSolver pass. Frames are
-        # appended one list at a time, so a reader should only trust indices below
-        # min(len(fd.frames), len(sm.frames), len(of.frames)).
+        # The frontend's per-frame output, filled by _compute and complete once `loading`
+        # is False. Frames are appended one list at a time, so a reader should only trust
+        # indices below min(len(fd.frames), len(sm.frames), len(of.frames)).
         self.frontend_result = FrontendResult(
             feature_detection=FeatureDetectionResult(frames=[], elapsed_s=0.0),
             stereo_matching=StereoMatchingResult(frames=[], elapsed_s=0.0),
@@ -2280,9 +1964,8 @@ class SlamSolver:
         def set_partial_result(result: SlamResult) -> None:
             if self._cancel_event.is_set():
                 raise _SolveCancelled()
-            # Same single-attribute-assignment pattern as set_progress above: safe to read from
-            # the render thread without a lock (see SlamViewModel.start) since a reader either
-            # sees the old SlamResult object or the new one, never a half-built one.
+            # Single-attribute assignment, as in set_progress: the render thread sees
+            # either the old SlamResult or the new one, never a half-built one.
             self.result = result
 
         # Runs on the caller's background thread (see SlamViewModel.start), sharing this

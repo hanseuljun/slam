@@ -17,9 +17,8 @@ class ConfigViewModel:
     # Off by default: unlike the Frontend tab this is real extra compute (it runs
     # CoordinateMappingChecker over SLAM's frontend output once SLAM finishes).
     run_coordinate_mapping_check: bool = False
-    # Unlike the diagnostics above, this drives SLAM's own solve (SlamSolver's enable_loop_closure)
-    # rather than a redundant side computation -- on by default now that it's been validated as a
-    # net win; see SlamSolver.__init__'s enable_loop_closure for the remaining known tradeoff.
+    # Drives SLAM's own solve (SlamSolver's enable_loop_closure), unlike the diagnostics
+    # above. On by default; see _LoopClosureDetector for the known tradeoff.
     run_loop_closure: bool = True
 
     @property
@@ -55,11 +54,6 @@ def config_view(model: ConfigViewModel, on_run: Callable[[], None]) -> None:
 
     _, model.run_coordinate_mapping_check = imgui.checkbox(
         "Coordinate Mapping Check", model.run_coordinate_mapping_check)
-    # Off by default: loop closure's candidate search is O(K^2) brute-force descriptor matching
-    # (not yet cheap enough to run unconditionally) and its candidate-consolidation step is
-    # validated-but-not-tuned (see slam.py's _LoopClosureDetector docstring) --
-    # a clear win on one regression-check sequence, a real if smaller localized regression on
-    # another.
     _, model.run_loop_closure = imgui.checkbox(
         "Loop Closure", model.run_loop_closure
     )

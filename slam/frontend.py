@@ -18,20 +18,12 @@ class FrontendResult:
 
 class FrontendFrameComputer:
     """Feature detection + stereo matching + optical flow for one frame at a time, driven by
-    slam.py's own per-frame loop (which also drives _KeyframeScanner/_GtsamBuilder). There is no
-    separate batch frontend pass: the Frontend and Coordinate Mapping tabs read the containers
-    SlamSolver fills (SlamSolver.frontend_result).
+    slam.py's per-frame loop. The Frontend and Coordinate Mapping tabs read the containers
+    SlamSolver fills (SlamSolver.frontend_result); there is no separate frontend pass.
 
-    (Feature detection, stereo matching and optical flow used to be three separate solvers, then
-    one FrontendSolver, each only usable after the one before it finished. None is independently
-    useful -- optical flow needs stereo matching's per-match depth to seed a track, and stereo
-    matching needs feature detection's keypoints -- and the tracker carries state frame to frame,
-    so this can't be parallelized across frames the way feature detection alone could.)
-
-    Each camera image is loaded once and reused for both feature detection and optical flow
-    (detect_features_for_frame accepts pre-loaded images for exactly this reason). A single
-    OpticalFlowTracker is owned across the whole lifetime of this object, since track identity has
-    to stay continuous frame to frame -- see OpticalFlowTracker's docstring.
+    Each camera image is loaded once and shared by feature detection and optical flow. A single
+    OpticalFlowTracker lives for the object's lifetime, since track identity must stay continuous
+    (so this can't be parallelized across frames).
     """
 
     def __init__(self, data: EuRoCMAVData) -> None:

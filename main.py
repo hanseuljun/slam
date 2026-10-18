@@ -1,8 +1,7 @@
 from pathlib import Path
 
-# hello_imgui is registered into sys.modules dynamically at runtime (imgui_bundle/__init__.py's
-# _publish()), not via a normal static submodule -- Pylance can't verify that against source,
-# even though its real .pyi stub (imgui_bundle/hello_imgui.pyi) is still used for type info.
+# hello_imgui is registered into sys.modules at runtime, so Pylance can't verify it against source
+# (its .pyi stub is still used for types).
 from imgui_bundle import imgui, hello_imgui, immapp  # pyright: ignore[reportMissingModuleSource]
 from imgui_bundle import icons_fontawesome_6 as fa
 
@@ -30,18 +29,11 @@ _DATA_PATHS = [
 
 class Pipeline:
     """Owns everything for one loaded dataset: the SLAM run (SlamViewModel -> SlamSolver, which
-    computes the frontend -- feature detection + stereo matching + optical flow, see
-    slam/frontend.py -- internally as part of its single per-frame pass) and the two diagnostic
-    view models that only *read* its output: the Frontend tab (live, as frames are processed) and
-    the Coordinate Mapping check (starts itself once SLAM finishes and its frontend data is
-    complete). Neither diagnostic computes a frontend of its own, so showing them costs nothing
-    extra beyond the coordinate mapping check's own pass.
+    computes the frontend internally) and the two diagnostic view models that only read its output:
+    the Frontend tab (live) and the Coordinate Mapping check (starts once SLAM finishes).
 
-    One object per run: restarting is "stop this Pipeline, build a new one," not "rewire a shared
-    set of attributes in place" -- a late callback or poll from a superseded Pipeline can then only
-    ever touch that Pipeline's own (by-then-cancelled) view models, never a newer one's (this is
-    what let a stale callback reach into the wrong dataset's state before; see the cam0/cam1
-    dataset-mismatch investigation).
+    One object per run: restarting builds a new Pipeline instead of rewiring a shared one, so a late
+    callback from a superseded Pipeline can only touch its own cancelled view models.
     """
 
     def __init__(
@@ -110,11 +102,9 @@ def root_view(model: RootViewModel) -> None:
         | imgui.WindowFlags_.no_scrollbar,
     )
 
-    # Hamburger toggles the config sidebar rather than always showing it, so the tab content
-    # below (plots especially) gets the full window width back when it's not needed. Lives
-    # inside the sidebar itself while it's open (so it reads as part of that panel), and falls
-    # back to the main area -- the only place left -- once the sidebar is closed, so there's
-    # always a way to bring it back.
+    # The hamburger toggles the config sidebar so the tab content gets the full width when
+    # it's closed. It lives inside the sidebar while open and falls back to the main area when
+    # closed, so there's always a way to bring it back.
     if model.show_config:
         # No built-in child border (that draws all four sides) -- only the edge against the
         # main content should read as a divider, drawn manually after the child closes.
@@ -174,9 +164,8 @@ def main():
     runner_params.ini_filename = "slam.ini"
     runner_params.callbacks.show_gui = lambda: root_view(model)
 
-    # with_implot/with_implot3d: the SLAM view's plots are ImPlot/ImPlot3D-based (see
-    # ui/slam_view.py) -- both need their own context created before any begin_plot call, which
-    # this handles.
+    # with_implot/with_implot3d: the SLAM view's plots need their own ImPlot/ImPlot3D contexts
+    # before any begin_plot call.
     immapp.run(
         runner_params,
         add_ons_params=immapp.AddOnsParams(with_implot=True, with_implot3d=True))

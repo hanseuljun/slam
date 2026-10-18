@@ -14,12 +14,11 @@ _TRAIL_COLOR = (0, 200, 255)
 
 class FrontendViewModel:
     """Read-only view over the frontend data SlamSolver produces as it runs
-    (SlamSolver.frontend_result) -- no frontend computation of its own. Feature detection, stereo
-    matching and optical flow are indexed by the exact same frame sequence, so one shared frame
-    index here drives all three sections' textures/stats at once.
+    (SlamSolver.frontend_result). Feature detection, stereo matching and optical flow share one
+    frame index.
 
-    `get_solver` returns the current SlamSolver (None before SlamViewModel.start()). Frames show up
-    as the solver processes them, so the tab is usable while SLAM is still running.
+    `get_solver` returns the current SlamSolver (None before SlamViewModel.start()). Frames appear
+    as the solver processes them.
     """
 
     def __init__(self, data: EuRoCMAVData, get_solver: Callable[[], Optional[SlamSolver]]) -> None:
@@ -49,9 +48,9 @@ class FrontendViewModel:
         return solver.frontend_result if solver is not None else None
 
     def num_ready_frames(self) -> int:
-        """Frames whose feature detection, stereo matching and optical flow are all present --
-        the three lists are appended one after another by the solver thread, so a reader must
-        only index below the shortest."""
+        """Frames whose feature detection, stereo matching and optical flow are all present. The
+        solver thread appends the three lists one after another, so only index below the shortest.
+        """
         result = self._result
         if result is None:
             return 0
@@ -113,9 +112,9 @@ class FrontendViewModel:
             for tid, (u, v) in frame.track_uv.items():
                 pt = (int(round(u)), int(round(v)))
                 cv2.circle(img_color, pt, 3, _TRACK_COLOR, -1)
-                # Trail: walk this track backward through recent frames for as long as it stayed
-                # alive, so a lost-and-replenished track's trail correctly stops short rather than
-                # jumping to whatever unrelated point now holds its old id.
+                # Trail: walk this track backward while it stayed alive, so a
+                # lost-and-replenished track's trail stops short instead of
+                # jumping to an unrelated point that now holds its old id.
                 trail_pt = pt
                 for j in range(self.frame_index - 1, trail_start - 1, -1):
                     prev_uv = of_frames[j].track_uv.get(tid)

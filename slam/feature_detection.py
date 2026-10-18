@@ -27,30 +27,25 @@ def detect_features_for_frame(
     data: EuRoCMAVData, ts: int,
     cam0_img: Optional[np.ndarray] = None, cam1_img: Optional[np.ndarray] = None,
 ) -> FeatureDetectionFrame:
-    """ORB detect+compute on both cameras for a single frame -- a pure function of that frame's
-    own images, no cross-frame state. Shared by FrontendFrameComputer (slam/frontend.py,
-    loads cam0/cam1 once and passes them in here, since the same images are also needed for stereo
-    matching and optical flow) and slam.py's own incremental per-frame loop, which does the same.
+    """ORB detect+compute on both cameras for a single frame: a pure function of that frame's
+    images, no cross-frame state. Callers may pass pre-loaded images, since the same ones are needed
+    for stereo matching and optical flow.
     """
-    # FAST_SCORE (reuses the FAST corner strength) instead of the default HARRIS_SCORE (a separate
-    # Harris-corner response pass per keypoint) -- the same tradeoff real-time VO/VIO pipelines like
-    # ORB-SLAM make; see tmp/orb_speedup_options.html.
+    # FAST_SCORE (reuses the FAST corner strength) instead of the default HARRIS_SCORE, which
+    # needs a separate Harris pass per keypoint, as in ORB-SLAM.
     #
-    # Separate cam0/cam1 ORB instances (rather than sharing one) so the two detectAndCompute calls
-    # below can safely run concurrently -- cv2 Feature2D objects aren't documented as safe for
-    # concurrent use from multiple threads.
+    # Separate cam0/cam1 ORB instances so the two detectAndCompute calls can run concurrently
+    # (Feature2D isn't documented as thread-safe).
     orb0 = cv2.ORB.create(nfeatures=2000, scoreType=cv2.ORB_FAST_SCORE)
     orb1 = cv2.ORB.create(nfeatures=2000, scoreType=cv2.ORB_FAST_SCORE)
     if cam0_img is None:
         cam0_img = cv2.imread(str(data.get_cam0_image_path(ts)), cv2.IMREAD_GRAYSCALE)
     if cam1_img is None:
         cam1_img = cv2.imread(str(data.get_cam1_image_path(ts)), cv2.IMREAD_GRAYSCALE)
-    # cv2's stub types `mask` as non-Optional MatLike, but passing None (no mask) is the
-    # standard, correct OpenCV idiom -- the stub is just missing the `| None`.
+    # cv2's stub types `mask` as non-Optional, but passing None is the standard idiom.
     #
-    # cam0/cam1 are independent images -- run cam1's detectAndCompute on a second thread while this
-    # one runs cam0's, instead of back-to-back. cv2's native calls release the GIL, so this overlaps
-    # real work rather than just interleaving Python bytecode; see tmp/orb_speedup_options.html.
+    # Run cam1's detectAndCompute on a second thread while this one runs cam0's; cv2's native
+    # calls release the GIL, so this overlaps real work.
     cam1_out: list = [None, None]
 
     def _detect_cam1() -> None:

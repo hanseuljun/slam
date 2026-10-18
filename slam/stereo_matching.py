@@ -6,9 +6,9 @@ import numpy as np
 from slam.data import EuRoCMAVData
 
 
-# Reject a stereo match if its (undistorted) points sit more than this far, in pixels, from the
-# epipolar geometry implied by the *known* stereo calibration (Sampson distance). Tight because
-# F is exact here -- it is derived from the fixed extrinsics, not estimated from noisy matches.
+# Reject a stereo match whose undistorted points sit more than this far [px] (Sampson distance)
+# from the epipolar geometry of the known calibration. Tight because F is exact: derived from the
+# fixed extrinsics, not estimated from noisy matches.
 EPIPOLAR_SAMPSON_PX = 1.5
 
 
@@ -38,14 +38,11 @@ def match_and_triangulate_stereo(
     cam0_keypoints: list, cam0_descriptors: np.ndarray,
     cam1_keypoints: list, cam1_descriptors: np.ndarray,
 ) -> tuple[list, np.ndarray]:
-    """Ratio-test + epipolar-gated cam0<->cam1 match, then triangulate. A free function (not tied
-    to a single-purpose solver class) so other callers (optical_flow.py, seeding a track's
-    one-time depth) can reuse the exact same geometry rather than duplicating it -- takes an
-    explicit keypoint/descriptor pair instead of a whole FeatureDetectionFrame so it also works on
-    an arbitrary subset (e.g. just this frame's newly-seeded candidates, not its full detected set).
+    """Ratio-test + epipolar-gated cam0<->cam1 match, then triangulate. Takes an explicit
+    keypoint/descriptor pair rather than a FeatureDetectionFrame so it also works on a subset.
 
     Returns (matches, points_3d) with points_3d shape (3, N), points_3d[:, i] <-> matches[i]
-    (queryIdx into cam0_keypoints/cam0_descriptors, trainIdx into cam1_keypoints/cam1_descriptors).
+    (queryIdx into cam0_keypoints/descriptors, trainIdx into cam1's).
     """
     bf = cv2.BFMatcher(cv2.NORM_HAMMING)
     raw_matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2)
@@ -79,12 +76,10 @@ def match_and_triangulate_stereo(
     R = T_cam0_to_cam1[:3, :3]
     t = T_cam0_to_cam1[:3, 3]
 
-    # Epipolar gate. A correct stereo match must satisfy x1^T F x0 = 0. F is built exactly
-    # from the known extrinsics (F = K1^-T [t]x R K0^-1), so instead of estimating it we
-    # score each match by its Sampson distance -- an approximate pixel distance to the
-    # epipolar geometry -- and drop matches beyond EPIPOLAR_SAMPSON_PX. The vast majority of
-    # nonsense pairs (repeated texture that fools the descriptor ratio test) land far off
-    # their epipolar line and are removed before they can triangulate into garbage 3D points.
+    # Epipolar gate: a correct match satisfies x1^T F x0 = 0, with F = K1^-T [t]x R K0^-1
+    # built exactly from the known extrinsics. Score each match by Sampson distance and drop
+    # those beyond EPIPOLAR_SAMPSON_PX, removing repeated-texture mismatches before they
+    # triangulate into garbage.
     F = np.linalg.inv(K1).T @ _skew(t) @ R @ np.linalg.inv(K0)
     p0h = np.hstack([points0, np.ones((len(points0), 1))])
     p1h = np.hstack([points1, np.ones((len(points1), 1))])
