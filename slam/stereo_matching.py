@@ -10,6 +10,10 @@ from slam.data import EuRoCMAVData
 # from the epipolar geometry of the known calibration. Tight because F is exact: derived from the
 # fixed extrinsics, not estimated from noisy matches.
 EPIPOLAR_SAMPSON_PX = 1.5
+# Candidate band for matching: cam1 keypoints farther than this [px] from a cam0 keypoint's
+# epipolar line aren't compared at all. Looser than the Sampson gate (a pair passing the gate can
+# be up to ~1.4x its Sampson distance from the line) so the gate stays the real filter.
+EPIPOLAR_CANDIDATE_PX = 3.0
 
 
 def _skew(t: np.ndarray) -> np.ndarray:
@@ -44,11 +48,7 @@ def match_and_triangulate_stereo(
     Returns (matches, points_3d) with points_3d shape (3, N), points_3d[:, i] <-> matches[i]
     (queryIdx into cam0_keypoints/descriptors, trainIdx into cam1's).
     """
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    raw_matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2)
-    good_matches = [m for m, n in raw_matches if m.distance < 0.75 * n.distance]
-
-    if not good_matches:
+    if len(cam0_keypoints) == 0 or len(cam1_keypoints) == 0:
         return [], np.zeros((3, 0))
 
     K0 = data.cam0_intrinsics.to_matrix()
@@ -66,21 +66,42 @@ def match_and_triangulate_stereo(
         data.cam1_intrinsics.p2,
     ])
 
-    points0 = np.array([cam0_keypoints[m.queryIdx].pt for m in good_matches])
-    points1 = np.array([cam1_keypoints[m.trainIdx].pt for m in good_matches])
-
-    points0 = cv2.undistortPoints(points0, K0, dist_coeffs0, P=K0).reshape(-1, 2)
-    points1 = cv2.undistortPoints(points1, K1, dist_coeffs1, P=K1).reshape(-1, 2)
+    all_points0 = cv2.KeyPoint_convert(cam0_keypoints).astype(np.float64)
+    all_points1 = cv2.KeyPoint_convert(cam1_keypoints).astype(np.float64)
+    all_points0 = cv2.undistortPoints(all_points0, K0, dist_coeffs0, P=K0).reshape(-1, 2)
+    all_points1 = cv2.undistortPoints(all_points1, K1, dist_coeffs1, P=K1).reshape(-1, 2)
 
     T_cam0_to_cam1 = np.linalg.inv(data.cam1_extrinsics) @ data.cam0_extrinsics
     R = T_cam0_to_cam1[:3, :3]
     t = T_cam0_to_cam1[:3, 3]
+    F = np.linalg.inv(K1).T @ _skew(t) @ R @ np.linalg.inv(K0)
+
+    # Only cam1 keypoints within EPIPOLAR_CANDIDATE_PX of a cam0 keypoint's epipolar line are
+    # considered as its match: BFMatcher skips masked pairs, so this avoids almost the whole
+    # N x M descriptor comparison. The ratio test below then runs among the geometrically
+    # plausible candidates only.
+    h0 = np.hstack([all_points0, np.ones((len(all_points0), 1))])
+    h1 = np.hstack([all_points1, np.ones((len(all_points1), 1))])
+    lines = h0 @ F.T  # epipolar line in cam1 for each cam0 keypoint
+    lines /= np.maximum(np.linalg.norm(lines[:, :2], axis=1, keepdims=True), 1e-12)
+    line_dist = (lines.astype(np.float32) @ h1.astype(np.float32).T)  # signed distance, (N0, N1)
+    mask = cv2.inRange(line_dist, -EPIPOLAR_CANDIDATE_PX, EPIPOLAR_CANDIDATE_PX)
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    raw_matches = bf.knnMatch(cam0_descriptors, cam1_descriptors, k=2, mask=mask)
+    # A keypoint with fewer than two candidates in its band can't be ratio-tested; drop it.
+    good_matches = [
+        pair[0] for pair in raw_matches if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance]
+    if not good_matches:
+        return [], np.zeros((3, 0))
+
+    points0 = all_points0[[m.queryIdx for m in good_matches]]
+    points1 = all_points1[[m.trainIdx for m in good_matches]]
 
     # Epipolar gate: a correct match satisfies x1^T F x0 = 0, with F = K1^-T [t]x R K0^-1
     # built exactly from the known extrinsics. Score each match by Sampson distance and drop
     # those beyond EPIPOLAR_SAMPSON_PX, removing repeated-texture mismatches before they
     # triangulate into garbage.
-    F = np.linalg.inv(K1).T @ _skew(t) @ R @ np.linalg.inv(K0)
     p0h = np.hstack([points0, np.ones((len(points0), 1))])
     p1h = np.hstack([points1, np.ones((len(points1), 1))])
     Fp0 = p0h @ F.T      # epipolar line in cam1 for each cam0 point

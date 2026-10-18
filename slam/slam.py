@@ -352,7 +352,6 @@ class _LoopClosureEdge:
     body_relative_pose: np.ndarray
     rot_sigma: float
     trans_sigma: float
-    noise_mode: str
 
 
 # Sanity bound on a verified closure's translation magnitude [m]. Match count and reprojection
@@ -521,7 +520,7 @@ class _LoopClosureDetector:
         self._open_cluster = []
         return [_LoopClosureEdge(
             best_from, best_to, best.body_relative_pose,
-            LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA, "gaussian")]
+            LOOP_CLOSURE_ROT_SIGMA, LOOP_CLOSURE_TRANS_SIGMA)]
 
 
 def _get_pnp_result(
@@ -965,17 +964,9 @@ class _GtsamBuilder:
     def _add_loop_closure_edges(self, factors: gtsam.NonlinearFactorGraph, edges: list[_LoopClosureEdge]) -> None:
         for edge in edges:
             delta = _to_gtsam_pose3(edge.body_relative_pose)
-            base_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([edge.rot_sigma] * 3 + [edge.trans_sigma] * 3))
-            if edge.noise_mode == "huber":
-                loop_noise = gtsam.noiseModel.Robust.Create(
-                    gtsam.noiseModel.mEstimator.Huber.Create(1.345), base_noise)
-            elif edge.noise_mode == "dcs":
-                loop_noise = gtsam.noiseModel.Robust.Create(
-                    gtsam.noiseModel.mEstimator.DCS.Create(6.0), base_noise)  # type: ignore[attr-defined]
-            else:
-                loop_noise = base_noise
-            factors.add(gtsam.BetweenFactorPose3(self._X(edge.from_node), self._X(edge.to_node), delta, loop_noise))
+            factors.add(gtsam.BetweenFactorPose3(self._X(edge.from_node), self._X(edge.to_node), delta, noise))
 
     def add_keyframe(self, frame_idx: int) -> None:
         """Add a node for `frame_idx`, linked to the previous node by an IMU factor and, when
