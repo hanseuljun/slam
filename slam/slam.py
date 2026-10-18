@@ -73,6 +73,13 @@ class SlamGtsamResult:
     rpe_rotation_errors: np.ndarray  # shape (K,) [deg]
     reprojection_rmse: np.ndarray  # per-keyframe landmark reprojection RMSE [px], shape (K,)
     landmark_counts: np.ndarray  # per-keyframe number of observed landmarks, shape (K,)
+    # World-frame position of every landmark the graph has inserted (see
+    # _GtsamBuilder.landmark_positions), shape (M, 3) -- a sparse map, not a per-keyframe series
+    # like the fields above. Empty during a live-updating run's intermediate snapshots (see
+    # _build_partial_result) -- only ever populated once, at finalize(), same tradeoff already
+    # made for reprojection_rmse/landmark_counts and for the same reason: walking a growing
+    # landmark set on every keyframe would reintroduce an O(K^2) live-preview cost.
+    landmark_positions: np.ndarray
     angular_velocity_times: np.ndarray
     angular_velocities: np.ndarray
     linear_accelerations: np.ndarray
@@ -1899,6 +1906,18 @@ class _GtsamBuilder:
         # Every node, exactly -- see current_estimate's docstring on recompute_window=None.
         return self.current_estimate(recompute_window=None)
 
+    def landmark_positions(self) -> np.ndarray:
+        """World-frame 3D position of every landmark the graph has inserted (self._inserted_landmarks),
+        from the current factor-graph estimate -- a sparse map, for _draw_3d_trajectory's point-cloud
+        layer. Call once, after finalize(): this is a fresh calculateEstimate() plus a pass over the
+        full (by-then-final) landmark set, the same shape of cost current_estimate's docstring already
+        flags as unsafe to repeat on every live-preview keyframe (see recompute_window=0).
+        """
+        if not self._inserted_landmarks:
+            return np.zeros((0, 3))
+        final = self._isam2.calculateEstimate()
+        return np.array([final.atPoint3(self._L(tid)) for tid in self._inserted_landmarks])
+
 
 def _get_full_gt_arrays(data: EuRoCMAVData) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Ground-truth timestamps/positions/rotation-matrices for the *entire* dataset (every sample
@@ -1933,6 +1952,7 @@ def _get_gtsam_result(
     biases: list[np.ndarray],
     reprojection_rmse: np.ndarray,
     landmark_counts: np.ndarray,
+    landmark_positions: np.ndarray,
 ) -> SlamGtsamResult:
     """Ground-truth alignment and ATE/RPE metrics for an already-computed GTSAM trajectory.
     Doesn't run the graph itself -- see _compute, which drives _KeyframeScanner and
@@ -2010,6 +2030,7 @@ def _get_gtsam_result(
         rpe_rotation_errors=rpe_rotation_errors,
         reprojection_rmse=reprojection_rmse,
         landmark_counts=landmark_counts,
+        landmark_positions=landmark_positions,
         angular_velocity_times=times[:-1],
         angular_velocities=np.array(angular_velocities),
         linear_accelerations=np.array(linear_accelerations),
@@ -2136,10 +2157,13 @@ def _compute(
         # read back as NaN/0 until finalize() computes them for real, instead of paying even a
         # bounded per-keyframe cost for a number nothing but one UI plot reads.
         p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(recompute_window=0)
+        # landmark_positions empty here too -- the sparse map, like reprojection_rmse/
+        # landmark_counts above, is only ever populated once at finalize() (see
+        # _GtsamBuilder.landmark_positions' docstring).
         partial_gtsam_result = _get_gtsam_result(
             data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
             gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
-            scanner.keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm,
+            scanner.keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm, np.zeros((0, 3)),
         )
         return SlamResult(
             gt=gt_result, imu=imu_result, pnp=partial_pnp_result, gtsam=partial_gtsam_result,
@@ -2161,6 +2185,7 @@ def _compute(
     keyframe_indices = scanner.keyframes
     pnp_poses = scanner.finalize()
     gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts = builder.finalize()
+    landmark_positions = builder.landmark_positions()
     # Frontend computation, scanning, and graph-building are now the same combined pass, so they
     # no longer have separately measurable costs -- both diagnostics report the same total.
     compute_elapsed = time.monotonic() - compute_t0
@@ -2174,6 +2199,7 @@ def _compute(
         data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
         gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
         keyframe_indices, gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts,
+        landmark_positions,
     )
     gtsam_result.elapsed_time = compute_elapsed
 

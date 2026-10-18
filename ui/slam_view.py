@@ -108,6 +108,13 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
     A slider below the plot (model.trajectory_scrub_t, persisted across frames so it survives a
     scroll/redraw) picks a point in time; a bigger marker on each line shows exactly where that
     trajectory was at that moment, the 3D-path equivalent of scrubbing a video.
+
+    A sparse map layer (result.gtsam.landmark_positions) plots every landmark the factor graph has
+    inserted as small, dim points, styled to read as scene structure sitting behind the trajectory
+    lines rather than competing with them -- see tmp/mapping_sparse_vs_dense.html for why sparse
+    (this is already-computed factor-graph state, not a new CV/compute stage) over semi-dense/dense.
+    Empty during a live-updating run (see SlamGtsamResult.landmark_positions' docstring) -- appears
+    once the run finishes.
     """
     imgui.text('3D Trajectory')
     all_series = [
@@ -116,6 +123,7 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
     ]
     max_t = max((times[-1] for times, positions, _ in all_series if len(times) > 0), default=0.0)
     model.trajectory_scrub_t = min(model.trajectory_scrub_t, max_t)
+    landmarks = result.gtsam.landmark_positions
 
     # Flags_.equal: keeps X/Y/Z at the same scale so the path's shape is geometrically correct
     # (a per-axis-independent range would otherwise stretch/squash it to fill the frame).
@@ -127,6 +135,13 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
         # an early, smaller range and clip later data that falls outside it, instead of expanding.
         # Cond_.always forces this exact range every frame, so it can't go stale like that.
         all_positions = [positions for _, positions, _ in all_series if len(positions) > 0]
+        if len(landmarks) > 0:
+            # Percentile bounds, not exact min/max, for landmarks specifically: a poorly
+            # triangulated one (thin baseline, near-parallel rays) can land tens of meters from
+            # everything else and single-handedly blow out the whole plot's scale. Every landmark
+            # still gets drawn below -- this only keeps a rare outlier from setting the axis range
+            # the vast majority of (good) landmarks would otherwise look fine in.
+            all_positions.append(np.percentile(landmarks, [1, 99], axis=0))
         if all_positions:
             combined = np.concatenate(all_positions, axis=0)
             for axis, col in (
@@ -135,6 +150,16 @@ def _draw_3d_trajectory(model: "SlamViewModel", result: SlamResult) -> None:
                 lo, hi = float(combined[:, col].min()), float(combined[:, col].max())
                 margin = max((hi - lo) * 0.05, 1e-3)
                 implot3d.setup_axis_limits(axis, lo - margin, hi + margin, implot3d.Cond_.always)
+        if len(landmarks) > 0:
+            implot3d.plot_scatter(
+                'landmarks',
+                np.ascontiguousarray(landmarks[:, 0], dtype=np.float64),
+                np.ascontiguousarray(landmarks[:, 1], dtype=np.float64),
+                np.ascontiguousarray(landmarks[:, 2], dtype=np.float64),
+                spec=implot3d.Spec(
+                    marker=implot3d.Marker_.circle, marker_size=2,
+                    marker_fill_color=imgui.ImVec4(0.6, 0.6, 0.6, 0.5),
+                    marker_line_color=imgui.ImVec4(0.6, 0.6, 0.6, 0.5)))
         for times, positions, name in all_series:
             if len(positions) == 0:
                 continue
