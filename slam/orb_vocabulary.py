@@ -7,6 +7,7 @@ different sequence than it is used on, like DBoW2's in ORB-SLAM, so using it add
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 DEFAULT_VOCAB_PATH = Path(__file__).parent / "assets" / "orb_vocab.npz"
@@ -43,7 +44,9 @@ class ORBVocabulary:
 
     def nearest_words(self, descriptors: np.ndarray) -> np.ndarray:
         """(N, 32) uint8 -> (N,) int, each descriptor's nearest-centroid word id."""
-        return _hamming_distance_matrix(descriptors, self.centroids).argmin(axis=1)
+        # cv2's brute-force Hamming matcher (SIMD popcount) instead of the numpy distance matrix.
+        matches = cv2.BFMatcher(cv2.NORM_HAMMING).match(descriptors, self.centroids)
+        return np.fromiter((m.trainIdx for m in matches), dtype=np.int64, count=len(matches))
 
     def transform(self, descriptors: np.ndarray) -> dict[int, float]:
         """A sparse, L2-normalized TF-IDF bag-of-words vector: word id -> weight. The dot product of
