@@ -379,8 +379,7 @@ class _LoopClosureDetector:
     """
 
     # Only the strongest PROBE_N descriptors (ORB returns them response-ordered) are assigned
-    # to vocabulary words, bounding the cost. BoW only builds a SHORTLIST_N shortlist; those
-    # are re-scored with full descriptors before picking the winner.
+    # to vocabulary words and used to rank the SHORTLIST_N BoW candidates, bounding the cost.
     PROBE_N = 500
     SHORTLIST_N = 5
 
@@ -455,16 +454,22 @@ class _LoopClosureDetector:
             return None
         q_desc_full = self._fd_result.frames[frame].cam0_descriptors
 
-        # Re-score the BoW shortlist with full descriptors and pick the true best among them.
+        # Rank the shortlist by ratio-test match count on the strongest PROBE_N descriptors only,
+        # then count the winner's matches with full descriptors (min_matches is on that scale).
         bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+        def _match_count(c_desc: np.ndarray, q_desc: np.ndarray) -> int:
+            raw = bf.knnMatch(c_desc, q_desc, k=2)
+            return sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
+
+        q_probe = q_desc_full[:self.PROBE_N]
         best_score, best_c = -1, -1
         for c in shortlist:
-            c_desc_full = self._fd_result.frames[self._kf_frames[c]].cam0_descriptors
-            raw = bf.knnMatch(c_desc_full, q_desc_full, k=2)
-            score = sum(1 for pair in raw if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance)
+            score = _match_count(self._fd_result.frames[self._kf_frames[c]].cam0_descriptors[:self.PROBE_N], q_probe)
             if score > best_score:
                 best_score, best_c = score, c
-        if best_score < self._min_matches:
+        best_full = _match_count(self._fd_result.frames[self._kf_frames[best_c]].cam0_descriptors, q_desc_full)
+        if best_full < self._min_matches:
             return None
 
         c_frame = self._kf_frames[best_c]
