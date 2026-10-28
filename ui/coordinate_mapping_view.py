@@ -14,9 +14,8 @@ from slam.coordinate_mapping_check import (
     CoordinateMappingChecker,
 )
 from slam.data import EuRoCMAVData
-from slam.feature_detection import FeatureDetectionResult
+from slam.optical_flow import OpticalFlowResult
 from slam.slam import SlamSolver
-from slam.stereo_matching import StereoMatchingResult
 from ui.utils import image_to_texture
 
 
@@ -31,7 +30,7 @@ def _draw_result(result: CoordinateMappingCheckResult) -> None:
     times = np.ascontiguousarray(result.times, dtype=np.float64)
     mean_errors = np.array([np.mean(f.projection_errors) if f.projection_errors else float('nan') for f in result.frames])
     mean_icp_errors = np.array([np.mean(f.icp_projection_errors) if f.icp_projection_errors else float('nan') for f in result.frames])
-    num_matches = np.array([len(f.matches) for f in result.frames], dtype=np.float64)
+    num_matches = np.array([len(f.track_ids) for f in result.frames], dtype=np.float64)
 
     imgui.text('Coordinate Mapping Check (Ground Truth Poses)')
     if implot.begin_subplots("##cm_plot", 2, 1, size=(-1, 520), flags=implot.SubplotFlags_.link_all_x):
@@ -62,8 +61,7 @@ class CoordinateMappingViewModel:
         self._started: bool = False
         self._cancel_event = threading.Event()
         self._checker: Optional[CoordinateMappingChecker] = None
-        self._feature_detection_result: Optional[FeatureDetectionResult] = None
-        self._stereo_matching_result: Optional[StereoMatchingResult] = None
+        self._optical_flow_result: Optional[OpticalFlowResult] = None
         self._result: Optional[CoordinateMappingCheckResult] = None
         self._loading: bool = False
         self._error: Optional[str] = None
@@ -80,20 +78,12 @@ class CoordinateMappingViewModel:
         solver = self._get_solver()
         if solver is None or solver.loading or solver.error:
             return
-        self.start(solver.frontend_result.feature_detection, solver.frontend_result.stereo_matching)
+        self.start(solver.frontend_result.optical_flow)
 
-    def start(
-        self,
-        feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
-    ) -> None:
+    def start(self, optical_flow_result: OpticalFlowResult) -> None:
         self._started = True
-        self._feature_detection_result = feature_detection_result
-        self._stereo_matching_result = stereo_matching_result
-        self._checker = CoordinateMappingChecker(
-            self._data, feature_detection_result, stereo_matching_result,
-            cancel_event=self._cancel_event,
-        )
+        self._optical_flow_result = optical_flow_result
+        self._checker = CoordinateMappingChecker(self._data, optical_flow_result, cancel_event=self._cancel_event)
         self._result = None
         self._loading = True
         self._error = None
@@ -114,68 +104,48 @@ class CoordinateMappingViewModel:
             if self._cancel_event.is_set():
                 return
             self._result = result
-            self.match_index_max = max(0, len(self._result.frames[0].matches) - 1)
+            self.match_index_max = max(0, len(self._result.frames[0].track_ids) - 1)
         except Exception as e:
             self._error = str(e)
         finally:
             self._loading = False
 
     def current_match_texture(self) -> Optional[hello_imgui.TextureGpu]:
-        if self._result is None or self._feature_detection_result is None or self._stereo_matching_result is None:
+        if self._result is None or self._optical_flow_result is None:
             return None
         cache_key = (self.frame_index, self.match_index_min, self.match_index_max, self.show_projected)
         if self._cache_key != cache_key:
-            self._match_texture = None
             frame = self._result.frames[self.frame_index]
-            sm_k = self._stereo_matching_result.frames[self.frame_index]
-            sm_k1 = self._stereo_matching_result.frames[self.frame_index + 1]
-            fd_k = self._feature_detection_result.frames[self.frame_index]
-            fd_k1 = self._feature_detection_result.frames[self.frame_index + 1]
+            of_k = self._optical_flow_result.frames[self.frame_index]
+            of_k1 = self._optical_flow_result.frames[self.frame_index + 1]
 
             cam0_img_k = cv2.imread(
-                str(self._data.get_cam0_image_path(sm_k.timestamp_ns)),
-                cv2.IMREAD_GRAYSCALE,
-            )
+                str(self._data.get_cam0_image_path(of_k.timestamp_ns)), cv2.IMREAD_GRAYSCALE)
             cam0_img_k1 = cv2.imread(
-                str(self._data.get_cam0_image_path(sm_k1.timestamp_ns)),
-                cv2.IMREAD_GRAYSCALE,
-            )
-            kps_k = [fd_k.cam0_keypoints[m.queryIdx] for m in sm_k.matches]
-            matches = frame.matches[self.match_index_min:self.match_index_max + 1]
+                str(self._data.get_cam0_image_path(of_k1.timestamp_ns)), cv2.IMREAD_GRAYSCALE)
+            offset_x = cam0_img_k.shape[1]
+            canvas = cv2.cvtColor(np.hstack([cam0_img_k, cam0_img_k1]), cv2.COLOR_GRAY2BGR)
+
+            tids = frame.track_ids[self.match_index_min:self.match_index_max + 1]
             projected = frame.projected_points[self.match_index_min:self.match_index_max + 1]
-
-            total = len(matches)
-            img_matches = None
-            for i, m in enumerate(matches):
+            total = len(tids)
+            for i, tid in enumerate(tids):
                 color = _match_color(i, total)
-                flags = cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-                if img_matches is not None:
-                    flags |= cv2.DrawMatchesFlags_DRAW_OVER_OUTIMG
-                # cv2's stub types `outImg` as non-Optional MatLike, but passing None on the
-                # first iteration (no prior image to draw over) is the standard OpenCV idiom --
-                # the stub is just missing the `| None`.
-                img_matches = cv2.drawMatches(  # type: ignore[call-overload]
-                    cam0_img_k, kps_k,
-                    cam0_img_k1, fd_k1.cam0_keypoints,
-                    [m], img_matches,  # type: ignore[arg-type]
-                    matchColor=color,
-                    flags=flags,
-                )
-
-            if img_matches is None:
-                h = max(cam0_img_k.shape[0], cam0_img_k1.shape[0])
-                img_matches = np.zeros((h, cam0_img_k.shape[1] + cam0_img_k1.shape[1], 3), dtype=np.uint8)
-                img_matches[:cam0_img_k.shape[0], :cam0_img_k.shape[1]] = cv2.cvtColor(cam0_img_k, cv2.COLOR_GRAY2BGR)
-                img_matches[:cam0_img_k1.shape[0], cam0_img_k.shape[1]:] = cv2.cvtColor(cam0_img_k1, cv2.COLOR_GRAY2BGR)
+                u0, v0 = of_k.track_uv[tid]
+                u1, v1 = of_k1.track_uv[tid]
+                p0 = (int(round(u0)), int(round(v0)))
+                p1 = (int(round(u1)) + offset_x, int(round(v1)))
+                cv2.line(canvas, p0, p1, color, 1)
+                cv2.circle(canvas, p0, 3, color, -1)
+                cv2.circle(canvas, p1, 3, color, -1)
 
             if self.show_projected:
-                offset_x = cam0_img_k.shape[1]
                 for i, pt in enumerate(projected):
-                    color = _match_color(i, total)
                     x, y = int(round(pt[0])) + offset_x, int(round(pt[1]))
-                    cv2.drawMarker(img_matches, (x, y), color, cv2.MARKER_TILTED_CROSS, markerSize=12, thickness=1)
+                    cv2.drawMarker(canvas, (x, y), _match_color(i, total), cv2.MARKER_TILTED_CROSS,
+                                   markerSize=12, thickness=1)
 
-            self._match_texture = image_to_texture(img_matches)
+            self._match_texture = image_to_texture(canvas)
             self._cache_key = cache_key
         return self._match_texture
 
@@ -220,7 +190,7 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     first_ts_ns = model._data.cam_timestamps_ns[0]
 
     frame = model._result.frames[model.frame_index]
-    num_matches = len(frame.matches)
+    num_matches = len(frame.track_ids)
 
     tex = model.current_match_texture()
     if tex is not None:
@@ -230,7 +200,7 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
         if changed:
             model.frame_index = new_index
             model.match_index_min = 0
-            model.match_index_max = max(0, len(model._result.frames[new_index].matches) - 1)
+            model.match_index_max = max(0, len(model._result.frames[new_index].track_ids) - 1)
 
     imgui.text("Frame")
     imgui.same_line()
@@ -239,7 +209,7 @@ def coordinate_mapping_view(model: CoordinateMappingViewModel) -> None:
     if changed:
         model.frame_index = max(0, min(n - 1, new_index))
         model.match_index_min = 0
-        model.match_index_max = max(0, len(model._result.frames[model.frame_index].matches) - 1)
+        model.match_index_max = max(0, len(model._result.frames[model.frame_index].track_ids) - 1)
 
     if num_matches > 0:
         max_idx = num_matches - 1

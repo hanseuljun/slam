@@ -10,14 +10,13 @@ import gtsam
 import numpy as np
 
 from slam.data import EuRoCMAVData, ImuSample
-from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
-from slam.frontend import FrontendFrameComputer, FrontendResult
+from slam.frontend import FrontendFrameComputer, FrontendResult, KeyframeFeatures
 from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
 from slam.orb_vocabulary import ORBVocabulary
-from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
 from slam.util import quaternion_to_rotation_matrix
 
 RPE_DELTA_S = 1.0  # RPE window: how far apart (in time) the two poses being compared are [s]
+PARTIAL_RESULT_INTERVAL_S = 0.25  # minimum wall-clock gap between live-preview snapshots [s]
 
 
 @dataclass
@@ -271,31 +270,13 @@ def _get_imu_result(
     )
 
 
-def _run_pnp_step(
-    data: EuRoCMAVData,
-    points_3d: np.ndarray,
-    stereo_matches: list,
-    cam0_descriptors0: np.ndarray,
-    cam0_keypoints1,
-    cam0_descriptors1: np.ndarray,
+def _solve_pnp(
+    data: EuRoCMAVData, object_points: np.ndarray, image_points: np.ndarray, num_matches: int,
 ) -> tuple[np.ndarray, np.ndarray, int, float]:
-    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_matches)}
-
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    temporal_matches = bf.knnMatch(cam0_descriptors0, cam0_descriptors1, k=2)
-    temporal_good_matches = [m for m, n in temporal_matches if m.distance < 0.75 * n.distance]
-
-    object_points = []
-    image_points = []
-    for m in temporal_good_matches:
-        if m.queryIdx in cam0_idx_to_3d_idx:
-            idx_3d = cam0_idx_to_3d_idx[m.queryIdx]
-            object_points.append(points_3d[:, idx_3d])
-            image_points.append(cam0_keypoints1[m.trainIdx].pt)
-
-    object_points = np.array(object_points, dtype=np.float64)
-    image_points = np.array(image_points, dtype=np.float64)
-
+    """PnP/RANSAC of cam0 3D points (in the reference camera frame) against their cam0 pixels in
+    the other frame. Returns (rvec, tvec, num_matches, mean inlier reprojection error [px]) with
+    the pose as camera<-world; raises if RANSAC fails (e.g. too few points).
+    """
     intrinsics_matrix = data.cam0_intrinsics.to_matrix()
     dist_coeffs = np.array([
         data.cam0_intrinsics.k1, data.cam0_intrinsics.k2,
@@ -319,12 +300,52 @@ def _run_pnp_step(
     rotation_vector = -rotation_vector
     translation_vector = -rotation_matrix.T @ translation_vector
 
-    return rotation_vector, translation_vector, len(temporal_good_matches), reprojection_error
+    return rotation_vector, translation_vector, num_matches, reprojection_error
+
+
+def _run_pnp_step(
+    data: EuRoCMAVData,
+    points_3d: np.ndarray,
+    stereo_matches: list,
+    cam0_descriptors0: np.ndarray,
+    cam0_keypoints1,
+    cam0_descriptors1: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int, float]:
+    """PnP between two ORB-described frames (used by loop closure, where there are no tracks)."""
+    cam0_idx_to_3d_idx = {m.queryIdx: i for i, m in enumerate(stereo_matches)}
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    temporal_matches = bf.knnMatch(cam0_descriptors0, cam0_descriptors1, k=2)
+    temporal_good_matches = [m for m, n in temporal_matches if m.distance < 0.75 * n.distance]
+
+    object_points = []
+    image_points = []
+    for m in temporal_good_matches:
+        if m.queryIdx in cam0_idx_to_3d_idx:
+            idx_3d = cam0_idx_to_3d_idx[m.queryIdx]
+            object_points.append(points_3d[:, idx_3d])
+            image_points.append(cam0_keypoints1[m.trainIdx].pt)
+
+    return _solve_pnp(
+        data, np.array(object_points, dtype=np.float64), np.array(image_points, dtype=np.float64),
+        len(temporal_good_matches))
+
+
+def _run_track_pnp_step(
+    data: EuRoCMAVData, ref: OpticalFlowFrame, cur: OpticalFlowFrame,
+) -> tuple[np.ndarray, np.ndarray, int, float]:
+    """PnP between two frames via optical-flow track ids: tracks with a 3D point at `ref` and still
+    alive at `cur`. The match count is the number of such shared tracks.
+    """
+    common = [tid for tid in ref.stereo_point_cam0 if tid in cur.track_uv]
+    object_points = np.array([ref.stereo_point_cam0[tid] for tid in common], dtype=np.float64)
+    image_points = np.array([cur.track_uv[tid] for tid in common], dtype=np.float64)
+    return _solve_pnp(data, object_points, image_points, len(common))
 
 
 @dataclass(frozen=True)
 class LoopClosureCandidate:
-    from_frame: int              # earlier keyframe (into stereo_matching_result.frames)
+    from_frame: int              # earlier keyframe (frame index)
     to_frame: int                # later keyframe ("query") that revisits from_frame
     body_relative_pose: np.ndarray  # 4x4, from_frame_body <- to_frame_body
     num_matches: int
@@ -365,7 +386,8 @@ class _LoopClosureDetector:
     A bag-of-words shortlist (ORBVocabulary, see orb_vocabulary.py) ranks earlier keyframes cheaply,
     the best of the shortlist is re-scored with full descriptors, and the winner is verified by
     PnP/RANSAC (_run_pnp_step). A candidate must clear min_matches and the translation sanity bound.
-    The vocabulary is a fixed asset trained offline on a different sequence, so using it adds no
+    ORB features exist only for keyframes: they are computed here, on arrival, into
+    `keyframe_features` (shared with FrontendResult). The vocabulary is a fixed asset trained offline on a different sequence, so using it adds no
     lookahead.
 
     Only the best earlier candidate is kept per query, and same-event clusters are consolidated into
@@ -385,15 +407,17 @@ class _LoopClosureDetector:
 
     def __init__(
         self, data: EuRoCMAVData,
-        feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
+        frontend: FrontendFrameComputer,
+        optical_flow_result: OpticalFlowResult,
+        keyframe_features: dict[int, KeyframeFeatures],
         min_temporal_gap_s: float = 10.0,
         min_matches: int = 200,
         vocab: Optional[ORBVocabulary] = None,
     ) -> None:
         self._data = data
-        self._fd_result = feature_detection_result
-        self._sm_result = stereo_matching_result
+        self._frontend = frontend
+        self._of_result = optical_flow_result
+        self._features = keyframe_features
         self._min_temporal_gap_s = min_temporal_gap_s
         self._min_matches = min_matches
         self._vocab = vocab if vocab is not None else ORBVocabulary.load()
@@ -412,8 +436,11 @@ class _LoopClosureDetector:
         consolidation state machine. Returns edges from a cluster that just closed (its to_node may
         be several keyframes back).
         """
-        q_time = _elapsed_s(self._sm_result.frames[frame].timestamp_ns, self._first_ts)
-        q_desc_full = self._fd_result.frames[frame].cam0_descriptors
+        ts = self._of_result.frames[frame].timestamp_ns
+        if frame not in self._features:
+            self._features[frame] = self._frontend.compute_keyframe_features(ts)
+        q_time = _elapsed_s(ts, self._first_ts)
+        q_desc_full = self._features[frame].fd.cam0_descriptors
         query_vec = self._vocab.transform(q_desc_full[:self.PROBE_N]) if q_desc_full is not None else {}
         result = self._search(frame, q_time, query_vec)
         # Index this node's own BoW vector *after* searching -- it must never match itself, and
@@ -452,7 +479,7 @@ class _LoopClosureDetector:
         shortlist = self._bow_shortlist(q_time, query_vec)
         if not shortlist:
             return None
-        q_desc_full = self._fd_result.frames[frame].cam0_descriptors
+        q_desc_full = self._features[frame].fd.cam0_descriptors
 
         # Rank the shortlist by ratio-test match count on the strongest PROBE_N descriptors only,
         # then count the winner's matches with full descriptors (min_matches is on that scale).
@@ -465,17 +492,17 @@ class _LoopClosureDetector:
         q_probe = q_desc_full[:self.PROBE_N]
         best_score, best_c = -1, -1
         for c in shortlist:
-            score = _match_count(self._fd_result.frames[self._kf_frames[c]].cam0_descriptors[:self.PROBE_N], q_probe)
+            score = _match_count(self._features[self._kf_frames[c]].fd.cam0_descriptors[:self.PROBE_N], q_probe)
             if score > best_score:
                 best_score, best_c = score, c
-        best_full = _match_count(self._fd_result.frames[self._kf_frames[best_c]].cam0_descriptors, q_desc_full)
+        best_full = _match_count(self._features[self._kf_frames[best_c]].fd.cam0_descriptors, q_desc_full)
         if best_full < self._min_matches:
             return None
 
         c_frame = self._kf_frames[best_c]
-        c_sm = self._sm_result.frames[c_frame]
-        c_fd = self._fd_result.frames[c_frame]
-        q_fd = self._fd_result.frames[frame]
+        c_sm = self._features[c_frame].sm
+        c_fd = self._features[c_frame].fd
+        q_fd = self._features[frame].fd
         if not c_sm.matches:
             return None
         try:
@@ -526,49 +553,13 @@ class LandmarkObservation:
     point_cam0: np.ndarray
 
 
-# A stereo-matched cam0 keypoint is matched to the optical-flow track within this many pixels. KLT
-# tracks drift sub-pixel, so a small radius identifies the same corner without descriptors. 3.0
-# was too tight on V1_03_difficult's fast rotations; keep it under
-# optical_flow.MIN_TRACK_SEPARATION_PX (8) so it can't straddle two tracks.
-LANDMARK_SNAP_PX = 6.0
-
-
-def _snap_obs_to_tracks(
-    fd: FeatureDetectionFrame, sm: StereoMatchingFrame, optical_flow_frame: OpticalFlowFrame,
-) -> dict[int, int]:
-    """obs index (into sm.matches) -> optical-flow track id for the nearest live track within
-    LANDMARK_SNAP_PX. Each track claims at most one obs (its closest), since _LandmarkTrackBuilder
-    and the graph assume one observation per track per node.
-    """
-    if not sm.matches or not optical_flow_frame.track_uv:
-        return {}
-    obs_pts = np.array([fd.cam0_keypoints[m.queryIdx].pt for m in sm.matches], dtype=np.float32)
-    track_ids = list(optical_flow_frame.track_uv.keys())
-    track_pts = np.array([optical_flow_frame.track_uv[tid] for tid in track_ids], dtype=np.float32)
-    d = np.linalg.norm(obs_pts[:, None, :] - track_pts[None, :, :], axis=2)
-    nearest = d.argmin(axis=1)
-    nearest_dist = d[np.arange(len(obs_pts)), nearest]
-    obs_to_flow_tid: dict[int, int] = {}
-    claimed_tracks: set[int] = set()
-    for i in np.argsort(nearest_dist):
-        if nearest_dist[i] >= LANDMARK_SNAP_PX:
-            break
-        track_id = track_ids[nearest[i]]
-        if track_id in claimed_tracks:
-            continue
-        obs_to_flow_tid[int(i)] = track_id
-        claimed_tracks.add(track_id)
-    return obs_to_flow_tid
-
-
 class _LandmarkTrackBuilder:
-    """Chains stereo-matched features into persistent landmark tracks, one keyframe at a time via
+    """Chains optical-flow tracks into persistent landmark tracks, one keyframe at a time via
     add_keyframe.
 
-    Only cam0-cam1 stereo inliers are tracked, so every observation has a metric depth for
-    initialization; observations are pre-undistorted for a Cal3_S2 pinhole model. Correspondence
-    across keyframes comes from optical flow's track ids, not descriptor re-matching (which fails on
-    fast rotation, see OpticalFlowTracker).
+    Only tracks with a valid cam0-cam1 stereo measurement at the keyframe are observed, so every
+    observation has a metric depth for initialization; observations are pre-undistorted for a
+    Cal3_S2 pinhole model. Correspondence across keyframes is the optical-flow track id.
 
     There is deliberately no minimum-track-length filter here, since a track's final length isn't
     known where it starts; _process_node_landmarks decides per node whether a track is mature enough
@@ -577,13 +568,9 @@ class _LandmarkTrackBuilder:
 
     def __init__(
         self, data: EuRoCMAVData,
-        feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
         optical_flow_result: OpticalFlowResult,
         depth_min: float, depth_max: float,
     ) -> None:
-        self._fd_result = feature_detection_result
-        self._sm_result = stereo_matching_result
         self._of_result = optical_flow_result
         self._depth_min = depth_min
         self._depth_max = depth_max
@@ -602,26 +589,20 @@ class _LandmarkTrackBuilder:
         """Process the keyframe at graph node `node` (original frame `frame`), extending
         self.tracks. Returns the track ids that got a new observation here (continued or new).
         """
-        sm = self._sm_result.frames[frame]
+        of = self._of_result.frames[frame]
         touched: list[int] = []
-        if not sm.matches:
+        if not of.stereo_point_cam0:
             self._prev_flow_tid_to_tid = {}
             return touched
-        fd = self._fd_result.frames[frame]
-        q_idx = [m.queryIdx for m in sm.matches]
-        t_idx = [m.trainIdx for m in sm.matches]
-        uv0 = np.array([fd.cam0_keypoints[i].pt for i in q_idx], dtype=np.float64)
-        uv1 = np.array([fd.cam1_keypoints[i].pt for i in t_idx], dtype=np.float64)
+        flow_tids = list(of.stereo_point_cam0)
+        uv0 = np.array([of.track_uv[t] for t in flow_tids], dtype=np.float64)
+        uv1 = np.array([of.stereo_uv1[t] for t in flow_tids], dtype=np.float64)
         uv0u = cv2.undistortPoints(uv0.reshape(-1, 1, 2), self._K0, self._dist0, P=self._K0).reshape(-1, 2)
         uv1u = cv2.undistortPoints(uv1.reshape(-1, 1, 2), self._K1, self._dist1, P=self._K1).reshape(-1, 2)
-        pts = sm.points_3d.T  # (M, 3), row i <-> sm.matches[i]
+        pts = np.array([of.stereo_point_cam0[t] for t in flow_tids])
 
-        obs_to_flow_tid = _snap_obs_to_tracks(fd, sm, self._of_result.frames[frame])
         cur_flow_tid_to_tid: dict[int, int] = {}
-        for i in range(len(sm.matches)):
-            flow_tid = obs_to_flow_tid.get(i)
-            if flow_tid is None:
-                continue
+        for i, flow_tid in enumerate(flow_tids):
             landmark_obs = LandmarkObservation(node, uv0u[i], uv1u[i], pts[i])
             tid = self._prev_flow_tid_to_tid.get(flow_tid)
             if tid is None:
@@ -641,8 +622,8 @@ class _LandmarkTrackBuilder:
 class _KeyframeScanner:
     """Adaptive keyframing, fed one frame at a time via add_frame(i).
 
-    Frame i's fd/sm must already be in the result containers passed to __init__; later frames are
-    never touched. Returns the frame indices that became keyframes from processing frame i: usually
+    Frame i's optical flow must already be in the result container passed to __init__; later
+    frames are never touched. Returns the frame indices that became keyframes from processing frame i: usually
     0 or 1, occasionally 2 (the exception-retry path can resolve an earlier reference's fate).
     """
     MIN_GAP = 3
@@ -650,28 +631,24 @@ class _KeyframeScanner:
     COVIS_RATIO = 0.6
     TRANS_THRESH = 0.2
     ROT_THRESH = np.deg2rad(10.0)
-    PROBE_N = 500
     MIN_KF_MATCHES = 80
     DROP_MAX_GAP_S = 2 * MAX_GAP_S
 
     def __init__(
-        self, data: EuRoCMAVData,
-        feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
+        self, data: EuRoCMAVData, optical_flow_result: OpticalFlowResult,
     ) -> None:
         self._data = data
-        self._fd_result = feature_detection_result
-        self._sm_result = stereo_matching_result
+        self._of_result = optical_flow_result
         self.keyframes: list[int] = [0]
         self._ref_idx = 0
         self._ref_covis: Optional[int] = None
 
     def _stereo_count(self, frame_idx: int) -> int:
-        return len(self._sm_result.frames[frame_idx].matches)
+        return len(self._of_result.frames[frame_idx].stereo_point_cam0)
 
     def _accept_keyframe(self, candidate: int) -> Optional[int]:
-        elapsed_s = _elapsed_s(self._sm_result.frames[candidate].timestamp_ns,
-                               self._sm_result.frames[self.keyframes[-1]].timestamp_ns)
+        elapsed_s = _elapsed_s(self._of_result.frames[candidate].timestamp_ns,
+                               self._of_result.frames[self.keyframes[-1]].timestamp_ns)
         if self._stereo_count(candidate) < self.MIN_KF_MATCHES and elapsed_s <= self.DROP_MAX_GAP_S:
             return None
         self.keyframes.append(candidate)
@@ -680,15 +657,9 @@ class _KeyframeScanner:
     def add_frame(self, i: int) -> list[int]:
         accepted: list[int] = []
         while True:
-            ref_fd = self._fd_result.frames[self._ref_idx]
-            ref_sm = self._sm_result.frames[self._ref_idx]
-            cur_fd = self._fd_result.frames[i]
             try:
-                rvec, tvec, num_matches, _ = _run_pnp_step(
-                    self._data, ref_sm.points_3d, ref_sm.matches,
-                    ref_fd.cam0_descriptors[:self.PROBE_N], cur_fd.cam0_keypoints,
-                    cur_fd.cam0_descriptors[:self.PROBE_N],
-                )
+                rvec, tvec, num_matches, _ = _run_track_pnp_step(
+                    self._data, self._of_result.frames[self._ref_idx], self._of_result.frames[i])
             except Exception:
                 # Overlap with the reference is gone: anchor a keyframe at the
                 # last connected frame (kf is i-1 or i). If i-1, retry frame i
@@ -708,8 +679,8 @@ class _KeyframeScanner:
             gap = i - self._ref_idx
             translation = float(np.linalg.norm(tvec))
             rotation = float(np.linalg.norm(rvec))
-            elapsed_s = _elapsed_s(self._sm_result.frames[i].timestamp_ns,
-                                   self._sm_result.frames[self._ref_idx].timestamp_ns)
+            elapsed_s = _elapsed_s(self._of_result.frames[i].timestamp_ns,
+                                   self._of_result.frames[self._ref_idx].timestamp_ns)
 
             force = elapsed_s >= self.MAX_GAP_S
             allow = gap >= self.MIN_GAP
@@ -727,23 +698,19 @@ class _GtsamBuilder:
     """The ISAM2 factor graph, fed one new keyframe at a time via add_keyframe(frame_idx).
 
     Per keyframe: IMU factor, chained-PnP fallback, landmark reprojection factors, loop-closure
-    factors. Requires every frame's fd/sm from the previous keyframe through frame_idx (the PnP
-    fallback steps through intermediate frames); later frames are never touched.
+    factors. Requires every frame's optical flow from the previous keyframe through frame_idx (the
+    PnP fallback steps through intermediate frames); later frames are never touched.
     """
 
     def __init__(
         self, data: EuRoCMAVData,
-        feature_detection_result: FeatureDetectionResult,
-        stereo_matching_result: StereoMatchingResult,
         optical_flow_result: OpticalFlowResult,
         imu_samples: list[ImuSample],
         gravity: np.ndarray,
         first_keyframe_frame: int,
-        enable_loop_closure: bool = False,
+        loop_detector: Optional[_LoopClosureDetector] = None,
     ) -> None:
         self._data = data
-        self._fd_result = feature_detection_result
-        self._sm_result = stereo_matching_result
         self._of_result = optical_flow_result
 
         imu_timestamps_ns = np.array([s.timestamp_ns for s in imu_samples])
@@ -758,7 +725,7 @@ class _GtsamBuilder:
         self._cam0_T_body = np.linalg.inv(self._body_T_cam0)
 
         grav_win = max(1, int(data.imu0_rate_hz * 0.5))
-        first_cam_ts = stereo_matching_result.frames[first_keyframe_frame].timestamp_ns
+        first_cam_ts = optical_flow_result.frames[first_keyframe_frame].timestamp_ns
         i0 = int(np.argmin(np.abs(imu_timestamps_ns - first_cam_ts)))
         gravity_in_body = self._imu_lin_accs[i0:i0 + grav_win].mean(axis=0)
 
@@ -795,13 +762,9 @@ class _GtsamBuilder:
             gtsam.noiseModel.Isotropic.Sigma(2, PX_SIGMA))
         self._LM_PRIOR_NOISE = gtsam.noiseModel.Isotropic.Sigma(3, 5.0)
 
-        self._track_builder = _LandmarkTrackBuilder(
-            data, feature_detection_result, stereo_matching_result, optical_flow_result,
-            DEPTH_MIN, DEPTH_MAX)
+        self._track_builder = _LandmarkTrackBuilder(data, optical_flow_result, DEPTH_MIN, DEPTH_MAX)
         self._tracks = self._track_builder.tracks
-        self._loop_detector = (
-            _LoopClosureDetector(data, feature_detection_result, stereo_matching_result)
-            if enable_loop_closure else None)
+        self._loop_detector = loop_detector
 
         # node -> track ids observed there; and per-interval covisibility for the PnP gate. Keyed
         # by node index directly (not pre-sized by K, which isn't known until the run ends).
@@ -893,8 +856,8 @@ class _GtsamBuilder:
         bias_i = est.atConstantBias(self._B(j))
 
         kf_i, kf_next = self._prev_frame, frame_idx
-        kf_i_ts = self._sm_result.frames[kf_i].timestamp_ns
-        kf_next_ts = self._sm_result.frames[kf_next].timestamp_ns
+        kf_i_ts = self._of_result.frames[kf_i].timestamp_ns
+        kf_next_ts = self._of_result.frames[kf_next].timestamp_ns
 
         self._register_node_tracks(j + 1, self._track_builder.add_keyframe(j + 1, frame_idx))
         new_loop_edges = (
@@ -928,13 +891,9 @@ class _GtsamBuilder:
             pnp_cam0 = np.eye(4)
             pnp_ok = True
             for f in range(kf_i, kf_next):
-                sm_f = self._sm_result.frames[f]
-                fd_f, fd_f1 = self._fd_result.frames[f], self._fd_result.frames[f + 1]
                 try:
-                    rvec, tvec, _, _ = _run_pnp_step(
-                        self._data, sm_f.points_3d, sm_f.matches,
-                        fd_f.cam0_descriptors, fd_f1.cam0_keypoints, fd_f1.cam0_descriptors,
-                    )
+                    rvec, tvec, _, _ = _run_track_pnp_step(
+                        self._data, self._of_result.frames[f], self._of_result.frames[f + 1])
                 except Exception:
                     pnp_ok = False
                     break
@@ -1073,7 +1032,7 @@ def _get_full_gt_arrays(data: EuRoCMAVData) -> tuple[np.ndarray, np.ndarray, np.
 
 def _get_gtsam_result(
     data: EuRoCMAVData,
-    stereo_matching_result: StereoMatchingResult,
+    optical_flow_result: OpticalFlowResult,
     first_timestamp_ns: int,
     min_timestamp_ns: int,
     gt_timestamps_ns: np.ndarray,
@@ -1092,7 +1051,7 @@ def _get_gtsam_result(
     """
     K = len(poses)
 
-    kf_frames = [stereo_matching_result.frames[k] for k in keyframe_indices]
+    kf_frames = [optical_flow_result.frames[k] for k in keyframe_indices]
     cam_timestamps_ns = np.array([f.timestamp_ns for f in kf_frames])
     # Anchor to GT at the first GT sample inside the window (after start_s), consistent with
     # how the GT series is windowed.
@@ -1193,12 +1152,13 @@ def _compute(
     frontend_result: Optional[FrontendResult] = None,
 ) -> SlamResult:
     """Runs the whole SLAM stage as one incremental pass over [start_s, start_s + duration_s]: each
-    frame is computed (FrontendFrameComputer), then immediately offered to keyframe selection
+    frame is tracked (FrontendFrameComputer), then immediately offered to keyframe selection
     (_KeyframeScanner) and, for any keyframe, the pose graph (_GtsamBuilder), before the next frame
-    is touched.
+    is touched. ORB features are computed for keyframes only, by loop closure.
 
-    If on_partial_result is given, it's called after every keyframe with a full SlamResult
-    reflecting only what's been processed so far, to render the trajectory as it grows.
+    If on_partial_result is given, it's called after keyframes (at most every PARTIAL_RESULT_INTERVAL_S
+    of wall-clock time, since each snapshot re-derives the ATE/RPE metrics from scratch) with a full
+    SlamResult reflecting only what's been processed so far, to render the trajectory as it grows.
 
     frontend_result: if given, its empty containers are the ones filled frame by frame, so the
     caller can show the frontend's output live without computing it twice.
@@ -1235,29 +1195,20 @@ def _compute(
     # computed once for the partial snapshots too.
     extra_result = _get_extra_result(data, gt_result, imu_result, min_timestamp_ns, max_timestamp_ns, gravity)
 
-    # Each frame's fd/sm/of is appended to these growing containers, then immediately offered
-    # to _KeyframeScanner and _GtsamBuilder. Both read earlier frames from the same
-    # containers, so they are shared mutable state.
+    # Each frame's optical flow is appended to this growing container, then immediately offered to
+    # _KeyframeScanner and _GtsamBuilder. Both read earlier frames from it, so it is shared mutable
+    # state.
     set_progress(0.06, "Processing frames...")
     compute_t0 = time.monotonic()
     imu_samples = [s for s in data.imu_samples if min_timestamp_ns <= s.timestamp_ns <= max_timestamp_ns]
 
     frontend = FrontendFrameComputer(data)
     if frontend_result is None:
-        frontend_result = FrontendResult(
-            feature_detection=FeatureDetectionResult(frames=[], elapsed_s=0.0),
-            stereo_matching=StereoMatchingResult(frames=[], elapsed_s=0.0),
-            optical_flow=OpticalFlowResult(frames=[], elapsed_s=0.0),
-            elapsed_s=0.0)
-    feature_detection_result = frontend_result.feature_detection
-    stereo_matching_result = frontend_result.stereo_matching
+        frontend_result = FrontendResult(optical_flow=OpticalFlowResult(frames=[], elapsed_s=0.0))
     optical_flow_result = frontend_result.optical_flow
 
     def _process_frame(ts: int) -> None:
-        fd_frame, sm_frame, of_frame = frontend.add_frame(ts)
-        feature_detection_result.frames.append(fd_frame)
-        stereo_matching_result.frames.append(sm_frame)
-        optical_flow_result.frames.append(of_frame)
+        optical_flow_result.frames.append(frontend.add_frame(ts))
 
     def _build_partial_result() -> SlamResult:
         """A full SlamResult reflecting only what's processed so far: gt/imu/extra
@@ -1269,7 +1220,7 @@ def _compute(
         p_poses, p_vel, p_bias, p_rmse, p_lm = builder.current_estimate(recompute_window=0)
         # landmark_positions is likewise only populated at finalize().
         partial_gtsam_result = _get_gtsam_result(
-            data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
+            data, optical_flow_result, first_timestamp_ns, min_timestamp_ns,
             gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
             builder_keyframes, p_poses, p_vel, p_bias, p_rmse, p_lm, np.zeros((0, 3)),
         )
@@ -1282,30 +1233,35 @@ def _compute(
     # Keyframes the builder has actually consumed. scanner.keyframes can be ahead of it: one frame
     # can yield two keyframes, and both are in scanner.keyframes before the first reaches the graph.
     builder_keyframes = [0]
-    scanner = _KeyframeScanner(data, feature_detection_result, stereo_matching_result)
+    last_partial_t = 0.0
+    scanner = _KeyframeScanner(data, optical_flow_result)
+    loop_detector = (
+        _LoopClosureDetector(data, frontend, optical_flow_result, frontend_result.keyframe_features)
+        if enable_loop_closure else None)
     builder = _GtsamBuilder(
-        data, feature_detection_result, stereo_matching_result, optical_flow_result,
-        imu_samples, gravity, first_keyframe_frame=0, enable_loop_closure=enable_loop_closure)
+        data, optical_flow_result, imu_samples, gravity, first_keyframe_frame=0,
+        loop_detector=loop_detector)
     for i in range(1, N):
         set_progress(0.06 + (i / N) * (0.95 - 0.06), "Processing frames...")
         _process_frame(timestamps[i])
         for kf in scanner.add_frame(i):
             builder.add_keyframe(kf)
             builder_keyframes.append(kf)
-            if on_partial_result is not None:
+            if on_partial_result is not None and time.monotonic() - last_partial_t >= PARTIAL_RESULT_INTERVAL_S:
                 on_partial_result(_build_partial_result())
+                last_partial_t = time.monotonic()
     keyframe_indices = scanner.keyframes
     gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts = builder.finalize()
     landmark_positions = builder.landmark_positions()
-    # Frontend computation, scanning, and graph-building are now the same combined pass, so they
-    # no longer have separately measurable costs -- both diagnostics report the same total.
+    # Frontend computation, scanning, and graph-building are one combined pass, so they have no
+    # separately measurable costs -- both report the same total.
     compute_elapsed = time.monotonic() - compute_t0
-    for r in (feature_detection_result, stereo_matching_result, optical_flow_result, frontend_result):
+    for r in (optical_flow_result, frontend_result):
         r.elapsed_s = compute_elapsed
 
     set_progress(0.96, "Aligning to ground truth...")
     gtsam_result = _get_gtsam_result(
-        data, stereo_matching_result, first_timestamp_ns, min_timestamp_ns,
+        data, optical_flow_result, first_timestamp_ns, min_timestamp_ns,
         gt_timestamps_ns, gt_positions_all, gt_rotation_matrices_all,
         keyframe_indices, gtsam_poses, velocities, biases, reprojection_rmse, landmark_counts,
         landmark_positions,
@@ -1346,14 +1302,8 @@ class SlamSolver:
         self._cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self._enable_loop_closure = enable_loop_closure
         self.result: Optional[SlamResult] = None
-        # The frontend's per-frame output, filled by _compute and complete once `loading`
-        # is False. Frames are appended one list at a time, so a reader should only trust
-        # indices below min(len(fd.frames), len(sm.frames), len(of.frames)).
-        self.frontend_result = FrontendResult(
-            feature_detection=FeatureDetectionResult(frames=[], elapsed_s=0.0),
-            stereo_matching=StereoMatchingResult(frames=[], elapsed_s=0.0),
-            optical_flow=OpticalFlowResult(frames=[], elapsed_s=0.0),
-            elapsed_s=0.0)
+        # The frontend's output, filled by _compute and complete once `loading` is False.
+        self.frontend_result = FrontendResult(optical_flow=OpticalFlowResult(frames=[], elapsed_s=0.0))
         self.loading: bool = True
         self.error: Optional[str] = None
         self.progress: float = 0.0

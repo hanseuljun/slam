@@ -1,6 +1,6 @@
 from slam.data import CameraIntrinsics, EuRoCMAVData, ImuSample, LeicaSample
-from slam.feature_detection import FeatureDetectionFrame, FeatureDetectionResult
-from slam.frontend import FrontendResult
+from slam.feature_detection import FeatureDetectionFrame
+from slam.frontend import FrontendResult, KeyframeFeatures
 from slam.optical_flow import OpticalFlowFrame, OpticalFlowResult
 from slam.slam import SlamSolver
-from slam.stereo_matching import StereoMatchingFrame, StereoMatchingResult
+from slam.stereo_matching import StereoMatchingFrame
