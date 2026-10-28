@@ -21,10 +21,10 @@ FB_THRESHOLD_PX = 1.0
 STEREO_FB_THRESHOLD_PX = 2.0
 STEREO_SAMPSON_PX = 2.5
 # Detect new corners whenever the alive count drops below this, keeping density roughly constant.
-TARGET_TRACK_COUNT = 300
+TARGET_TRACK_COUNT = 150
 # Skip the corner detector until at least this many tracks are missing, so it isn't run for a
 # handful of points every frame.
-MIN_REPLENISH = 60
+MIN_REPLENISH = 30
 # Shi-Tomasi corner quality relative to the strongest corner in the image.
 CORNER_QUALITY = 0.01
 # Don't start a track this close to an already-alive one -- new points should fill gaps left by
